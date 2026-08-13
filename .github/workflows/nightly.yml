@@ -1,0 +1,139 @@
+# Ночной обход базы — тот же самый, что дома, только без домашнего компьютера.
+#
+# Что происходит каждую ночь: сюда приезжает база, индексатор обходит обсуждения
+# ВК (новые паки, переписанные сообщения, перезалитые файлы), обновляет статистику
+# и уровни сложности, размечает новичков через Gemini, выкладывает изменившееся
+# в Cloudflare — и увозит базу обратно на полку.
+#
+# Чего здесь нарочно нет: первого разбора двенадцати тысяч паков. Он качает
+# и распаковывает многомегабайтные архивы, и делать его надо один раз дома,
+# обычным `npm run index`. Сюда попадает уже разобранная база, а ночная работа
+# после этого — несколько десятков новых паков и обновление чисел.
+#
+# Где между ночами лежит база: приложением к отметке релиза «state» в этом же
+# репозитории (см. scripts/state.js). Ключей для этого не нужно — у Actions
+# есть свой пропуск в собственный репозиторий.
+#
+# Какие ключи нужны и как их положить — в README, раздел про ночной обход.
+# Здесь их нет и быть не может: они лежат в секретах репозитория.
+
+name: Ночной обход базы
+
+on:
+  schedule:
+    # 22:00 UTC — это час ночи по Москве. Москва круглый год на UTC+3,
+    # часы не переводит, поэтому строка одна и на зиму, и на лето.
+    #
+    # Расписание в GitHub — обещание, а не будильник: при общей загрузке запуск
+    # сдвигается на десяток-другой минут. Для ночного обхода это безразлично.
+    - cron: '0 22 * * *'
+
+  # Тот же обход руками — со страницы Actions. Пригождается, чтобы проверить
+  # ключи, не дожидаясь ночи, или догнать пропущенный день.
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: 'Шаги через запятую (vk, parse, stats, topics, summary, logos, specials, recalc). Пусто — обычный ночной набор.'
+        required: false
+        default: ''
+      deploy:
+        description: 'Выкладывать результат на сайт'
+        type: boolean
+        default: true
+
+# Двум обходам разом делать нечего: они возьмут одну и ту же базу с полки,
+# и тот, кто закончит вторым, затрёт работу первого.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+
+    # Предел у самого GitHub — шесть часов. Ставим чуть меньше, чтобы обход
+    # успел положить базу обратно, а не был убит на полуслове.
+    timeout-minutes: 320
+
+    permissions:
+      # Нужно ровно одно: перезаписать приложение к отметке релиза.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # Чем уменьшать обложки. Нужно редко — только для паков, разобранных
+      # этой же ночью: готовые копии приезжают вместе с базой (см. build-web.js).
+      - name: Поставить ImageMagick
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends imagemagick ffmpeg
+
+      - run: npm ci
+
+      - name: Проверить, что ключи на месте
+        env:
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          for name in VK_TOKEN GEMINI_API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            eval "value=\${$name}"
+            if [ -z "$value" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Не хватает ключей:$missing"
+            echo "Кладутся так: gh secret set ИМЯ --repo ${{ github.repository }}"
+            exit 1
+          fi
+          echo "Все четыре ключа на месте."
+
+      - name: Забрать базу с полки
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --no-warnings scripts/state.js pull
+
+      - name: Обойти базу и выложить
+        env:
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Через переменные, а не подстановкой в саму команду: то, что пришло
+          # из формы запуска, в строку оболочки попадать не должно.
+          STEPS: ${{ inputs.steps }}
+          DEPLOY: ${{ inputs.deploy }}
+        run: |
+          args=""
+          if [ -n "$STEPS" ]; then args="--steps=$STEPS"; fi
+          if [ "$DEPLOY" = "false" ]; then args="$args --no-deploy"; fi
+          node --no-warnings scripts/nightly.js $args
+
+      # Кладём базу обратно в любом случае — даже если обход оборвался на середине.
+      # Разобранное до обрыва — это работа, которую не надо делать заново; а вот
+      # если база даже не приехала, класть на полку нечего, и трогать лежащее там
+      # нельзя ни в коем случае.
+      #
+      # --force потому, что tar сохраняет время файлов: приехавшая база выглядит
+      # старее того, что лежит на полке, и обычная защита от затирания свежего
+      # приняла бы её за вчерашнюю копию.
+      - name: Вернуть базу на полку
+        if: always() && steps.state.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --no-warnings scripts/state.js push --force
+
+      - name: Отчёт об обходе
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: отчёт
+          path: data/nightly
+          retention-days: 30
+          if-no-files-found: ignore

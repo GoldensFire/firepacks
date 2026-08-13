@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Профиль — FirePacks</title>
+	<link rel="icon" href="/favicon.ico" sizes="any">
+	<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+	<header class="topbar">
+		<div class="topbar__inner">
+			<a class="brand" href="/" title="На главную страницу библиотеки">
+				<span class="brand__mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.6 3.4-1 5.1-2.7 6.9C7.6 10.6 6 12.4 6 15a6 6 0 0 0 12 0c0-2.3-1.1-4.2-2.4-5.7.1 1.2-.3 2.1-1.2 2.7.7-3.7-.9-7-2.4-10Z"/></svg></span>
+				<span class="brand__text">FirePacks</span>
+			</a>
+
+			<a class="topbar__link" href="/">← К библиотеке</a>
+			<a class="topbar__link" href="/authors">Топ авторов →</a>
+		</div>
+	</header>
+
+	<main class="profile">
+		<section class="profile__head">
+			<div class="profile__who">
+				<div class="profile__avatar" id="avatar">?</div>
+				<div class="profile__who-text">
+					<h1 class="profile__name" id="userName">Гость</h1>
+					<p class="hint" id="userHint"></p>
+					<div class="profile__account" id="account"></div>
+				</div>
+			</div>
+
+			<div class="profile__numbers" id="numbers"></div>
+		</section>
+
+		<!-- Чёрный список живёт только здесь: в колонке фильтров библиотеки он
+		     занимал место рядом с тем, чем пользуются каждый раз, а сам нужен
+		     редко — ровно тогда, когда спрятанное надо вернуть. -->
+		<section class="profile__block" id="blacklistBlock" hidden>
+			<h2 class="filters__title">Чёрный список</h2>
+			<div class="profile__chips" id="blacklist"></div>
+			<p class="hint">Спрятанные паки и авторы не попадают в выдачу библиотеки. Вернуть их можно только отсюда.
+				Добавляют в список красным знаком запрета: пак — кнопкой в ряду действий карточки,
+				автор — знаком у его имени.</p>
+		</section>
+
+		<section class="profile__block">
+			<h2 class="filters__title">Сыграно по сложности</h2>
+			<div class="profile__chips" id="levels"></div>
+		</section>
+
+		<section class="profile__block">
+			<h2 class="filters__title">Сыграно по типу пака</h2>
+			<div class="profile__chips" id="topics"></div>
+		</section>
+
+		<section class="profile__block" id="authorsBlock" hidden>
+			<h2 class="filters__title">Авторы, к которым возвращаешься</h2>
+			<div class="profile__chips" id="authors"></div>
+		</section>
+
+		<section class="profile__block">
+			<div class="content__head">
+				<h2 class="filters__title">Библиотека сыгранного</h2>
+				<div id="resultInfo" class="result-info"></div>
+			</div>
+
+			<div id="grid" class="grid"></div>
+		</section>
+	</main>
+
+	<script src="/common.js"></script>
+	<script src="/icons.js"></script>
+	<script src="/profile.js"></script>
+</body>
+</html>

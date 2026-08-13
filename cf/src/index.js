@@ -1,0 +1,241 @@
+// Сайт на Cloudflare Workers: то же API, что у домашнего src/server.js, поверх
+// той же базы, переехавшей в D1.
+//
+// Чего здесь нет и не будет — сборки базы. Индексатор ходит в ВК и Gemini,
+// разбирает архивы паков и пишет в базу часами; на чужом адресе ему нечего
+// делать, а открытая кнопка «обновить», дёргающая чужие ключи, там просто
+// опасна. Поэтому база собирается дома обычным запуском и уезжает сюда готовой
+// (см. scripts/export-d1.js), а всё, что начинается с /api/update/, отвечает
+// отказом. Дома это тот же режим, что FIREPACKS_READONLY=1.
+//
+// Вёрстку, скрипты и обложки Worker не отдаёт вовсе: их раздаёт сам Cloudflare
+// из cf/public, не будя этот код. Сюда попадает только то, что не нашлось
+// в статике, — то есть /api/… и /auth/….
+
+import {
+	listPackages, getFacets, getTopAuthors, getProfile,
+	setPlayed, isPlayedPack, playedCount,
+} from './library.js';
+
+import {
+	hasDiscord, currentUser, startLogin, finishLogin, logout,
+	rate, setBlacklisted, listBlacklist, SESSION_COOKIE,
+} from './account.js';
+
+/**
+ * Ответы, одинаковые для всех, кто не вошёл, — выдача и настройки. Их держит
+ * у себя сам Cloudflare, и следующий такой же запрос до этого кода не доходит
+ * вовсе: ни Worker, ни база не тревожатся.
+ *
+ * Зачем это поверх памяти изолята. Изолятов много, живут они недолго и заводятся
+ * заново в каждом городе, откуда пришёл посетитель, — а на редко посещаемом сайте
+ * почти каждый гость попадает в свежий, пустой. То есть счёт «найдено» и числа
+ * сложностей, которые приходится считать по всей отобранной части базы,
+ * пересчитывались бы почти на каждое открытие страницы. У D1 прочитанные строки —
+ * расход по тарифу, и на пятнадцати тысячах паков именно они, а не число
+ * обращений, кончались бы первыми. Общий кэш складывает это в один пересчёт
+ * на город раз в пять минут.
+ *
+ * Пять минут, а не час: база меняется ночью, но выложить её могут и днём,
+ * и ждать полчаса, пока сайт заметит новые паки, никто не должен.
+ */
+const PUBLIC_TTL = 300;
+
+/** Что вообще можно так отдавать: только чтение и только общее. */
+const CACHEABLE = new Set(['/api/packages', '/api/facets', '/api/authors']);
+
+/**
+ * Вошёл ли пришедший — по печенью, без похода в базу. Именно этим решается,
+ * можно ли брать общий ответ и класть в него свой: у вошедшего в выдаче
+ * его собственное — своя оценка, свои отметки, свой чёрный список, — и общая
+ * полка тут означала бы чужие отметки у чужого человека.
+ */
+const anonymous = request => !(request.headers.get('Cookie') ?? '').includes(`${SESSION_COOKIE}=`);
+
+function json(data, status = 200) {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: {
+			'Content-Type': 'application/json; charset=utf-8',
+			// Ответы личные: в них и своя оценка, и свои отметки. Пусть их
+			// не подхватит ни промежуточный кэш, ни соседняя вкладка.
+			'Cache-Control': 'private, no-store',
+		},
+	});
+}
+
+const text = (body, status) => new Response(body, {
+	status,
+	headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+});
+
+/** Тело запроса разбором JSON. Кривое тело — это ошибка запроса, а не поломка сайта. */
+async function readJson(request) {
+	try {
+		return await request.json();
+	} catch {
+		return null;
+	}
+}
+
+export default {
+	async fetch(request, env, ctx) {
+		const url = new URL(request.url);
+
+		// Общий ответ для невошедших: если такой уже лежит — отдаём его и на этом
+		// всё. Читаем из общей полки только те запросы, которые на неё и кладём
+		// (см. anonymous): иначе вошедший получил бы ответ, посчитанный без него.
+		const shareable = request.method === 'GET' && CACHEABLE.has(url.pathname) && anonymous(request);
+		const cache = caches.default;
+
+		if (shareable) {
+			const found = await cache.match(request);
+
+			if (found) {
+				return found;
+			}
+		}
+
+		/**
+		 * Кладёт готовый общий ответ на полку и отдаёт его же. «Vary: Cookie»
+		 * тут не украшение: без него браузер, однажды получив ответ для гостя,
+		 * показал бы его и после входа — ключ кэша адреса печенья не включает.
+		 */
+		const share = response => {
+			if (!shareable || response.status !== 200) {
+				return response;
+			}
+
+			const copy = new Response(response.body, response);
+			copy.headers.set('Cache-Control', `public, max-age=${PUBLIC_TTL}`);
+			copy.headers.set('Vary', 'Cookie');
+			ctx.waitUntil(cache.put(request, copy.clone()));
+
+			return copy;
+		};
+
+		try {
+			// Кто спрашивает. Без входа это просто null, и сайт работает как раньше:
+			// оценки видны, но не ставятся, чёрный список не применяется.
+			const user = hasDiscord(env) ? await currentUser(env.DB, request) : null;
+			const userId = user?.id ?? null;
+
+			// ————— вход через Discord —————
+
+			if (url.pathname === '/auth/discord') {
+				return hasDiscord(env) ? startLogin(env, url) : text('Вход через Discord не настроен', 404);
+			}
+
+			if (url.pathname === '/auth/discord/callback') {
+				return hasDiscord(env)
+					? await finishLogin(env.DB, env, request, url)
+					: text('Вход через Discord не настроен', 404);
+			}
+
+			if (url.pathname === '/auth/logout' && request.method === 'POST') {
+				return await logout(env.DB, request);
+			}
+
+			if (url.pathname === '/api/me') {
+				return json({ user, hasDiscord: hasDiscord(env) });
+			}
+
+			if (url.pathname === '/api/rate' && request.method === 'POST') {
+				if (!user) {
+					return json({ error: 'Оценивать паки можно, только войдя через Discord' }, 401);
+				}
+
+				const body = await readJson(request) ?? {};
+				const key = String(body.packKey ?? '');
+
+				// Оценка ставится только тому, во что играли. Иначе она превращается
+				// в оценку обложки и описания: пак с красивым названием набирал бы
+				// баллы, ни разу не побывав на столе.
+				if (!await isPlayedPack(env.DB, userId, key)) {
+					return json({ error: 'Оценить пак можно после того, как он отмечен сыгранным' }, 400);
+				}
+
+				try {
+					return json(await rate(env.DB, key, userId, body.score));
+				} catch (error) {
+					return json({ error: error.message }, 400);
+				}
+			}
+
+			if (url.pathname === '/api/blacklist' && request.method === 'POST') {
+				// Дома чёрный список можно вести и без входа: там он принадлежит
+				// установке, как и отметки «сыграно». Здесь хозяин обязателен —
+				// посетителей много, и общий список означал бы, что один спрятал,
+				// а пропало у всех.
+				if (!user) {
+					return json({ error: 'Чёрный список появляется после входа через Discord' }, 401);
+				}
+
+				const { kind, value, label, blacklisted } = await readJson(request) ?? {};
+
+				try {
+					return json(await setBlacklisted(env.DB, userId, kind, value, label, blacklisted));
+				} catch (error) {
+					return json({ error: error.message }, 400);
+				}
+			}
+
+			if (url.pathname === '/api/blacklist') {
+				return json({ items: await listBlacklist(env.DB, userId) });
+			}
+
+			if (url.pathname === '/api/packages') {
+				return share(json(await listPackages(env.DB, url.searchParams, userId)));
+			}
+
+			if (url.pathname === '/api/facets') {
+				// Общая часть считается редко и лежит готовой у изолята, а «сколько
+				// сыграно» у каждого своё и спрашивается всегда.
+				const [facets, played] = await Promise.all([
+					getFacets(env.DB),
+					playedCount(env.DB, userId),
+				]);
+
+				return share(json({ ...facets, played, hasDiscord: hasDiscord(env), user }));
+			}
+
+			if (url.pathname === '/api/authors') {
+				return share(json(await getTopAuthors(env.DB, url.searchParams)));
+			}
+
+			if (url.pathname === '/api/profile') {
+				return json(await getProfile(env.DB, userId, await listBlacklist(env.DB, userId)));
+			}
+
+			if (url.pathname === '/api/played' && request.method === 'POST') {
+				if (!user) {
+					return json({ error: 'Отмечать паки сыгранными можно, только войдя через Discord' }, 401);
+				}
+
+				const { id, played } = await readJson(request) ?? {};
+				const result = await setPlayed(env.DB, userId, id, played);
+
+				return json(result, result.error ? 404 : 200);
+			}
+
+			// Обновлять тут нечего: индексатора нет, а Gemini и ВК с чужого адреса
+			// дёргать не следует. Отвечаем отказом до разбора конкретного метода,
+			// чтобы не осталось ни одной работающей лазейки.
+			if (url.pathname.startsWith('/api/update/')) {
+				return json({ error: 'Обновление базы отключено: сайт работает только на чтение' }, 403);
+			}
+
+			if (url.pathname.startsWith('/api/')) {
+				return json({ error: 'Неизвестный метод' }, 404);
+			}
+
+			// Сюда доходит только то, чего в статике не нашлось. Обычно это ошибка
+			// в адресе, и пусть на неё отвечает та же страница «не найдено»,
+			// что и на всё остальное.
+			return await env.ASSETS.fetch(request);
+		} catch (error) {
+			console.error(error);
+			return json({ error: error.message }, 500);
+		}
+	},
+};

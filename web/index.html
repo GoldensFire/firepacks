@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>FirePacks — библиотека паков SIGame</title>
+	<link rel="icon" href="/favicon.ico" sizes="any">
+	<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+	<header class="topbar">
+		<div class="topbar__inner">
+			<a class="brand" href="/" title="На главную страницу библиотеки">
+				<span class="brand__mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.6 3.4-1 5.1-2.7 6.9C7.6 10.6 6 12.4 6 15a6 6 0 0 0 12 0c0-2.3-1.1-4.2-2.4-5.7.1 1.2-.3 2.1-1.2 2.7.7-3.7-.9-7-2.4-10Z"/></svg></span>
+				<span class="brand__text">FirePacks</span>
+			</a>
+
+			<input id="search" class="search" type="search" placeholder="Поиск по названию, автору, тегам, описанию и тексту сообщения" autocomplete="off">
+
+			<div class="counters" id="counters"></div>
+
+			<a class="topbar__link" href="/authors">Топ авторов →</a>
+			<a class="topbar__link" href="/profile">Профиль →</a>
+			<a class="topbar__link" id="updateLink" href="/update">Обновить базу →</a>
+
+			<div class="account" id="account"></div>
+		</div>
+	</header>
+
+	<main class="layout">
+		<section class="content">
+			<!-- Сортировка стоит над выдачей, а не в колонке фильтров: она отвечает
+			     не на вопрос «какие паки показать», а на вопрос «в каком порядке»,
+			     и относится к самому списку, который под ней. -->
+			<div class="toolbar">
+				<!-- На узком экране колонка фильтров встаёт над выдачей и занимает
+				     собой пару экранов: до первого пака при этом надо было долго
+				     листать. Поэтому там она свёрнута, а разворачивает её эта кнопка;
+				     на широком экране колонка видна всегда, и кнопки нет. -->
+				<button id="filtersToggle" class="button filters-toggle" type="button" aria-expanded="false" aria-controls="filters">
+					<span>Фильтры</span>
+					<span class="filters-toggle__count" id="filtersCount" hidden></span>
+				</button>
+
+				<!-- Подписей «Сортировка» и «Порядок» здесь нет: в списке и так
+				     написано «Сначала новые», «По названию», «По убыванию», и слово
+				     над ним повторяло бы то же самое второй раз. Для тех, кто
+				     не видит содержимое списка, остались aria-label. -->
+				<label class="toolbar__field">
+					<select id="sort" class="select" aria-label="Сортировка">
+						<option value="added">Сначала новые</option>
+						<option value="popular_week">Популярные за неделю</option>
+						<option value="popular_month">Популярные за месяц</option>
+						<option value="popular_quarter">Популярные за 3 месяца</option>
+						<option value="popular_half">Популярные за полгода</option>
+						<option value="popular_year">Популярные за год</option>
+						<option value="games">Популярные за всё время</option>
+						<option value="rating">По оценке игроков</option>
+						<option value="difficulty">По сложности (от сложных)</option>
+						<option value="questions">По числу вопросов</option>
+						<option value="size">По размеру</option>
+						<option value="name">По названию</option>
+						<option value="anime">По доле аниме</option>
+						<option value="games_share">По доле игр</option>
+						<option value="movies">По доле кино и сериалов</option>
+						<option value="cartoons">По доле мультиков</option>
+						<option value="music">По доле музыки</option>
+						<option value="franchise">По повторам одной франшизы</option>
+					</select>
+				</label>
+
+				<label class="toolbar__field">
+					<select id="dir" class="select" aria-label="Порядок">
+						<option value="desc">По убыванию</option>
+						<option value="asc">По возрастанию</option>
+					</select>
+				</label>
+
+				<div id="resultInfo" class="result-info">Загрузка…</div>
+			</div>
+
+			<p class="hint" id="sortHint"></p>
+
+			<div class="content__head">
+				<div id="activeFilters" class="active-filters"></div>
+			</div>
+
+			<div id="grid" class="grid"></div>
+
+			<div id="pager" class="pager"></div>
+		</section>
+
+		<aside class="filters" id="filters">
+			<section class="filters__block">
+				<h2 class="filters__title">Сложность</h2>
+				<div id="levels" class="levels"></div>
+
+				<label class="check" id="unratedRow">
+					<input type="checkbox" id="unrated" checked>
+					<span>Показывать паки без оценки</span>
+				</label>
+			</section>
+
+			<section class="filters__block">
+				<h2 class="filters__title">Тип пака</h2>
+				<div id="topics" class="levels"></div>
+			</section>
+
+			<!-- Язык записан внутри самого файла пака. Указывают его далеко не все,
+			     поэтому «Без указания» — такой же полноправный пункт, как русский
+			     и английский: спрятать его значило бы спрятать половину базы. -->
+			<section class="filters__block">
+				<h2 class="filters__title">Язык пака</h2>
+				<div id="languages" class="levels"></div>
+			</section>
+
+			<section class="filters__block">
+				<h2 class="filters__title">Отметки</h2>
+
+				<label class="check">
+					<input type="checkbox" id="hidePlayed">
+					<span>Скрыть сыгранные</span>
+				</label>
+
+				<label class="check">
+					<input type="checkbox" id="onlyPlayed">
+					<span>Только сыгранные</span>
+				</label>
+			</section>
+
+			<section class="filters__block">
+				<h2 class="filters__title">Темы</h2>
+				<input id="tagSearch" class="select" type="search" placeholder="Найти тему" autocomplete="off">
+				<div id="tags" class="checklist"></div>
+			</section>
+
+			<!-- Отдельного фильтра по повторам франшиз здесь нет: он повторял то,
+			     что и так стоит на карточках. Нажатие на повтор в самой карточке
+			     по-прежнему показывает все паки с этой франшизой, а снять отбор
+			     можно ярлыком над выдачей. -->
+
+			<!-- Чёрный список отсюда убран: он живёт в профиле, вместе с остальным
+			     личным. В колонке фильтров ему было не место — снимать оттуда лишнее
+			     приходится редко, а места он занимал столько же, сколько настоящие
+			     фильтры, которыми пользуются каждый раз. -->
+
+			<button id="reset" class="button button--ghost">Сбросить фильтры</button>
+		</aside>
+	</main>
+
+	<script src="/common.js"></script>
+	<script src="/icons.js"></script>
+	<script src="/app.js"></script>
+</body>
+</html>

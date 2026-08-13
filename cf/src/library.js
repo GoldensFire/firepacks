@@ -1,0 +1,801 @@
+// Библиотека паков поверх D1: то же, что делает src/server.js дома, но запросы
+// уходят в базу Cloudflare и потому все до одного асинхронные.
+//
+// SQL здесь тот же, что и дома, — и это не совпадение, а требование: сложность,
+// доли тематик и порядок выдачи должны считаться одинаково с обеих сторон,
+// иначе один и тот же пак оказывался бы «лёгким» дома и «средним» на сайте.
+// Расхождений ровно два, и оба вынужденные:
+//
+//   1. Поиск не кладётся во временную таблицу (её у D1 нет) — найденное
+//      подставляется в запрос списком номеров, см. search.js.
+//   2. Отметки «сыграно» лежат по общему ключу пака и принадлежат вошедшему,
+//      а не установке: посетителей тут много, см. cf/schema.sql.
+
+import { settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY } from '../../src/settings.js';
+import { jsonOrDefault, normalizeRounds, buildAuthorKey, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import { findHits, idList } from './search.js';
+
+/**
+ * «Самые популярные за период» — это паки, появившиеся в обсуждении не раньше
+ * указанного срока, от самых играемых к самым редким. Период задаёт не окно
+ * подсчёта игр (сервис статистики умеет отдавать только общее число за всё
+ * время), а отсечку по времени сообщения ВК, из которого взят файл.
+ */
+const PERIODS = { week: 7, month: 30, quarter: 91, half: 182, year: 365 };
+
+/** Начало периода в миллисекундах: в них же лежит vk_ts. */
+const periodStart = days => Date.now() - days * 24 * 60 * 60 * 1000;
+
+/** Период сортировки, если он выбран: sort=popular_year → 365. */
+function periodOf(sortKey) {
+	return sortKey.startsWith('popular_') ? PERIODS[sortKey.slice('popular_'.length)] ?? null : null;
+}
+
+/** Доля тематики из сохранённого JSON. У неразмеченных паков её нет вовсе. */
+const shareOf = key => `COALESCE(json_extract(p.topic_shares, '$.${key}'), -1)`;
+
+/**
+ * Язык пака одним ключом: «ru-RU» и «ru» — это один и тот же русский, а пак,
+ * в котором язык не указан вовсе, попадает в unknown.
+ */
+const LANG_SQL = `COALESCE(NULLIF(LOWER(SUBSTR(p.language, 1, 2)), ''), 'unknown')`;
+
+const SORTS = {
+	// Порядковый номер строки в таблице к «новизне» отношения не имеет: паки
+	// добавляются в базу в том порядке, в каком их встретил обход обсуждения.
+	added: 'p.vk_ts',
+	name: 'p.name COLLATE NOCASE',
+	games: 'COALESCE(s.started_games, -1)',
+	questions: 'COALESCE(p.question_count, -1)',
+	size: 'COALESCE(p.size, -1)',
+	anime: shareOf('anime'),
+	games_share: shareOf('games'),
+	movies: shareOf('movies'),
+	cartoons: shareOf('cartoons'),
+	music: shareOf(MUSIC_KEY),
+	franchise: 'COALESCE(p.franchise_top_share, -1)',
+	// Паки без нужного числа оценок сортировать не по чему: они уходят в конец,
+	// а не притворяются нулями.
+	rating: `COALESCE(CASE WHEN r.rating_count >= ${Number(settings.minRatingsForScore)} THEN r.rating_average END, -1)`,
+};
+
+/**
+ * Общее начало всех запросов о паках.
+ *
+ * Отметка «сыграно» подшивается по общему ключу пака и по хозяину: без входа
+ * туда уходит null, ничего не находится, и пак просто не отмечен. Дома для
+ * этого хватало соединения по номеру строки — там отметка была одна на всех.
+ *
+ * Первым параметром такого запроса всегда идёт номер вошедшего.
+ */
+const BASE_FROM = `
+	FROM packages p
+	LEFT JOIN stats s ON s.package_id = p.id
+	LEFT JOIN played pl ON pl.pack_key = ${PACK_KEY_SQL} AND pl.user_id = ?
+	LEFT JOIN (
+		SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
+		FROM ratings GROUP BY pack_key
+	) r ON r.pack_key = ${PACK_KEY_SQL}
+`;
+
+/** Своя оценка пака. Отдельным подзапросом: без входа спрашивать не о чем. */
+const MY_SCORE = `(SELECT score FROM ratings WHERE pack_key = ${PACK_KEY_SQL} AND user_id = ?) AS my_score`;
+
+const PLAYED_FLAG = 'CASE WHEN pl.pack_key IS NULL THEN 0 ELSE 1 END AS played';
+
+const STATS_FIELDS = `s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
+	s.found AS stats_found`;
+
+/**
+ * Сколько паков у каждого автора. Число стоит на карточке рядом с именем: одно
+ * дело — пак человека, который выложил тридцать штук, и совсем другое —
+ * единственный пак случайного автора, и по одному имени этого не видно.
+ *
+ * Ответ запоминается изолятом: он одинаков для всех паков страницы, а меняется
+ * только при заливке базы, то есть в лучшем случае раз в несколько дней.
+ */
+const AUTHOR_COUNTS_TTL = 10 * 60 * 1000;
+
+let authorCountsCache = null;
+let authorCountsAt = 0;
+
+async function authorPackCounts(db) {
+	if (authorCountsCache && Date.now() - authorCountsAt < AUTHOR_COUNTS_TTL) {
+		return authorCountsCache;
+	}
+
+	const { results } = await db.prepare(`
+		SELECT a.author_key, COUNT(DISTINCT ${PACK_KEY_SQL}) AS c
+		FROM pack_authors a JOIN packages p ON p.id = a.package_id
+		WHERE p.status = 'ok'
+		GROUP BY a.author_key
+	`).all();
+
+	authorCountsCache = new Map(results.map(row => [row.author_key, row.c]));
+	authorCountsAt = Date.now();
+	return authorCountsCache;
+}
+
+function toPackage(row, counts) {
+	const authors = jsonOrDefault(row.authors, []);
+	const ratingCount = row.rating_count ?? 0;
+
+	return {
+		id: row.id,
+		// Ключ, общий для всех копий пака: к нему привязаны оценки, отметки и ЧС
+		packKey: packKey(row),
+		name: row.name,
+		fileName: row.file_name,
+		authors,
+		// Сколько паков у каждого из них — по порядку, тем же списком
+		authorPacks: authors.map(author => counts.get(buildAuthorKey(author)) ?? 1),
+		tags: jsonOrDefault(row.tags, []),
+		rounds: normalizeRounds(row.rounds),
+		contentStat: jsonOrDefault(row.content_stat, {}),
+		authorDifficulty: row.author_difficulty,
+		language: row.language,
+		packDate: row.pack_date,
+		size: row.size,
+		questionCount: row.question_count,
+		roundCount: row.round_count,
+		themeCount: row.theme_count,
+		// Аукционы, коты в мешке и вопросы без риска. null — «пак разобран до того,
+		// как их научились считать»: это не ноль, и сайт про такой пак молчит
+		specialCount: row.special_count ?? null,
+		specialStat: row.special_stat ? jsonOrDefault(row.special_stat, {}) : null,
+		url: row.url,
+		// Карточке нужен квадратик 72×72, а не заставка на весь экран. Считать копию
+		// на лету здесь нечем и не нужно: обложки уезжают наверх готовыми
+		// (см. scripts/build-web.js) и отдаются Cloudflare из статики, без участия
+		// Worker. Имя копии — то же, что там: общий thumbName из settings.js.
+		logo: row.logo_state === 'ok' && row.logo_file ? `/logos/thumb/${thumbName(row.logo_file)}` : null,
+		topicShares: jsonOrDefault(row.topic_shares, {}),
+		primaryTopic: row.primary_topic,
+		primaryShare: row.primary_share,
+		// Франшизы, к которым пак возвращается не по одному разу
+		franchises: jsonOrDefault(row.franchises, []),
+		summary: row.summary,
+		// Имя выложившего наружу не отдаём: в интерфейсе это просто «Источник»
+		vkDate: row.vk_date,
+		vkTs: row.vk_ts,
+		vkTopic: row.vk_topic,
+		vkComment: row.vk_comment,
+		commentText: row.comment_text,
+		played: row.played === 1,
+		// Оценки игроков — то, чего не знает статистика SIGame: она считает,
+		// сколько раз пак запускали, а не понравился ли он.
+		rating: {
+			count: ratingCount,
+			// Средний балл до порога наружу не отдаём вовсе: спрятать его на странице
+			// мало — число всё равно уехало бы в браузер и нашлось бы в ответе API
+			average: ratingCount >= settings.minRatingsForScore
+				? Math.round(row.rating_average * 10) / 10
+				: null,
+			mine: row.my_score ?? null,
+		},
+		stats: row.stats_found === 1
+			? {
+				startedGames: row.started_games,
+				completedGames: row.completed_games,
+				// Показанные вопросы нужны сайту, чтобы объяснить, почему оценки ещё нет
+				shown: row.shown,
+				rightPercent: row.right_percent,
+				takePercent: row.take_percent,
+				level: row.level,
+				levelName: row.level ? LEVELS[row.level].name : null,
+				levelKey: row.level ? LEVELS[row.level].key : null,
+			}
+			: null,
+	};
+}
+
+/**
+ * Условия отбора и параметры к ним. Порядок параметров — это порядок, в котором
+ * условия стоят в тексте запроса: D1 подставляет их подряд, и перестановка
+ * условий местами без перестановки параметров тихо ломает выдачу.
+ */
+function buildWhere(query, userId, hits) {
+	const conditions = [`p.status = 'ok'`];
+	const params = [];
+
+	// Личный чёрный список: что человек однажды спрятал, больше ему не показываем.
+	// Пак прячется вместе со всеми своими копиями (ключ общий), автор — по тому же
+	// ключу, по которому работает фильтр «показать паки автора».
+	if (userId && query.get('showBlacklisted') !== '1') {
+		conditions.push(`NOT EXISTS (
+			SELECT 1 FROM blacklist b
+			WHERE b.user_id = ? AND b.kind = 'pack' AND b.value = ${PACK_KEY_SQL}
+		)`);
+		params.push(userId);
+
+		conditions.push(`NOT EXISTS (
+			SELECT 1 FROM blacklist b
+			JOIN pack_authors pa ON pa.author_key = b.value AND pa.package_id = p.id
+			WHERE b.user_id = ? AND b.kind = 'author'
+		)`);
+		params.push(userId);
+	}
+
+	// Найденное поиском подставлено списком номеров, а не подшито таблицей:
+	// см. search.js, там же и о том, почему это безопасно.
+	if (hits) {
+		conditions.push(`p.id IN (${idList([...hits.exact, ...hits.fuzzy])})`);
+	}
+
+	const levels = (query.get('levels') ?? '').split(',').map(v => parseInt(v, 10)).filter(Number.isFinite);
+
+	// Выбранная сложность — это и есть ответ на вопрос «показывать ли без оценки»: нет.
+	if (levels.length > 0) {
+		conditions.push(`s.level IN (${levels.map(() => '?').join(',')})`);
+		params.push(...levels);
+	} else if (query.get('unrated') !== '1') {
+		conditions.push('s.level IS NOT NULL');
+	}
+
+	// Тем можно выбрать сразу несколько: пак подходит, если у него есть хотя бы одна
+	const tags = (query.get('tag') ?? '').split(',').map(t => t.trim()).filter(Boolean);
+
+	if (tags.length > 0) {
+		conditions.push(`(${tags.map(() => 'p.tags_key LIKE ?').join(' OR ')})`);
+		params.push(...tags.map(t => `%|${t.toLowerCase()}|%`));
+	}
+
+	// Языков тоже можно выбрать несколько: в базе рядом лежат русские, английские
+	// и паки, где язык не указан вовсе, — и выбирают обычно «мне понятные», а не один
+	const languages = [...new Set((query.get('lang') ?? '').split(',').map(l => l.trim().toLowerCase()).filter(Boolean))];
+
+	if (languages.length > 0) {
+		conditions.push(`${LANG_SQL} IN (${languages.map(() => '?').join(',')})`);
+		params.push(...languages);
+	}
+
+	const author = (query.get('author') ?? '').trim();
+
+	if (author) {
+		conditions.push('EXISTS (SELECT 1 FROM pack_authors a WHERE a.package_id = p.id AND a.author_key = ?)');
+		params.push(buildAuthorKey(author));
+	}
+
+	// Типов пака тоже можно выбрать несколько: подходит тот, что попал хотя бы в один.
+	// Условия разнородные (ярлык, его отсутствие, доля музыки), поэтому собираются
+	// поштучно и склеиваются через OR.
+	const topics = [...new Set((query.get('topic') ?? '').split(',').map(t => t.trim()).filter(Boolean))];
+
+	if (topics.length > 0) {
+		const parts = [];
+
+		for (const topic of topics) {
+			if (topic === 'unknown') {
+				parts.push('p.primary_topic IS NULL');
+			} else if (topic === MUSIC_KEY) {
+				// Музыка не спорит с остальными тематиками, поэтому и фильтр по ней — не по ярлыку,
+				// а по доле: аниме-пак с опенингами должен попадать и сюда тоже.
+				parts.push(`(p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?)`);
+				params.push(settings.musicThreshold);
+			} else {
+				parts.push('p.primary_topic = ?');
+				params.push(topic);
+			}
+		}
+
+		conditions.push(`(${parts.join(' OR ')})`);
+	}
+
+	// Все паки, где эта франшиза попала в повторы, — не только те, где она главная
+	const franchise = (query.get('franchise') ?? '').trim();
+
+	if (franchise) {
+		conditions.push(`EXISTS (SELECT 1 FROM json_each(p.franchises) WHERE json_extract(value, '$.name') = ?)`);
+		params.push(franchise);
+	}
+
+	if (query.get('hidePlayed') === '1') {
+		conditions.push('pl.pack_key IS NULL');
+	}
+
+	if (query.get('onlyPlayed') === '1') {
+		conditions.push('pl.pack_key IS NOT NULL');
+	}
+
+	// Отсечка по времени появления в обсуждении живёт здесь, а не в сортировке:
+	// иначе счётчик «найдено» считал бы паки, которых в выдаче нет.
+	const period = periodOf(query.get('sort') ?? 'added');
+
+	if (period) {
+		conditions.push('p.vk_ts IS NOT NULL AND p.vk_ts >= ?');
+		params.push(periodStart(period));
+	}
+
+	return { where: conditions.join(' AND '), params };
+}
+
+/**
+ * Сколько паков каждой сложности осталось при нынешних фильтрах. Числа стоят
+ * в колонке слева, и общие по базе там врали: выбрав «Аниме», человек видел
+ * «Лёгких — 812», а в выдаче их оказывалось четырнадцать.
+ *
+ * Сама сложность из подсчёта выброшена нарочно: иначе у выбранного уровня
+ * стояло бы его же число, а у остальных — нули, и переключиться было бы не на что.
+ */
+function levelsQuery(db, query, userId, hits) {
+	const asked = new URLSearchParams(query);
+	asked.delete('levels');
+	asked.set('unrated', '1');
+
+	const { where, params } = buildWhere(asked, userId, hits);
+
+	return db.prepare(`
+		SELECT s.level AS level, COUNT(*) AS c
+		${BASE_FROM}
+		WHERE ${where} AND s.level IS NOT NULL
+		GROUP BY s.level
+	`).bind(userId, ...params);
+}
+
+/**
+ * Числа «найдено» и «сколько какой сложности» при этих фильтрах.
+ *
+ * Их приходится считать по всей отобранной части базы — двадцатью четырьмя
+ * строками выдачи тут не обойтись, — и это самое дорогое, что делает сайт:
+ * сама выдача берёт из указателя два десятка строк, а эти два счёта проходят
+ * по всем, сколько бы их ни было. На пятнадцати тысячах паков одно открытие
+ * главной страницы читает из-за них десятки тысяч строк, а у D1 прочитанные
+ * строки — расход по тарифу, и упирается сайт в них гораздо раньше, чем
+ * в число самих обращений.
+ *
+ * Спасает то, что база меняется только при заливке, а фильтры у большинства
+ * одни и те же: главная страница без фильтров — это один и тот же счёт для
+ * всех и на весь день. Поэтому ответ на каждый набор фильтров изолят держит
+ * у себя те же пять минут, что и остальную общую часть.
+ *
+ * Вошедшим счёт не запоминается вовсе. У них в отборе участвует личное —
+ * чёрный список и отметки «сыграно», — и общая копилка показала бы одному
+ * человеку числа другого. Их запросы считаются каждый раз заново.
+ */
+const COUNTS_TTL = 5 * 60 * 1000;
+
+/** Сколько разных наборов фильтров помним. Дальше вытесняется самый старый. */
+const COUNTS_MAX = 200;
+
+const countsCache = new Map();
+
+function cachedCounts(key) {
+	if (!key) {
+		return null;
+	}
+
+	const found = countsCache.get(key);
+
+	if (!found || Date.now() - found.at > COUNTS_TTL) {
+		return null;
+	}
+
+	return found.value;
+}
+
+function rememberCounts(key, value) {
+	if (!key) {
+		return;
+	}
+
+	// Map хранит ключи в порядке добавления, поэтому самый старый — первый.
+	if (countsCache.size >= COUNTS_MAX) {
+		countsCache.delete(countsCache.keys().next().value);
+	}
+
+	countsCache.set(key, { at: Date.now(), value });
+}
+
+export async function listPackages(db, query, userId) {
+	// Поиск считается в памяти: он прощает опечатки, а такое сравнение SQL не умеет
+	const hits = await findHits(db, query.get('search') ?? '');
+	const { where, params } = buildWhere(query, userId, hits);
+
+	const sortKey = query.get('sort') ?? 'added';
+	const direction = query.get('dir') === 'asc' ? 'ASC' : 'DESC';
+
+	let orderBy;
+
+	if (periodOf(sortKey)) {
+		orderBy = `${SORTS.games} ${direction}`;
+	} else if (sortKey === 'added') {
+		// Паки с неразобранным временем сообщения уходят в конец при любом
+		// направлении: у «сначала новые» им места нет ни с той, ни с другой стороны.
+		//
+		// NULLS LAST вместо прежнего первого условия «p.vk_ts IS NULL» — порядок
+		// тот же, а цена другая, и здесь она важнее, чем дома: выражение перед
+		// сортировкой не давало взять порядок из указателя, и база складывала
+		// в память все подходящие паки целиком, чтобы отдать двадцать четыре.
+		// В D1 такие строки не просто время — они считаются по тарифу, и главная
+		// страница на пятнадцати тысячах паков читала бы их все при каждом открытии.
+		orderBy = `${SORTS.added} ${direction} NULLS LAST`;
+	} else if (sortKey === 'difficulty') {
+		// Сложность — это доля вопросов, на которые решились ответить: чем она ниже, тем пак труднее
+		orderBy = `s.take_percent ${direction === 'DESC' ? 'ASC' : 'DESC'} NULLS LAST`;
+	} else {
+		orderBy = `${SORTS[sortKey] ?? SORTS.added} ${direction}`;
+	}
+
+	// Паки, найденные с прощённой опечаткой, идут после точных попаданий,
+	// а внутри каждой группы сохраняется выбранная сортировка.
+	if (hits) {
+		orderBy = `(CASE WHEN p.id IN (${idList(hits.exact)}) THEN 0 ELSE 1 END), ${orderBy}`;
+	}
+
+	const pageSize = Math.min(Math.max(parseInt(query.get('pageSize') ?? '24', 10) || 24, 1), 100);
+	const page = Math.max(parseInt(query.get('page') ?? '1', 10) || 1, 1);
+	const offset = (page - 1) * pageSize;
+
+	const listQuery = db.prepare(`
+		SELECT p.*, ${STATS_FIELDS}, ${PLAYED_FLAG},
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		${BASE_FROM}
+		WHERE ${where}
+		ORDER BY ${orderBy}, p.id DESC
+		LIMIT ? OFFSET ?
+	`).bind(userId, userId, ...params, pageSize, offset);
+
+	// Ключ счёта — сам отбор, а не адрес страницы: и «где» со своими значениями
+	// решает всё. Страница, размер страницы и порядок в него не входят нарочно —
+	// от них числа не меняются, а листающий выдачу человек попадает в уже
+	// посчитанное вместо того, чтобы пересчитывать базу на каждой странице.
+	const countsKey = userId ? null : JSON.stringify([where, params]);
+	let counted = cachedCounts(countsKey);
+
+	let rows;
+
+	if (counted) {
+		// Считать нечего — остаётся сама выдача, и это ровно те двадцать четыре
+		// строки, которые уедут человеку.
+		rows = await listQuery.all();
+	} else {
+		// Три запроса разом: D1 живёт за сетью, и три отдельные ходки туда заметны
+		// глазом там, где дома всё считалось в одном процессе.
+		const [total, list, levels] = await db.batch([
+			db.prepare(`SELECT COUNT(*) AS c ${BASE_FROM} WHERE ${where}`).bind(userId, ...params),
+			listQuery,
+			levelsQuery(db, query, userId, hits),
+		]);
+
+		const levelCounts = {};
+
+		for (const row of levels.results) {
+			levelCounts[row.level] = row.c;
+		}
+
+		counted = { total: total.results[0].c, levels: levelCounts };
+		rememberCounts(countsKey, counted);
+		rows = list;
+	}
+
+	const counts = await authorPackCounts(db);
+
+	return {
+		total: counted.total,
+		page,
+		pageSize,
+		levels: counted.levels,
+		packages: rows.results.map(row => toPackage(row, counts)),
+	};
+}
+
+/**
+ * Всё, что не зависит от того, кто спрашивает: списки тем, языков, франшиз
+ * и числа по базе. Меняется только при заливке базы, поэтому изолят держит
+ * готовый ответ у себя — иначе каждое открытие страницы стоило бы десятка
+ * запросов, обходящих всю таблицу.
+ */
+const FACETS_TTL = 5 * 60 * 1000;
+
+let facetsCache = null;
+let facetsAt = 0;
+
+export async function getFacets(db) {
+	if (facetsCache && Date.now() - facetsAt < FACETS_TTL) {
+		return facetsCache;
+	}
+
+	const [tagRows, levelRows, topicRows, unknownTopic, musicTopic, languageRows, totals] =
+		await db.batch([
+			db.prepare(`SELECT tags FROM packages WHERE status = 'ok'`),
+			db.prepare('SELECT level, COUNT(*) AS c FROM stats WHERE level IS NOT NULL GROUP BY level'),
+			db.prepare(`
+				SELECT primary_topic, COUNT(*) AS c FROM packages
+				WHERE status = 'ok' AND primary_topic IS NOT NULL GROUP BY primary_topic
+			`),
+			db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'ok' AND primary_topic IS NULL`),
+			// Музыкальных считаем по доле, а не по ярлыку: у аниме-пака с опенингами
+			// ярлык будет «Аниме-пак», но в музыкальные он попасть должен.
+			db.prepare(`
+				SELECT COUNT(*) AS c FROM packages p
+				WHERE p.status = 'ok' AND p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?
+			`).bind(settings.musicThreshold),
+			// Списка франшиз здесь больше нет: отдельного фильтра по ним в колонке
+			// не осталось, а json_each по всей таблице стоил дороже всех прочих
+			// запросов вместе взятых — на D1 это ещё и строки, которые считаются.
+			//
+			// Языки паков. Там, где язык не указан, стоит unknown — таких паков
+			// в базе заметная часть, и прятать их из фильтра нельзя.
+			db.prepare(`
+				SELECT ${LANG_SQL} AS lang, COUNT(*) AS c
+				FROM packages p WHERE p.status = 'ok'
+				GROUP BY lang ORDER BY c DESC
+			`),
+			db.prepare(`
+				SELECT
+					(SELECT COUNT(*) FROM packages WHERE status = 'ok') AS total,
+					(SELECT COUNT(*) FROM stats WHERE level IS NOT NULL) AS rated,
+					(SELECT COUNT(*) FROM packages WHERE status = 'ok' AND vk_ts IS NOT NULL) AS dated
+			`),
+		]);
+
+	// Теги в паках пишут кто как: «Аниме», «аниме», «anime». Считаем их одним и тем же
+	// и показываем то написание, которое встречается чаще.
+	const groups = new Map();
+
+	for (const row of tagRows.results) {
+		for (const tag of jsonOrDefault(row.tags, [])) {
+			const key = tag.trim().toLowerCase();
+
+			if (!key) {
+				continue;
+			}
+
+			let group = groups.get(key);
+
+			if (!group) {
+				group = { count: 0, spellings: new Map() };
+				groups.set(key, group);
+			}
+
+			group.count++;
+			group.spellings.set(tag, (group.spellings.get(tag) ?? 0) + 1);
+		}
+	}
+
+	const tagCounts = new Map();
+
+	for (const group of groups.values()) {
+		const [best] = [...group.spellings.entries()].sort((a, b) => b[1] - a[1]);
+		tagCounts.set(best[0], group.count);
+	}
+
+	const levelCounts = {};
+
+	for (const row of levelRows.results) {
+		levelCounts[row.level] = row.c;
+	}
+
+	const topicCounts = {};
+
+	for (const row of topicRows.results) {
+		topicCounts[row.primary_topic] = row.c;
+	}
+
+	topicCounts.unknown = unknownTopic.results[0].c;
+	topicCounts[MUSIC_KEY] = musicTopic.results[0].c;
+
+	facetsCache = {
+		tags: [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count })),
+		languages: languageRows.results.map(row => ({
+			key: row.lang,
+			name: LANGUAGE_NAMES[row.lang] ?? row.lang.toUpperCase(),
+			count: row.c,
+		})),
+		specialNames: SPECIAL_NAMES,
+		levels: levelCounts,
+		levelNames: LEVELS,
+		topics: topicCounts,
+		topicNames: TOPICS,
+		topicThreshold: settings.topicThreshold,
+		musicThreshold: settings.musicThreshold,
+		total: totals.results[0].total,
+		rated: totals.results[0].rated,
+		minGames: settings.minGamesForDifficulty,
+		// Второй порог оценки: одних игр мало, по паку ещё должно быть показано
+		// столько вопросов. Без него сайт обещал оценку, которая не появлялась.
+		minShown: settings.minShownForDifficulty,
+		thresholds: settings.difficultyThresholds,
+		// Доля правильных ответов, ниже которой пак считается ступенью сложнее
+		hardRight: settings.hardRightPercent,
+		franchiseMinThemes: settings.franchiseMinThemes,
+		franchiseDominantShare: settings.franchiseDominantShare,
+		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё
+		readOnly: true,
+		playerUri: settings.playerUri,
+		// Прятать и отмечать без входа здесь нельзя: посетителей много, и список
+		// без хозяина оказался бы общим — один спрятал, у всех пропало
+		localBlacklist: false,
+		minRatings: settings.minRatingsForScore,
+		// Паки, у которых не разобралось время сообщения ВК, в подборки «за период»
+		// не попадают — сайт пишет, скольких это касается.
+		datedPackages: totals.results[0].dated,
+	};
+
+	facetsAt = Date.now();
+	return facetsCache;
+}
+
+/**
+ * Топ авторов по числу игр. Считается по статистике SIGame: сколько раз запускали
+ * паки этого автора — всего, а не «сколько раз запускали за период». Окно подсчёта
+ * игр сервис статистики отдавать не умеет вовсе, поэтому период здесь означает
+ * ровно то же, что и в подборках «популярное за месяц»: берутся паки, выложенные
+ * в обсуждение за этот срок, а игры у них считаются за всё время.
+ */
+const AUTHOR_PERIODS = { month: 30, half: 182, year: 365, all: null };
+
+export async function getTopAuthors(db, query) {
+	const asked = query.get('period') ?? 'all';
+	const periodKey = Object.hasOwn(AUTHOR_PERIODS, asked) ? asked : 'all';
+	const days = AUTHOR_PERIODS[periodKey];
+
+	const params = [];
+	let filter = `p.status = 'ok'`;
+
+	if (days) {
+		filter += ' AND p.vk_ts IS NOT NULL AND p.vk_ts >= ?';
+		params.push(periodStart(days));
+	}
+
+	// Копии одного пака сводятся к одной строке: иначе автор, чей пак выложили
+	// дважды, получал бы двойной счёт игр.
+	const { results } = await db.prepare(`
+		WITH picked AS (
+			SELECT ${PACK_KEY_SQL} AS pack_key, MIN(p.id) AS id
+			FROM packages p WHERE ${filter}
+			GROUP BY pack_key
+		)
+		SELECT a.author_key AS key, MIN(a.author) AS name,
+			COUNT(*) AS packs,
+			SUM(COALESCE(s.started_games, 0)) AS games,
+			SUM(CASE WHEN s.found = 1 THEN 1 ELSE 0 END) AS known,
+			SUM(COALESCE(p.question_count, 0)) AS questions
+		FROM picked
+		JOIN pack_authors a ON a.package_id = picked.id
+		JOIN packages p ON p.id = picked.id
+		LEFT JOIN stats s ON s.package_id = picked.id
+		GROUP BY a.author_key
+		ORDER BY games DESC, packs DESC, name COLLATE NOCASE
+		LIMIT 200
+	`).bind(...params).all();
+
+	return {
+		period: periodKey,
+		// Сколько всего авторов попало в подборку — список обрезан двумя сотнями
+		total: results.length,
+		authors: results.map((row, index) => ({
+			place: index + 1,
+			name: row.name,
+			packs: row.packs,
+			games: row.games,
+			// У скольких паков автора статистика вообще нашлась: остальные считаются
+			// нулём игр, и без этого числа ноль выглядел бы как «в них не играют»
+			known: row.known,
+			questions: row.questions,
+		})),
+	};
+}
+
+/**
+ * Отмечает пак сыгранным или снимает отметку. Наружу приходит номер строки,
+ * как и дома, а ложится отметка по общему ключу пака — то есть сразу на все
+ * его копии. Дома то же самое делалось перебором копий (twinPackages);
+ * здесь достаточно не искать копии вовсе.
+ */
+export async function setPlayed(db, userId, id, played) {
+	const row = await db.prepare(`SELECT ${PACK_KEY_SQL} AS pack_key FROM packages p WHERE p.id = ?`)
+		.bind(id).first();
+
+	if (!row) {
+		return { error: 'Такого пака нет' };
+	}
+
+	if (played) {
+		await db.prepare('INSERT OR REPLACE INTO played (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
+			.bind(userId, row.pack_key, Date.now()).run();
+	} else {
+		await db.prepare('DELETE FROM played WHERE user_id = ? AND pack_key = ?')
+			.bind(userId, row.pack_key).run();
+	}
+
+	return { id, played: Boolean(played), affected: 1 };
+}
+
+/**
+ * Отмечен ли пак сыгранным. Спрашивается перед тем, как принять оценку: оценка
+ * ставится только тому, во что играли, — иначе она превращается в оценку обложки.
+ */
+export async function isPlayedPack(db, userId, key) {
+	if (!key) {
+		return false;
+	}
+
+	const row = await db.prepare('SELECT 1 AS ok FROM played WHERE user_id = ? AND pack_key = ?')
+		.bind(userId, key).first();
+
+	return Boolean(row);
+}
+
+/** Сколько паков отмечено сыгранными у этого человека. Стоит счётчиком в шапке. */
+export async function playedCount(db, userId) {
+	if (!userId) {
+		return 0;
+	}
+
+	const row = await db.prepare('SELECT COUNT(*) AS c FROM played WHERE user_id = ?').bind(userId).first();
+	return row.c;
+}
+
+/**
+ * Профиль: всё, что известно про сыгранное. Копии одного пака считаются за один —
+ * отметка ставится сразу на все, и в библиотеке они иначе двоились бы.
+ */
+export async function getProfile(db, userId, blacklist) {
+	if (!userId) {
+		return { total: 0, questions: 0, levels: {}, topics: {}, blacklist: [], favouriteAuthors: [], packages: [] };
+	}
+
+	// Пак, выложенный в обсуждение дважды, лежит в базе двумя строками, а отметка
+	// у него одна на обе: показать надо одну карточку, а не две одинаковых.
+	// Этим и занят MIN(p.id) — он не просто выбирает номер, а решает, из какой
+	// строки взять остальные поля: SQLite берёт их с той строки, на которой
+	// сошёлся минимум. Тот же приём, что и дома, только там сходились по времени
+	// отметки, а здесь оно у копий общее.
+	const { results } = await db.prepare(`
+		SELECT p.*, ${STATS_FIELDS}, 1 AS played, pl.marked_at AS marked_at, MIN(p.id) AS chosen_id,
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		FROM played pl
+		JOIN packages p ON ${PACK_KEY_SQL} = pl.pack_key
+		LEFT JOIN stats s ON s.package_id = p.id
+		LEFT JOIN (
+			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
+			FROM ratings GROUP BY pack_key
+		) r ON r.pack_key = pl.pack_key
+		WHERE p.status = 'ok' AND pl.user_id = ?
+		GROUP BY pl.pack_key
+		ORDER BY pl.marked_at DESC
+	`).bind(userId, userId).all();
+
+	const counts = await authorPackCounts(db);
+	const packages = results.map(row => ({ ...toPackage(row, counts), markedAt: row.marked_at }));
+
+	const levels = {};
+	const topics = {};
+	const authors = new Map();
+	let questions = 0;
+
+	for (const pack of packages) {
+		questions += pack.questionCount ?? 0;
+
+		const level = pack.stats?.level;
+
+		if (level) {
+			levels[level] = (levels[level] ?? 0) + 1;
+		}
+
+		const topic = pack.primaryTopic ?? 'unknown';
+		topics[topic] = (topics[topic] ?? 0) + 1;
+
+		for (const author of pack.authors) {
+			authors.set(author, (authors.get(author) ?? 0) + 1);
+		}
+	}
+
+	return {
+		total: packages.length,
+		questions,
+		levels,
+		topics,
+		// Личный чёрный список: показать его больше негде, а снимать оттуда
+		// как-то надо — на карточках спрятанного по определению не видно
+		blacklist,
+		// Авторы, чьих паков сыграно больше одного: «любимые» из одного пака не выходят
+		favouriteAuthors: [...authors.entries()]
+			.filter(([, count]) => count > 1)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 12)
+			.map(([name, count]) => ({ name, count })),
+		packages,
+	};
+}

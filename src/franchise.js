@@ -1,0 +1,448 @@
+// Сведение названий франшиз к одному произведению. Порт логики из SI-HYX
+// (sigstats/analysis.py: _Names, _Groups, _similar, _title_root, _FORMAT_WORDS).
+//
+// Зачем это нужно. Модель называет франшизу темы словами, и одно и то же
+// произведение приходит от неё в разных видах: «Атака титанов» и «Shingeki no
+// Kyojin», «Джоджо» и «Невероятные приключения ДжоДжо», «Fate: Zero» и
+// «Fate/Apocrypha», «Наруто» и «наруто». Простое сравнение строк считает всё это
+// разными франшизами, и пак, который двадцать тем подряд спрашивает про одно и
+// то же, повторов не получает вовсе.
+//
+// Что здесь делается — ровно то же и в том же порядке, что в SI-HYX:
+//   1. Служебные слова франшизами не считаются: «Аниме», «Опенинги», «Вокалоид»,
+//      «Манга» — это формат или площадка, а не произведение. Без этого пак
+//      с угадайкой опенингов склеивается в одну выдуманную франшизу «Опенинг».
+//   2. Написания одной темы («Атака титанов» + «Shingeki no Kyojin») связываются
+//      между собой: дальше тема, где названо только русское имя, сойдётся с той,
+//      где названо только английское.
+//   3. Опечатки прощаются: «Джоджо» и «Джо джо» — одно и то же (порог схожести
+//      подобран в SI-HYX на живых паках).
+//   4. Сезоны и спин-оффы сводятся к общему началу: «Fate: Zero» и
+//      «Fate/Apocrypha» — это «Fate».
+//   5. Короткое название присоединяется к длинному: «ДжоДжо» и «Невероятные
+//      приключения ДжоДжо». По вхождению ЦЕЛЫМ СЛОВОМ и не с начала строки —
+//      иначе «Повелитель Рагнарёка» стал бы «Повелителем».
+//
+// Отличие от SI-HYX по существу одно: там разбор идёт по отдельным вопросам с их
+// ответами, здесь — по темам с готовым названием франшизы от модели. Всё, что
+// касается разбора авторской подписи в ответе (скобки, слэши, фильмографии,
+// ответы-механики), сюда не переносится: до этого уровня у FirePacks просто нет
+// данных — в базе лежит имя темы и короткая выжимка, а не сами вопросы.
+
+/** Порог схожести названий (0..1). Значение из SI-HYX, подобрано под опечатку. */
+const SIMILARITY = 0.88;
+
+/** Названия короче этого не связываем по вхождению: слишком общие. */
+const MIN_NAME = 4;
+
+const TRIM = /[^0-9a-zA-Zа-яА-ЯёЁ ]+/gu;
+const WORD = /[a-zа-я]{2,}/;
+const CYRILLIC = /[а-яё]/i;
+const HAS_DIGIT = /\d/;
+const DIGIT_RUN = /\d+/g;
+
+/** Подзаголовок отделяют двоеточием, точкой, тире или слэшем. */
+const SUBTITLE = /[:.\/]|\s+[-–—]\s+/g;
+
+/**
+ * Слова, которые называют формат, площадку или жанр, а не произведение.
+ * Набор перенесён из SI-HYX без изменений: он собран на живых паках, и каждое
+ * слово там стоит из-за конкретного пака, который без него разъезжался.
+ */
+const FORMAT_WORDS = new Set([
+	'op', 'ed', 'ost', 'ova', 'oad', 'ona', 'pv', 'mv', 'amv', 'tv', 'cm',
+	'opening', 'ending', 'insert', 'song', 'special', 'movie', 'anime', 'manga',
+	'main', 'theme', 'soundtrack', 'тема', 'саундтрек',
+	'оп', 'эд', 'ост', 'оав', 'пв', 'амв', 'тв', 'опенинг', 'эндинг', 'опенинги',
+	'эндинги', 'вставка', 'заставка', 'концовка', 'клип', 'трейлер', 'спешл',
+	'манга', 'манхва', 'манхуа', 'маньхуа', 'ранобэ', 'ранобе', 'новелла', 'вн',
+	'визуальная', 'иллюстрация', 'арт', 'обложка', 'постер', 'кадр', 'скриншот',
+	'косплей', 'аниме', 'мультфильм', 'мультсериал', 'мультик', 'фильм', 'игра',
+	'игры', 'дорама', 'сериал', 'кино',
+	'сезон', 'серия', 'эпизод', 'глава', 'том', 'часть', 'версия', 'оригинал',
+	// Площадка вместо названия: «Вокалоид» — это то же самое, что «Аниме».
+	'vocaloid', 'вокалоид', 'вокалоиды', 'utau', 'утау',
+	'nightcore', 'найткор', 'кавер', 'каверы', 'cover',
+	'песня', 'песни', 'songs', 'музыка', 'music',
+	'франшиза', 'адаптация', 'экранизация', 'ремейк', 'продолжение',
+	// Способы модели сказать «франшизы тут нет»
+	'разное', 'различные', 'прочее', 'общее', 'смешанное', 'солянка',
+]);
+
+/** Текст к виду для сравнения: lower, ё→е, без знаков препинания и эмодзи. */
+export function normalize(text) {
+	if (!text) {
+		return '';
+	}
+
+	return String(text)
+		.replace(/ё/g, 'е')
+		.replace(/Ё/g, 'Е')
+		.toLowerCase()
+		.replace(TRIM, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+/**
+ * Ключ сравнения названия. Пустая строка значит «в счёт не идёт»: название
+ * обязано содержать хотя бы одно настоящее слово из двух букв, иначе «2003»
+ * и «1 2 3» стали бы франшизами — числа в паках совпадают сплошь и рядом.
+ */
+export function nameKey(name) {
+	const key = normalize(name);
+	return WORD.test(key) ? key : '';
+}
+
+/** Слова названия без цифр: «OP 2» → ['op']. */
+const markerWords = text => normalize(String(text ?? '').replace(DIGIT_RUN, ' ')).split(' ').filter(Boolean);
+
+/**
+ * Название целиком состоит из служебных слов? Считаем пометкой, только если
+ * пометкой является КАЖДОЕ слово: «Игра престолов» и «Манга о любви» —
+ * обычные названия, а «Ранобэ иллюстрация» — нет.
+ */
+export function isFormatMarker(text) {
+	const words = markerWords(text);
+	return words.length > 0 && words.every(word => FORMAT_WORDS.has(word));
+}
+
+/**
+ * «Fate: Zero» → «fate»: название без подзаголовка. Пустая строка — общего
+ * начала нет или оно слишком коротко, чтобы что-то значить.
+ */
+export function titleRoot(name) {
+	const text = String(name ?? '');
+	SUBTITLE.lastIndex = 0;
+	let match;
+
+	while ((match = SUBTITLE.exec(text)) !== null) {
+		const key = nameKey(text.slice(0, match.index));
+
+		if (key.length >= MIN_NAME && !HAS_DIGIT.test(key)) {
+			return key;
+		}
+	}
+
+	return '';
+}
+
+/**
+ * Длина общего куска двух строк по Ratcliff/Obershelp — то же, что считает
+ * difflib.SequenceMatcher в SI-HYX. Рекурсия развёрнута в стек: названия
+ * короткие, но уходить в рекурсию ради двух десятков символов незачем.
+ */
+function matchingSize(a, b) {
+	const positions = new Map();
+
+	for (let i = 0; i < b.length; i++) {
+		const list = positions.get(b[i]);
+
+		if (list) {
+			list.push(i);
+		} else {
+			positions.set(b[i], [i]);
+		}
+	}
+
+	/** Самый длинный общий кусок внутри окна [alo, ahi) × [blo, bhi). */
+	const longest = (alo, ahi, blo, bhi) => {
+		let bestI = alo;
+		let bestJ = blo;
+		let bestSize = 0;
+		let lengths = new Map();
+
+		for (let i = alo; i < ahi; i++) {
+			const next = new Map();
+
+			for (const j of positions.get(a[i]) ?? []) {
+				if (j < blo) {
+					continue;
+				}
+
+				if (j >= bhi) {
+					break;
+				}
+
+				const size = (lengths.get(j - 1) ?? 0) + 1;
+				next.set(j, size);
+
+				if (size > bestSize) {
+					bestI = i - size + 1;
+					bestJ = j - size + 1;
+					bestSize = size;
+				}
+			}
+
+			lengths = next;
+		}
+
+		return [bestI, bestJ, bestSize];
+	};
+
+	let total = 0;
+	const queue = [[0, a.length, 0, b.length]];
+
+	while (queue.length > 0) {
+		const [alo, ahi, blo, bhi] = queue.pop();
+		const [i, j, size] = longest(alo, ahi, blo, bhi);
+
+		if (size === 0) {
+			continue;
+		}
+
+		total += size;
+
+		if (alo < i && blo < j) {
+			queue.push([alo, i, blo, j]);
+		}
+
+		if (i + size < ahi && j + size < bhi) {
+			queue.push([i + size, ahi, j + size, bhi]);
+		}
+	}
+
+	return total;
+}
+
+/**
+ * Названия совпадают с точностью до опечатки?
+ *
+ * Числа сверяются отдельно и точно: «Сезон 2» и «Сезон 3» отличаются одним
+ * символом и по любой мере схожести близки, а это разные вещи.
+ */
+export function similar(a, b) {
+	if (a === b) {
+		return true;
+	}
+
+	if (Math.abs(a.length - b.length) > 2) {
+		return false;
+	}
+
+	if (HAS_DIGIT.test(a) || HAS_DIGIT.test(b)) {
+		if (String(a.match(DIGIT_RUN)) !== String(b.match(DIGIT_RUN))) {
+			return false;
+		}
+	}
+
+	const total = a.length + b.length;
+	return total === 0 || (2 * matchingSize(a, b)) / total >= SIMILARITY;
+}
+
+/**
+ * Кластеры названий «с точностью до опечатки». Раскладываем по первой букве —
+ * сравнивать каждое с каждым не нужно, а опечатка в первой букве встречается
+ * несопоставимо реже, чем в середине.
+ */
+class Groups {
+	#byFirst = new Map();
+
+	key(text) {
+		const first = text[0];
+		let bucket = this.#byFirst.get(first);
+
+		if (!bucket) {
+			bucket = [];
+			this.#byFirst.set(first, bucket);
+		}
+
+		for (const canon of bucket) {
+			if (similar(text, canon)) {
+				return canon;
+			}
+		}
+
+		bucket.push(text);
+		return text;
+	}
+}
+
+/**
+ * Разные написания одного произведения, сведённые к общему ключу.
+ * Обычное объединение множеств: ключ → корень, плюс копилка живых написаний,
+ * из которой потом выбирается то, что показать человеку.
+ */
+export class Names {
+	#parent = new Map();
+	#raw = new Map();
+	#groups = new Groups();
+
+	add(key, raw) {
+		if (!this.#parent.has(key)) {
+			this.#parent.set(key, key);
+			const canon = this.#groups.key(key);
+
+			if (canon !== key) {
+				this.union(key, canon);
+			}
+		}
+
+		let seen = this.#raw.get(key);
+
+		if (!seen) {
+			seen = new Map();
+			this.#raw.set(key, seen);
+		}
+
+		const text = String(raw ?? '').trim();
+
+		if (text) {
+			seen.set(text, (seen.get(text) ?? 0) + 1);
+		}
+
+		return this.find(key);
+	}
+
+	find(key) {
+		while (this.#parent.get(key) !== key) {
+			this.#parent.set(key, this.#parent.get(this.#parent.get(key)));
+			key = this.#parent.get(key);
+		}
+
+		return key;
+	}
+
+	has(key) {
+		return this.#parent.has(key);
+	}
+
+	union(a, b) {
+		const rootA = this.find(a);
+		const rootB = this.find(b);
+
+		if (rootA !== rootB) {
+			this.#parent.set(rootB, rootA);
+		}
+	}
+
+	/** Все написания одной сущности → общий канонический ключ. */
+	addEntity(spellings) {
+		const keys = [];
+
+		for (const raw of spellings) {
+			const key = nameKey(raw);
+
+			if (key) {
+				keys.push(this.add(key, raw));
+			}
+		}
+
+		if (keys.length === 0) {
+			return '';
+		}
+
+		for (const other of keys.slice(1)) {
+			this.union(keys[0], other);
+		}
+
+		return this.find(keys[0]);
+	}
+
+	/** Ключи, которые сайт вообще видел. Нужны для шагов слияния. */
+	keys() {
+		return [...this.#parent.keys()];
+	}
+
+	/**
+	 * Как показать произведение: предпочитаем русское написание, среди равных —
+	 * то, которое встречается чаще, а при равенстве — короткое (обычно это имя
+	 * вселенной, а длинное — имя конкретной части).
+	 */
+	display(canon) {
+		const candidates = new Map();
+
+		for (const [key, seen] of this.#raw) {
+			if (this.find(key) !== canon) {
+				continue;
+			}
+
+			for (const [raw, count] of seen) {
+				candidates.set(raw, (candidates.get(raw) ?? 0) + count);
+			}
+		}
+
+		if (candidates.size === 0) {
+			return canon;
+		}
+
+		const cyrillic = [...candidates].filter(([name]) => CYRILLIC.test(name));
+		const pool = cyrillic.length > 0 ? cyrillic : [...candidates];
+
+		return pool.sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0];
+	}
+}
+
+/**
+ * Досвязывает уже собранные названия между собой. Вызывается один раз, когда
+ * все темы пака разобраны: оба шага смотрят на набор названий целиком.
+ *
+ * @param {Names} names копилка написаний
+ * @param {Array<{key: string, raw: string, canon: string}>} entries все встреченные
+ *   написания: ключ сравнения, исходная строка и канон на момент сбора
+ */
+export function mergeRelated(names, entries) {
+	const canonByKey = new Map();
+
+	for (const entry of entries) {
+		if (!canonByKey.has(entry.key)) {
+			canonByKey.set(entry.key, entry.canon);
+		}
+	}
+
+	// Сезоны и спин-оффы: «Fate: Zero» и «Fate/Apocrypha» — общее начало.
+	// Корень ищется по ИСХОДНОЙ строке, а не по ключу сравнения: двоеточие
+	// и слэш, по которым только и виден подзаголовок, из ключа уже вычищены.
+	const roots = new Map();
+
+	for (const entry of entries) {
+		const root = titleRoot(entry.raw);
+
+		if (!root) {
+			continue;
+		}
+
+		let group = roots.get(root);
+
+		if (!group) {
+			group = new Set();
+			roots.set(root, group);
+		}
+
+		group.add(entry.canon);
+	}
+
+	for (const [root, canons] of roots) {
+		// Само короткое имя тоже в счёт: «Fate» отдельной темой и «Fate: Zero»
+		if (canonByKey.has(root)) {
+			canons.add(canonByKey.get(root));
+		}
+
+		const pick = [...canons].sort();
+
+		for (const other of pick.slice(1)) {
+			names.union(pick[0], other);
+		}
+	}
+
+	// Короткое название внутри длинного: «ДжоДжо» и «Невероятные приключения
+	// ДжоДжо». Только целым словом и не с начала строки — «Повелитель Рагнарёка
+	// и покровитель эйнхерий» это самостоятельное название, а не «Повелитель».
+	const shortFirst = [...canonByKey.keys()]
+		.filter(key => key.length >= MIN_NAME)
+		.sort((a, b) => a.length - b.length);
+
+	for (const longKey of canonByKey.keys()) {
+		const hay = ` ${longKey} `;
+
+		for (const key of shortFirst) {
+			if (key.length >= longKey.length) {
+				break;
+			}
+
+			if (hay.includes(` ${key} `) && !hay.startsWith(` ${key} `)) {
+				names.union(canonByKey.get(key), canonByKey.get(longKey));
+			}
+		}
+	}
+}

@@ -1,0 +1,40 @@
+{
+	// Сайт на Cloudflare Workers: тот же интерфейс и то же API, но база лежит
+	// в D1, а не в файле. Всё, что относится к нему, живёт в папке cf/.
+	//
+	// Номер базы (database_id) вписывает `npm run cf:setup` — он же её и заводит.
+	// До первого запуска здесь стоит заглушка, и с ней работает только локальная
+	// проверка (`npm run cf:dev`): ей настоящая база в облаке не нужна.
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	// Имя решает адрес: сайт открывается по firepacks.<ваш-поддомен>.workers.dev
+	"name": "firepacks",
+	"main": "cf/src/index.js",
+	"compatibility_date": "2026-08-01",
+
+	// Вёрстка, скрипты и уменьшенные обложки. Собирает папку scripts/build-web.js;
+	// Cloudflare отдаёт эти файлы сам, не будя Worker, — и не считает такие
+	// обращения запросами, то есть обложки на бесплатном тарифе бесплатны совсем.
+	"assets": {
+		"directory": "./cf/public",
+		"binding": "ASSETS"
+	},
+
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "firepacks",
+			"database_id": "1b484afb-64f4-49f2-836c-dc01d78b37d0"
+		}
+	],
+
+	"observability": {
+		"enabled": true
+	}
+
+	// Ключи Discord сюда не пишутся: они кладутся отдельно, командой
+	// `npx wrangler secret put`, и в файлах проекта не появляются (см. cf:setup).
+	//
+	// PUBLIC_URL тоже не нужен: адрес возврата сайт считает от того адреса,
+	// по которому к нему пришли. Если понадобится прибить его гвоздями —
+	// добавьте сюда "vars": { "PUBLIC_URL": "https://ваш-адрес" }.
+}

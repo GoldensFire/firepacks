@@ -1,0 +1,29 @@
+{
+  "name": "firepacks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Локальная библиотека пакетов SIGame с уровнями сложности по статистике",
+  "scripts": {
+    "start": "node --no-warnings src/server.js",
+    "index": "node --no-warnings src/indexer.js",
+    "stats": "node --no-warnings src/indexer.js --stats-only",
+    "topics": "node --no-warnings src/indexer.js --topics-only",
+    "summary": "node --no-warnings src/indexer.js --summary-only",
+    "logos": "node --no-warnings src/indexer.js --logos",
+    "nightly": "node --no-warnings scripts/nightly.js",
+    "state": "node --no-warnings scripts/state.js status",
+    "state:pull": "node --no-warnings scripts/state.js pull",
+    "state:push": "node --no-warnings scripts/state.js push",
+    "cf:setup": "node --no-warnings scripts/setup-cf.js",
+    "cf:dev": "node --no-warnings scripts/deploy-cf.js --local && wrangler dev",
+    "cf:db": "node --no-warnings scripts/deploy-cf.js --db-only",
+    "deploy": "node --no-warnings scripts/deploy-cf.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "wrangler": "^4.121.0"
+  }
+}

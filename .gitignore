@@ -1,0 +1,21 @@
+node_modules/
+
+# Ключи. В репозитории им не место ни в каком виде.
+data/*.txt
+.dev.vars
+
+# База и обложки: собираются дома, весят десятки мегабайт. Между ночами они
+# лежат приложением к отметке релиза, а не в истории правок (см. scripts/state.js).
+data/sibase.db
+data/sibase.db-shm
+data/sibase.db-wal
+data/logos/
+data/thumbs/
+
+# Отчёты о ночных обходах: у каждой машины свои
+data/nightly/
+
+# Всё, что собирается для Cloudflare: перезаписывается каждой выкладкой
+cf/public/
+cf/data/
+.wrangler/

@@ -1,0 +1,17 @@
+{
+	"version": "0.0.1",
+	"configurations": [
+		{
+			"name": "firepacks",
+			"runtimeExecutable": "node",
+			"runtimeArgs": ["--no-warnings", "src/server.js"],
+			"port": 3000
+		},
+		{
+			"name": "firepacks-cloudflare",
+			"runtimeExecutable": "npx",
+			"runtimeArgs": ["wrangler", "dev", "--port", "8787"],
+			"port": 8787
+		}
+	]
+}

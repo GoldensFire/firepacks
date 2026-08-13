@@ -3,7 +3,8 @@
 //   node src/indexer.js                 полный проход
 //   node src/indexer.js --vk-only       только обойти обсуждения: новое и правки
 //   node src/indexer.js --parse-only    только разобрать нерасобранные паки
-//   node src/indexer.js --stats-only    только обновить статистику
+//   node src/indexer.js --stats-only    только обновить статистику: все паки заново
+//   node src/indexer.js --stats-new     статистика и сложность только у тех, у кого их нет
 //   node src/indexer.js --topics-only   только определить тематики через Gemini
 //   node src/indexer.js --summary-only  только составить краткие описания паков
 //   node src/indexer.js --logos         только докачать логотипы
@@ -11,29 +12,50 @@
 //   node src/indexer.js --reparse       разобрать заново уже разобранные паки
 //   node src/indexer.js --retopics      переспросить Gemini даже про уже размеченные паки
 //   node src/indexer.js --resummary     переписать уже готовые описания
+//   node src/indexer.js --upgrade       переспросить то, что размечено моделью слабее нынешней
 //   node src/indexer.js --recalc        пересчитать уровни и ярлыки по сохранённым данным, без сети
-//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, topics, summary, logos, specials, recalc
+//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, recalc
+//   node src/indexer.js --model=имя     разово взять другую модель Gemini
 //   node src/indexer.js --gemini-models показать доступные модели Gemini
+//   node src/indexer.js --gemini-usage  показать расход запросов за сегодня
 //   node src/indexer.js --pages=5       ограничить число страниц обсуждения
 //   node src/indexer.js --limit=20      ограничить число обрабатываемых паков
 //   node src/indexer.js --jobs=8        сколько паков разбирать одновременно
 //   node src/indexer.js --authors=А,Б   спрашивать Gemini только про паки этих авторов
 //   node src/indexer.js --retry         попробовать заново паки с ошибками
+//   node src/indexer.js --serial        по-старому: шаги друг за другом, а не разом
 //
 // Шаги можно сочетать: --stats-only --topics-only сделает и то, и другое.
 // Тем же пользуется страница обновления базы — см. web/update.html.
+//
+// ————— Почему шаги идут разом —————
+//
+// Раньше проход был лесенкой: обойти ВК, потом разобрать паки, потом статистика,
+// потом Gemini. Каждая ступень ждала предыдущую целиком, и почти всё это время
+// ничего не происходило — каждый шаг упирается в ожидание своего собеседника
+// и ничем не мешает остальным. Обход ВК занимает канал на десяток минут, статистика
+// стучится на vladimirkhil.com, Gemini считает своё, разбор ходит в хранилище ВК.
+// Общего у них — только база, а она своя, местная и мгновенная.
+//
+// Теперь шаги — не ступени, а полосы: все начинаются сразу и разбирают работу
+// по мере её появления. Пак, найденный в обсуждении на второй минуте, тут же
+// уходит в разбор; разобранный — тут же в статистику и к модели. Полоса, у которой
+// работа кончилась, не заканчивается, пока может прибыть новая: она ждёт и берёт
+// добавку (см. drain). Ключ --serial возвращает прежний порядок — иногда нужно
+// именно по одному, чтобы разглядеть, что происходит.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, TOPICS_VERSION, PROGRESS_PREFIX } from './config.js';
+import { config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS } from './config.js';
 import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
 import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi.js';
 import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
-import { hasGemini, classifyThemes, describePack, listModels } from './gemini.js';
-import { listThemes, computeShares, toPrimary, computeFranchises } from './topics.js';
+import { hasGemini, classifyThemes, describePack, listModels, useModel, activeModel } from './gemini.js';
+import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
+import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds } from './topics.js';
 
 const args = process.argv.slice(2);
 const has = flag => args.includes(flag);
@@ -47,6 +69,8 @@ const reparse = has('--reparse');
 const retopics = has('--retopics');
 const resummary = has('--resummary');
 const retryFailed = has('--retry');
+const upgrade = has('--upgrade');
+const serial = has('--serial');
 const maxPages = value('pages', Infinity);
 const limit = value('limit', Infinity);
 
@@ -64,6 +88,11 @@ const limit = value('limit', Infinity);
  * разом — 0.96 с на штуку.
  */
 const jobs = Math.max(1, value('jobs', config.parseJobs));
+
+/** Модель на этот запуск: --model= перебивает выбранную на странице обновления. */
+if (text('model')) {
+	useModel(text('model'));
+}
 
 /**
  * Авторы, чьи паки Gemini разбирает первыми.
@@ -124,6 +153,40 @@ function authorQueueNote() {
 }
 
 /**
+ * Условие «размечено моделью слабее нынешней» для ключа --upgrade.
+ *
+ * Ради него и заведены колонки topics_model и summary_model. Порядок работы, под
+ * который это сделано: сначала всю базу проходит лёгкая модель — быстро, дёшево
+ * и с неизбежными огрехами, — а потом день за днём то же самое переспрашивается
+ * у модели посильнее, у которой суточных запросов два десятка. Без пометки, чем
+ * размечен пак, второй проход пришлось бы делать вслепую: либо переспрашивать всё
+ * подряд, включая уже хорошее, либо не переспрашивать ничего.
+ *
+ * Пустая пометка считается слабой разметкой: так помечены паки, размеченные до
+ * появления колонок, и что там была за модель, теперь уже не узнать.
+ *
+ * @param {string} column topics_model или summary_model
+ */
+function weakerModelSql(column) {
+	const rank = modelRank(activeModel());
+	const weaker = MODELS.filter(model => model.rank < rank).map(model => model.id);
+	const params = [];
+
+	if (!upgrade) {
+		return { where: '', params };
+	}
+
+	let where = ` OR p.${column} IS NULL`;
+
+	if (weaker.length > 0) {
+		where += ` OR p.${column} IN (${weaker.map(() => '?').join(',')})`;
+		params.push(...weaker);
+	}
+
+	return { where, params };
+}
+
+/**
  * Отчёт о ходе работы для страницы обновления базы: сколько сделано из скольких.
  * В обычном запуске из консоли эти строки только мешали бы, поэтому печатаются,
  * лишь когда индексатор запущен сайтом (см. server.js).
@@ -136,8 +199,157 @@ function report(event) {
 	}
 }
 
-/** Короткая запись: «шаг такой-то, сделано столько из стольких». */
-const progress = (step, done, total) => report({ step, done, total });
+/** Человеческая запись длительности: «2 ч 05 мин», «14 мин», «40 с». */
+function formatSpan(ms) {
+	if (ms === null || !Number.isFinite(ms)) {
+		return '';
+	}
+
+	const seconds = Math.round(ms / 1000);
+
+	if (seconds < 90) {
+		return `${seconds} с`;
+	}
+
+	const minutes = Math.round(seconds / 60);
+
+	if (minutes < 90) {
+		return `${minutes} мин`;
+	}
+
+	return `${Math.floor(minutes / 60)} ч ${String(minutes % 60).padStart(2, '0')} мин`;
+}
+
+/**
+ * Счётчик одного шага: сколько сделано, сколько всего и когда это кончится.
+ *
+ * Всего — величина не постоянная: пока идёт обход ВК, у разбора прибывает работа,
+ * а у статистики она прибывает от разбора. Поэтому «всего» не задаётся вперёд,
+ * а растёт (см. expand), и остаток времени считается по нынешнему темпу: сколько
+ * ушло на сделанное, столько же в среднем уйдёт на каждое оставшееся.
+ *
+ * Темп берётся не за всё время, а за последнее: у разбора первые паки идут
+ * вперемешку с обходом ВК и медленнее, чем потом, и средняя за весь шаг обещала
+ * бы вдвое больше правды.
+ */
+class Track {
+	constructor(step) {
+		this.step = step;
+		this.total = 0;
+		this.done = 0;
+		this.issued = 0;
+		this.reported = 0;
+		this.startedAt = Date.now();
+		this.marks = [];
+		this.lastSent = 0;
+		this.growing = false;
+	}
+
+	/**
+	 * Номер для строки лога. Считается по выданным, а не по законченным: работники
+	 * идут вшестером, и «сделано» у них в один миг одно и то же — шесть строк
+	 * подряд с одинаковым номером.
+	 */
+	label() {
+		return `${++this.issued}/${this.total}`;
+	}
+
+	/**
+	 * Пора ли писать в лог очередное «столько-то из стольких».
+	 *
+	 * Не просто остаток от деления: работников несколько, и в тот миг, когда
+	 * сделано ровно сотня, спросить об этом успевают все четверо — в логе выходило
+	 * четыре одинаковых строки подряд.
+	 */
+	milestone(every) {
+		if (this.done > 0 && this.done - this.reported >= every) {
+			this.reported = this.done;
+			return true;
+		}
+
+		return false;
+	}
+
+	expand(count) {
+		this.total += count;
+		this.send(true);
+	}
+
+	tick(count = 1) {
+		this.done += count;
+		this.marks.push([Date.now(), this.done]);
+
+		// Хвоста в две сотни отметок хватает, чтобы сгладить случайный долгий пак
+		// и при этом не помнить о том, как шаг разгонялся полчаса назад
+		if (this.marks.length > 200) {
+			this.marks.splice(0, this.marks.length - 200);
+		}
+
+		this.send();
+	}
+
+	/** Сколько осталось, миллисекунды. Пусто, пока считать не из чего. */
+	get etaMs() {
+		const left = this.total - this.done;
+
+		if (left <= 0 || this.marks.length < 2) {
+			return null;
+		}
+
+		const [firstAt, firstDone] = this.marks[0];
+		const [lastAt, lastDone] = this.marks.at(-1);
+		const span = lastAt - firstAt;
+		const made = lastDone - firstDone;
+
+		if (span <= 0 || made <= 0) {
+			return null;
+		}
+
+		return Math.round((span / made) * left);
+	}
+
+	/** Хвост строки для консоли: «1200/4885, осталось ~14 мин». */
+	get line() {
+		const eta = this.etaMs;
+		return `${this.done}/${this.total}${eta ? `, осталось ~${formatSpan(eta)}` : ''}`;
+	}
+
+	send(force = false) {
+		const now = Date.now();
+
+		// Полоска выполнения на странице не станет честнее от сотни сообщений
+		// в секунду, а стоят они настоящих байтов в трубе
+		if (!force && now - this.lastSent < 250) {
+			return;
+		}
+
+		this.lastSent = now;
+		report({ step: this.step, done: this.done, total: this.total, eta: this.etaMs, growing: this.growing });
+	}
+
+	finish() {
+		this.send(true);
+		report({ step: this.step, state: 'done' });
+	}
+}
+
+const tracks = new Map();
+const track = step => tracks.get(step);
+
+/** Строка в лог от имени шага: полосы идут вперемешку, и без подписи их не разобрать. */
+const TAGS = {
+	vk: 'ВК',
+	parse: 'разбор',
+	stats: 'статистика',
+	statsnew: 'статистика новых',
+	topics: 'тематики',
+	summary: 'описания',
+	logos: 'логотипы',
+	specials: 'спецвопросы',
+	recalc: 'пересчёт',
+};
+
+const say = (step, line) => console.log(`[${TAGS[step]}] ${line}`);
 
 const insertPackage = db.prepare(`
 	INSERT OR IGNORE INTO packages
@@ -154,6 +366,9 @@ const knownInComment = db.prepare(`
 	SELECT id, source_key, name, file_name, comment_text, status
 	FROM packages WHERE vk_topic = ? AND vk_comment = ?
 `);
+
+/** Есть ли такой документ в базе вообще — хоть под этим сообщением, хоть под другим. */
+const knownDocument = db.prepare('SELECT id FROM packages WHERE source_key = ?');
 
 /**
  * Сообщение переписали: у пака меняется описание, но не он сам. Заодно
@@ -212,11 +427,11 @@ const updateUrl = db.prepare('UPDATE packages SET url = ? WHERE id = ?');
 const updateLogo = db.prepare('UPDATE packages SET logo_file = ?, logo_state = ? WHERE id = ?');
 const updateTopics = db.prepare(`
 	UPDATE packages SET topic_shares = ?, primary_topic = ?, primary_share = ?,
-		franchises = ?, franchise_top = ?, franchise_top_share = ?,
-		topics_at = ?, topics_version = ${TOPICS_VERSION} WHERE id = ?
+		franchises = ?, franchise_top = ?, franchise_top_share = ?, other_kinds = ?,
+		topics_at = ?, topics_model = ?, topics_version = ${TOPICS_VERSION} WHERE id = ?
 `);
 
-const updateSummary = db.prepare('UPDATE packages SET summary = ?, summary_at = ? WHERE id = ?');
+const updateSummary = db.prepare('UPDATE packages SET summary = ?, summary_at = ?, summary_model = ? WHERE id = ?');
 const updateSpecials = db.prepare('UPDATE packages SET special_count = ?, special_stat = ? WHERE id = ?');
 
 const upsertStats = db.prepare(`
@@ -284,7 +499,14 @@ function syncComment(comment, useApi, tally) {
 	// и оставляем прежнюю строку — вместе с оценками, отметками «сыграно»
 	// и местом в выдаче. Когда файлов больше одного, гадать нечем, и тогда
 	// работает обычный разбор: чего нет — пропало, что появилось — новое.
-	if (missing.length === 1 && fresh.length === 1) {
+	//
+	// Оговорка про «этого документа больше нигде нет»: тот же файл нередко висит
+	// сразу в двух сообщениях, и переселить строку на чужой ключ значит наткнуться
+	// на запрет повторов в базе. Раньше это роняло весь обход темы целиком —
+	// вместе с тысячами ещё не прочитанных сообщений.
+	const takenElsewhere = fresh.length === 1 && knownDocument.get(fresh[0].key) !== undefined;
+
+	if (missing.length === 1 && fresh.length === 1 && !takenElsewhere) {
 		tally.pending.push({
 			kind: 'replaced',
 			apply: () => rebindDocument.run(fresh[0].key, fresh[0].url, fresh[0].fileName, missing[0].id),
@@ -333,7 +555,7 @@ function syncComment(comment, useApi, tally) {
 		if (row.status === 'gone') {
 			markBack.run(row.id);
 			tally.back++;
-			console.log(`  файл вернулся: «${title(row)}»`);
+			say('vk', `файл вернулся: «${title(row)}»`);
 		}
 
 		// Ссылки из API подписаны и живут недолго — обновляем на свежую
@@ -352,7 +574,7 @@ function syncComment(comment, useApi, tally) {
 		}
 
 		tally.edited++;
-		console.log(`  сообщение переписано: «${title(edited[0])}»`);
+		say('vk', `сообщение переписано: «${title(edited[0])}»`);
 	}
 }
 
@@ -373,9 +595,9 @@ function applyPending(pending, known) {
 		return { replaced: 0, gone: 0 };
 	}
 
-	const limit = Math.max(25, Math.round(known * 0.05));
+	const ceiling = Math.max(25, Math.round(known * 0.05));
 
-	if (pending.length > limit) {
+	if (pending.length > ceiling) {
 		console.error(`Обход насчитал ${pending.length} пропавших и подменённых файлов при ${known} паках в базе — `
 			+ `это больше похоже на сломавшийся обход, чем на правки в обсуждении.`);
 		console.error('Ничего не меняю. Если так и есть на самом деле, повторите запуск: порог считается от размера базы.');
@@ -387,7 +609,7 @@ function applyPending(pending, known) {
 	for (const change of pending) {
 		change.apply();
 		counts[change.kind]++;
-		console.log(`  ${change.say}`);
+		say('vk', change.say);
 	}
 
 	return counts;
@@ -397,11 +619,14 @@ async function scanVk() {
 	const useApi = hasVkApi();
 	const readTopic = useApi ? readTopicApi : readTopicHtml;
 
-	console.log(`--- Обход обсуждений ВК (${useApi ? 'через API' : 'разбором страниц, ключа нет'})`);
+	say('vk', `обход обсуждений (${useApi ? 'через API' : 'разбором страниц, ключа нет'})`);
 
 	const tally = { added: 0, edited: 0, back: 0, pending: [] };
+	const bar = track('vk');
 	let comments = 0;
 	let skipped = 0;
+	let broken = 0;
+	let unreadable = 0;
 
 	for (const topic of config.vkTopics) {
 		const topicUrl = topic.url;
@@ -410,12 +635,43 @@ async function scanVk() {
 		// сравниваются с отсечкой по фактическому моменту, а не по строке даты.
 		const cutoff = topic.before ? Date.parse(`${topic.before}T00:00:00+03:00`) : null;
 
-		console.log(`Тема: ${topicUrl}${topic.before ? ` (паки до ${topic.before})` : ''}`);
+		say('vk', `тема ${topicUrl}${topic.before ? ` (паки до ${topic.before})` : ''}`);
+
+		// Сколько сообщений в теме, ВК говорит в первом же ответе — по нему
+		// и растёт полоска выполнения, а заодно видно, дочитали ли до конца
+		let announced = null;
+		let read = 0;
 
 		try {
 			for await (const comment of readTopic(topicUrl, {
 				maxPages,
-				onPage: (page, offset, found) => console.log(`  страница ${page} (offset ${offset}): сообщений с файлами — ${found}`),
+				// Сообщение, на котором спотыкается сам ВК. Его пропускают, чтобы
+				// прочитать всё остальное; пак под ним, если он там был, найдётся
+				// только когда ВК починится (см. readWindow в vkapi.js)
+				onSkip: at => {
+					unreadable++;
+					say('vk', `сообщение на месте ${at} прочитать нечем: ВК отвечает внутренней ошибкой. Иду дальше.`);
+				},
+				onPage: page => {
+					// Сколько сообщений в теме, ВК называет сразу — с этого и растёт
+					// полоска. Полоса обхода считает прочитанные сообщения, а не
+					// найденные паки: паки попадаются далеко не в каждом сообщении,
+					// и по ним не видно, много ли осталось.
+					// Число это не каменное: пока идёт обход, в теме и пишут, и удаляют.
+					// Берём всегда последнее сказанное, а полоску растим на разницу
+					if (page.total !== null) {
+						bar.expand(Math.max(0, page.total - (announced ?? 0)));
+						announced = page.total;
+					}
+
+					bar.tick(Math.max(0, page.read - read));
+					read = page.read;
+
+					if (page.page % 25 === 0) {
+						say('vk', `прочитано ${page.read}${page.total ? ` из ${page.total}` : ''} сообщений`
+							+ `${bar.etaMs ? `, осталось ~${formatSpan(bar.etaMs)}` : ''}`);
+					}
+				},
 			})) {
 				comments++;
 
@@ -430,18 +686,47 @@ async function scanVk() {
 
 				syncComment(comment, useApi, tally);
 			}
+
+			// Тему дочитали не до конца — и это не мелочь, а ровно тот случай,
+			// из-за которого в базе не хватало семи тысяч паков: обход обрывался
+			// на середине и молча объявлял, что всё собрано.
+			//
+			// Недобор в пару сообщений тревогой не считается: пока идёт обход,
+			// в теме удаляют, и отсчёт под нами сдвигается сам собой. Страница —
+			// та мера, ниже которой это точно не поломка.
+			if (announced !== null && announced - read > 100 && maxPages === Infinity) {
+				broken++;
+				console.error(`[ВК] тема прочитана не до конца: ${read} сообщений из ${announced}. `
+					+ 'Собранное осталось в базе, недочитанное подберётся следующим обходом.');
+			}
 		} catch (error) {
-			console.error(`  ошибка обхода темы: ${error.message}`);
+			broken++;
+			console.error(`[ВК] обход темы оборвался на ${read} сообщении: ${error.message}`);
+			console.error('[ВК] Собранное до обрыва осталось в базе; остальное подберёт следующий обход.');
 		}
 	}
 
 	const known = db.prepare('SELECT COUNT(*) AS c FROM packages').get().c;
-	const applied = applyPending(tally.pending, known);
 
-	console.log(`Просмотрено сообщений с файлами: ${comments}`
-		+ `${skipped ? ` (после отсечки не считали ${skipped})` : ''}. Новых паков: ${tally.added}.`);
-	console.log(`Изменений в прежних: файл заменён у ${applied.replaced}, `
+	// Недочитанный обход не имеет права никого хоронить: «файла в сообщении нет»
+	// и «до сообщения не дошли» выглядят одинаково, а разница в цене — целая база
+	const applied = broken > 0
+		? { replaced: 0, gone: 0, refused: tally.pending.length }
+		: applyPending(tally.pending, known);
+
+	if (broken > 0 && tally.pending.length > 0) {
+		say('vk', `подмен и пропаж отложено: ${tally.pending.length}. Обход был неполным, и верить им нельзя.`);
+	}
+
+	say('vk', `просмотрено сообщений с файлами: ${comments}`
+		+ `${skipped ? ` (после отсечки не считали ${skipped})` : ''}. Новых паков: ${tally.added}.`
+		+ `${unreadable ? ` Сообщений, которые ВК не отдал: ${unreadable}.` : ''}`);
+	say('vk', `изменений в прежних: файл заменён у ${applied.replaced}, `
 		+ `переписано сообщений ${tally.edited}, убрано файлов ${applied.gone}, вернулось ${tally.back}.`);
+
+	if (broken > 0) {
+		throw new Error(`обход не завершён: тем с обрывом — ${broken}`);
+	}
 }
 
 const LOGO_EXTENSIONS = new Set(['.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.gif', '.webp', '.bmp', '.avif']);
@@ -488,16 +773,80 @@ async function fetchLogo(archive, logoName, packageId) {
  * базы друг от друга не зависят, а вот нумерация в выводе считается не по месту
  * в очереди, а по числу законченных, — иначе номера скакали бы взад-вперёд.
  */
-async function runPool(items, jobs, worker) {
+async function runPool(items, jobs, worker, stop = () => false) {
 	let next = 0;
 
 	const workers = Array.from({ length: Math.min(jobs, items.length) }, async () => {
-		while (next < items.length) {
+		while (next < items.length && !stop()) {
 			await worker(items[next++]);
 		}
 	});
 
 	await Promise.all(workers);
+}
+
+/**
+ * Полоса работы, у которой работа может прибывать по ходу дела.
+ *
+ * Шаги теперь идут одновременно, и очередь шага уже нельзя посчитать один раз
+ * в начале: разбор берёт паки, которые обход ВК ещё только находит, статистика
+ * и модель — те, что разбор ещё только разбирает. Поэтому очередь спрашивается
+ * у базы заново, пока есть кому её пополнять: `growing` отвечает, работают ли
+ * ещё те шаги, что кормят этот. Как только они закончились и очередь пуста —
+ * закончился и этот.
+ *
+ * `seen` нужен не для порядка, а по существу: статистика перезапрашивает всех
+ * разобранных паков, и без памяти о том, кого уже спросили в этот заход, второй
+ * запрос к базе вернул бы те же пять тысяч по второму кругу.
+ */
+async function drain({ step, jobs, take, work, stop = () => false }) {
+	const bar = track(step);
+	const seen = new Set();
+
+	// Кто может подкинуть работы этому шагу, записано в STEPS одним местом (feeds),
+	// чтобы «разбору подносит обход ВК» не приходилось помнить в двух файлах
+	const feeds = STEPS.find(item => item.key === step)?.feeds ?? [];
+	const growing = () => feeds.some(isRunning);
+
+	let taken = 0;
+
+	while (!stop()) {
+		const room = limit === Infinity ? Infinity : limit - taken;
+
+		if (room <= 0) {
+			return;
+		}
+
+		bar.growing = growing();
+
+		const batch = take()
+			.filter(row => !seen.has(row.id))
+			.slice(0, room === Infinity ? undefined : room);
+
+		if (batch.length === 0) {
+			if (!growing()) {
+				return;
+			}
+
+			// Полоса опустела, но кормящий шаг ещё работает: ждём добавки.
+			// Секунда — не темп опроса базы, а верхняя граница простоя: запрос
+			// этот местный и стоит миллисекунды.
+			await sleep(1000);
+			continue;
+		}
+
+		for (const row of batch) {
+			seen.add(row.id);
+		}
+
+		taken += batch.length;
+		bar.expand(batch.length);
+
+		await runPool(batch, jobs, async row => {
+			await work(row, bar);
+			bar.tick();
+		}, stop);
+	}
 }
 
 /** Обрыв соединения — обычное дело на больших файлах, стоит просто попробовать ещё раз. */
@@ -567,159 +916,155 @@ async function parsePackages() {
 		SELECT id, url, file_name, source_key, status FROM packages
 		WHERE status IN (${placeholders}) OR recheck = 1
 		ORDER BY id
-	`).all(...statuses);
+	`);
 
-	const queue = pending.slice(0, limit === Infinity ? undefined : limit);
-
-	console.log(`--- Разбор паков: в очереди ${pending.length}, будет обработано ${queue.length}`
-		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
-	progress('parse', 0, queue.length);
+	say('parse', `в очереди ${pending.all(...statuses).length}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let failed = 0;
 	let dead = 0;
 	let logos = 0;
-	let done = 0;
 
-	await runPool(queue, jobs, async row => {
-		const label = `[${++done}/${queue.length}] ${row.file_name ?? row.url}`;
-		progress('parse', done, queue.length);
+	await drain({
+		step: 'parse',
+		jobs,
+		take: () => pending.all(...statuses),
+		work: async (row, bar) => {
+			const label = bar.label();
 
-		try {
-			const result = await retryNetwork(() => withFreshUrl(row, async url => {
-				const archive = await openRemoteZip(url);
-				const entry = archive.find('content.xml');
+			try {
+				const result = await retryNetwork(() => withFreshUrl(row, async url => {
+					const archive = await openRemoteZip(url);
+					const entry = archive.find('content.xml');
 
-				if (!entry) {
-					throw new Error('в архиве нет content.xml');
+					if (!entry) {
+						throw new Error('в архиве нет content.xml');
+					}
+
+					const parsed = parseContentXml(await archive.read(entry));
+
+					if (!parsed.name) {
+						throw new Error('в паке не указано имя');
+					}
+
+					const logo = await fetchLogo(archive, parsed.logo, row.id).catch(() => ({ file: null, state: 'error' }));
+
+					return { parsed, logo, totalSize: archive.totalSize };
+				}));
+
+				const { parsed, logo, totalSize } = result;
+
+				updateParsed.run(
+					parsed.name,
+					JSON.stringify(parsed.authors),
+					parsed.authors.join(', '),
+					buildMatchKey(parsed.name, parsed.authors),
+					JSON.stringify(parsed.tags),
+					buildTagsKey(parsed.tags),
+					parsed.authorDifficulty,
+					parsed.language,
+					parsed.date,
+					parsed.id,
+					totalSize,
+					parsed.questionCount,
+					parsed.roundCount,
+					parsed.themeCount,
+					parsed.specialCount,
+					JSON.stringify(parsed.specialStat),
+					JSON.stringify(parsed.contentStat),
+					JSON.stringify(parsed.rounds),
+					logo.file,
+					logo.state,
+					Date.now(),
+					row.id,
+				);
+
+				saveAuthors(row.id, parsed.authors);
+
+				ok++;
+
+				if (logo.state === 'ok') {
+					logos++;
 				}
 
-				const parsed = parseContentXml(await archive.read(entry));
+				say('parse', `${label} ${row.file_name ?? row.url} -> «${parsed.name}», вопросов ${parsed.questionCount}, `
+					+ `${Math.round(totalSize / 1024 / 1024)} МБ${logo.state === 'ok' ? ', с логотипом' : ''}`);
+			} catch (error) {
+				const status = error instanceof DeadLinkError ? 'dead' : 'error';
 
-				if (!parsed.name) {
-					throw new Error('в паке не указано имя');
+				if (status === 'dead') {
+					dead++;
+				} else {
+					failed++;
 				}
 
-				const logo = await fetchLogo(archive, parsed.logo, row.id).catch(() => ({ file: null, state: 'error' }));
-
-				return { parsed, logo, totalSize: archive.totalSize };
-			}));
-
-			const { parsed, logo, totalSize } = result;
-
-			updateParsed.run(
-				parsed.name,
-				JSON.stringify(parsed.authors),
-				parsed.authors.join(', '),
-				buildMatchKey(parsed.name, parsed.authors),
-				JSON.stringify(parsed.tags),
-				buildTagsKey(parsed.tags),
-				parsed.authorDifficulty,
-				parsed.language,
-				parsed.date,
-				parsed.id,
-				totalSize,
-				parsed.questionCount,
-				parsed.roundCount,
-				parsed.themeCount,
-				parsed.specialCount,
-				JSON.stringify(parsed.specialStat),
-				JSON.stringify(parsed.contentStat),
-				JSON.stringify(parsed.rounds),
-				logo.file,
-				logo.state,
-				Date.now(),
-				row.id,
-			);
-
-			saveAuthors(row.id, parsed.authors);
-
-			ok++;
-
-			if (logo.state === 'ok') {
-				logos++;
+				// Пак уже был разобран: временная ошибка не повод убирать его из выдачи
+				if (status === 'error' && row.status === 'ok') {
+					clearRecheck.run(row.id);
+					say('parse', `${label} ${row.file_name ?? row.url} -> не вышло: ${error.message}; оставляю прежний разбор`);
+				} else {
+					updateFailed.run(status, error.message, Date.now(), row.id);
+					say('parse', `${label} ${row.file_name ?? row.url} -> не вышло: ${error.message}`);
+				}
 			}
-
-			console.log(`${label} -> «${parsed.name}», вопросов ${parsed.questionCount}, ${Math.round(totalSize / 1024 / 1024)} МБ${logo.state === 'ok' ? ', с логотипом' : ''}`);
-		} catch (error) {
-			const status = error instanceof DeadLinkError ? 'dead' : 'error';
-
-			if (status === 'dead') {
-				dead++;
-			} else {
-				failed++;
-			}
-
-			// Пак уже был разобран: временная ошибка не повод убирать его из выдачи
-			if (status === 'error' && row.status === 'ok') {
-				clearRecheck.run(row.id);
-				console.log(`${label} -> не вышло: ${error.message}; оставляю прежний разбор`);
-			} else {
-				updateFailed.run(status, error.message, Date.now(), row.id);
-				console.log(`${label} -> не вышло: ${error.message}`);
-			}
-		}
+		},
 	});
 
-	progress('parse', queue.length, queue.length);
-	console.log(`Разобрано: ${ok} (логотипов ${logos}), мёртвых ссылок: ${dead}, прочих ошибок: ${failed}.`);
+	say('parse', `разобрано: ${ok} (логотипов ${logos}), мёртвых ссылок: ${dead}, прочих ошибок: ${failed}.`);
 }
 
 /** Догружает логотипы для паков, разобранных до появления этой возможности. */
 async function fetchLogos() {
-	const rows = db.prepare(`
+	const pending = db.prepare(`
 		SELECT id, url, file_name, source_key, name FROM packages
 		WHERE status = 'ok' AND (logo_state IS NULL OR logo_state = 'error')
 		ORDER BY id
-	`).all();
+	`);
 
-	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Логотипы: без логотипа ${rows.length}, будет обработано ${queue.length}`
-		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
-	progress('logos', 0, queue.length);
+	say('logos', `без логотипа ${pending.all().length}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let none = 0;
 	let failed = 0;
-	let done = 0;
 
-	await runPool(queue, jobs, async row => {
-		const at = ++done;
-		progress('logos', at, queue.length);
+	await drain({
+		step: 'logos',
+		jobs,
+		take: () => pending.all(),
+		work: async (row, bar) => {
+			try {
+				const logo = await retryNetwork(() => withFreshUrl(row, async url => {
+					const archive = await openRemoteZip(url);
+					const entry = archive.find('content.xml');
 
-		try {
-			const logo = await retryNetwork(() => withFreshUrl(row, async url => {
-				const archive = await openRemoteZip(url);
-				const entry = archive.find('content.xml');
+					if (!entry) {
+						throw new Error('в архиве нет content.xml');
+					}
 
-				if (!entry) {
-					throw new Error('в архиве нет content.xml');
+					const parsed = parseContentXml(await archive.read(entry));
+					return fetchLogo(archive, parsed.logo, row.id);
+				}));
+
+				updateLogo.run(logo.file, logo.state, row.id);
+
+				if (logo.state === 'ok') {
+					ok++;
+				} else {
+					none++;
 				}
-
-				const parsed = parseContentXml(await archive.read(entry));
-				return fetchLogo(archive, parsed.logo, row.id);
-			}));
-
-			updateLogo.run(logo.file, logo.state, row.id);
-
-			if (logo.state === 'ok') {
-				ok++;
-			} else {
-				none++;
+			} catch (error) {
+				failed++;
+				updateLogo.run(null, 'error', row.id);
+				say('logos', `${row.name ?? row.file_name}: ${error.message}`);
 			}
-		} catch (error) {
-			failed++;
-			updateLogo.run(null, 'error', row.id);
-			console.log(`  ${row.name ?? row.file_name}: ${error.message}`);
-		}
 
-		if (at % 25 === 0) {
-			console.log(`  обработано ${at}/${queue.length}`);
-		}
+			if (bar.milestone(25)) {
+				say('logos', bar.line);
+			}
+		},
 	});
 
-	progress('logos', queue.length, queue.length);
-	console.log(`Логотипы: скачано ${ok}, в паке нет ${none}, ошибок ${failed}.`);
+	say('logos', `скачано ${ok}, в паке нет ${none}, ошибок ${failed}.`);
 }
 
 /**
@@ -730,121 +1075,143 @@ async function fetchLogos() {
  * это пара range-запросов на пак.
  */
 async function fetchSpecials() {
-	const rows = db.prepare(`
+	const pending = db.prepare(`
 		SELECT id, url, file_name, source_key, name FROM packages
 		WHERE status = 'ok' AND special_count IS NULL
 		ORDER BY id
-	`).all();
+	`);
 
-	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Спецвопросы: не посчитаны у ${rows.length} паков, будет обработано ${queue.length}`
-		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
-	progress('specials', 0, queue.length);
+	say('specials', `не посчитаны у ${pending.all().length} паков${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let failed = 0;
 	let found = 0;
-	let done = 0;
 
-	await runPool(queue, jobs, async row => {
-		const at = ++done;
-		progress('specials', at, queue.length);
+	await drain({
+		step: 'specials',
+		jobs,
+		take: () => pending.all(),
+		work: async (row, bar) => {
+			try {
+				const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
+					const archive = await openRemoteZip(url);
+					const entry = archive.find('content.xml');
 
-		try {
-			const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
-				const archive = await openRemoteZip(url);
-				const entry = archive.find('content.xml');
+					if (!entry) {
+						throw new Error('в архиве нет content.xml');
+					}
 
-				if (!entry) {
-					throw new Error('в архиве нет content.xml');
+					return parseContentXml(await archive.read(entry));
+				}));
+
+				updateSpecials.run(parsed.specialCount, JSON.stringify(parsed.specialStat), row.id);
+				ok++;
+
+				if (parsed.specialCount > 0) {
+					found++;
 				}
-
-				return parseContentXml(await archive.read(entry));
-			}));
-
-			updateSpecials.run(parsed.specialCount, JSON.stringify(parsed.specialStat), row.id);
-			ok++;
-
-			if (parsed.specialCount > 0) {
-				found++;
+			} catch (error) {
+				failed++;
+				say('specials', `${row.name ?? row.file_name}: ${error.message}`);
 			}
-		} catch (error) {
-			failed++;
-			console.log(`  ${row.name ?? row.file_name}: ${error.message}`);
-		}
 
-		if (at % 25 === 0) {
-			console.log(`  обработано ${at}/${queue.length}`);
-		}
+			if (bar.milestone(25)) {
+				say('specials', bar.line);
+			}
+		},
 	});
 
-	progress('specials', queue.length, queue.length);
-	console.log(`Спецвопросы: посчитаны у ${ok} паков, из них со спецвопросами ${found}, ошибок ${failed}.`);
+	say('specials', `посчитаны у ${ok} паков, из них со спецвопросами ${found}, ошибок ${failed}.`);
 }
 
-async function refreshStats() {
-	const rows = db.prepare(`
+/**
+ * Статистика и сложность с сервиса SIGame.
+ *
+ * Шага этого два, и это не удвоение, а разные вопросы. Полный обход спрашивает
+ * заново про все пять тысяч паков: числа игр живут своей жизнью, и обновлять их
+ * надо целиком, иначе позавчерашняя сложность так и останется позавчерашней.
+ * Стоит он полчаса и пять тысяч запросов к чужому сервису.
+ *
+ * Второй спрашивает только про тех, у кого статистики нет вовсе, — про паки,
+ * добавленные этой ночью. Это десятки запросов вместо тысяч, и после разбора
+ * новых паков нужен обычно именно он: у остальных числа и так вчерашние.
+ *
+ * @param {'all'|'new'} scope
+ */
+async function refreshStats(scope = 'all') {
+	const step = scope === 'new' ? 'statsnew' : 'stats';
+
+	// «Только новые» — это те, кого ни разу не спрашивали. Пак, про который сервис
+	// ответил «не знаю» (found = 0), новым уже не считается: строка у него есть,
+	// и переспрашивать его каждую ночь означало бы вечную очередь из тех, кого
+	// статистика не знает и знать не будет.
+	const fresh = scope === 'new'
+		? 'AND NOT EXISTS (SELECT 1 FROM stats s WHERE s.package_id = p.id)'
+		: '';
+
+	const pending = db.prepare(`
 		SELECT p.id, p.name, p.authors
 		FROM packages p
-		WHERE p.status = 'ok' AND p.name IS NOT NULL
+		WHERE p.status = 'ok' AND p.name IS NOT NULL ${fresh}
 		ORDER BY p.id
-	`).all();
+	`);
 
-	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Статистика: запрашиваю ${queue.length} паков`);
-	progress('stats', 0, queue.length);
+	const statsJobs = Math.max(1, config.statsJobs);
+	say(step, `запрашиваю ${pending.all().length} паков${scope === 'new' ? ' без статистики' : ''}, по ${statsJobs} разом`);
 
 	let found = 0;
 	let rated = 0;
 
-	for (let i = 0; i < queue.length; i++) {
-		const row = queue[i];
-		const authors = JSON.parse(row.authors);
-		progress('stats', i, queue.length);
+	await drain({
+		step,
+		jobs: statsJobs,
+		take: () => pending.all(),
+		work: async (row, bar) => {
+			const authors = JSON.parse(row.authors);
 
-		try {
-			const raw = await fetchPackageStats(row.name, authors);
+			try {
+				const raw = await fetchPackageStats(row.name, authors);
 
-			if (!raw) {
-				upsertStats.run(row.id, 0, 0, 0, 0, 0, 0, null, null, null, 0, Date.now());
-			} else {
-				const summary = summarize(raw);
-				const level = toLevel(summary);
+				if (!raw) {
+					upsertStats.run(row.id, 0, 0, 0, 0, 0, 0, null, null, null, 0, Date.now());
+				} else {
+					const summary = summarize(raw);
+					const level = toLevel(summary);
 
-				if (level !== null) {
-					rated++;
+					if (level !== null) {
+						rated++;
+					}
+
+					found++;
+
+					upsertStats.run(
+						row.id,
+						summary.startedGames,
+						summary.completedGames,
+						summary.shown,
+						summary.answered,
+						summary.correct,
+						summary.wrong,
+						summary.rightPercent,
+						summary.takePercent,
+						level,
+						1,
+						Date.now(),
+					);
 				}
-
-				found++;
-
-				upsertStats.run(
-					row.id,
-					summary.startedGames,
-					summary.completedGames,
-					summary.shown,
-					summary.answered,
-					summary.correct,
-					summary.wrong,
-					summary.rightPercent,
-					summary.takePercent,
-					level,
-					1,
-					Date.now(),
-				);
+			} catch (error) {
+				say(step, `${row.name}: ${error.message}`);
 			}
-		} catch (error) {
-			console.log(`  ${row.name}: ${error.message}`);
-		}
 
-		if ((i + 1) % 25 === 0) {
-			console.log(`  обработано ${i + 1}/${queue.length}`);
-		}
+			if (bar.milestone(100)) {
+				say(step, bar.line);
+			}
 
-		await sleep(config.statsDelayMs);
-	}
+			await sleep(config.statsDelayMs);
+		},
+	});
 
-	progress('stats', queue.length, queue.length);
-	console.log(`Статистика найдена у ${found} паков, оценку сложности получили ${rated}.`);
+	say(step, `статистика найдена у ${found} паков, оценку сложности получили ${rated}.`);
 }
 
 /**
@@ -858,197 +1225,235 @@ function isFatalGeminiError(error) {
 
 /**
  * Кончившиеся лимиты — беда общая: если их не хватило на тематики, то и на
- * описания не хватит. Второй шаг после этого даже не начинается, вместо того
- * чтобы выяснять то же самое заново на первом же паке.
+ * описания не хватит. Обе полосы смотрят на этот признак и сворачиваются,
+ * вместо того чтобы выяснять то же самое заново на каждом оставшемся паке.
  */
 let geminiQuotaSpent = false;
 
-/**
- * Что написать, бросая шаг. Кончившиеся лимиты — это не поломка: всё, что успело
- * разметиться, уже в базе, а оставшиеся паки разберутся при следующем запуске,
- * потому что шаг и так берёт только те, у которых разметки нет (см. refreshTopics).
- */
-function stopReason(error, left) {
+/** Что написать, сворачивая полосу. Кончившиеся лимиты — не поломка. */
+function stopReason(error) {
 	return error.quota === true
-		? `У Gemini кончились лимиты. Пропускаю оставшиеся паки (${left}): они разберутся при следующем запуске, `
-			+ 'уже размеченные заново не спрашиваются.'
-		: 'Останавливаю шаг: следующий пак получит ту же ошибку.';
+		? `у ${activeModel()} кончились суточные лимиты. Оставшиеся паки разберутся при следующем запуске: `
+			+ 'шаг и так берёт только те, у которых разметки нет.'
+		: 'останавливаю шаг: следующий пак получит ту же ошибку.';
+}
+
+/** Общая проверка перед шагом с моделью. Возвращает false, если спрашивать некого. */
+function geminiReady(step) {
+	if (!hasGemini()) {
+		say(step, 'пропускаю, нет ключа Gemini (data/gemini-key.txt или GEMINI_API_KEY)');
+		return false;
+	}
+
+	if (geminiQuotaSpent) {
+		say(step, 'пропускаю, лимиты Gemini кончились');
+		return false;
+	}
+
+	const left = usage(activeModel());
+
+	if (left.unavailable) {
+		say(step, `пропускаю: модель ${activeModel()} закрыта для этого ключа (${left.refusal ?? 'без объяснений'})`);
+		return false;
+	}
+
+	if (left.spentOut) {
+		say(step, `пропускаю: у ${activeModel()} лимиты на сегодня уже кончились (${usageLine(activeModel())})`);
+		geminiQuotaSpent = true;
+		return false;
+	}
+
+	return true;
 }
 
 /** Раскладывает темы паков по тематикам и считает доли. */
 async function refreshTopics() {
-	if (!hasGemini()) {
-		console.log('--- Тематики: пропускаю, нет ключа Gemini (data/gemini-key.txt или GEMINI_API_KEY)');
-		return;
-	}
-
-	if (geminiQuotaSpent) {
-		console.log('--- Тематики: пропускаю, лимиты Gemini кончились на предыдущем шаге');
+	if (!geminiReady('topics')) {
 		return;
 	}
 
 	// Разметка старее нынешних правил считается отсутствующей: доли в ней означают
 	// не то же самое, что теперь (см. TOPICS_VERSION).
-	const condition = retopics ? '' : `AND (p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION})`;
+	const weaker = weakerModelSql('topics_model');
+	const condition = retopics
+		? ''
+		: `AND (p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION}${weaker.where})`;
 	const authors = authorQueueSql();
-	const rows = db.prepare(`
+	const pending = db.prepare(`
 		SELECT p.id, p.name, p.rounds FROM packages p
 		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${authors.where}
 		ORDER BY ${authors.order}
-	`).all(...authors.params);
+	`);
 
-	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Тематики через ${config.geminiModel}${authorQueueNote()}: `
-		+ `паков без разметки ${rows.length}, будет обработано ${queue.length}`);
-	progress('topics', 0, queue.length);
+	const params = [...weaker.params, ...authors.params];
+	const queue = pending.all(...params);
+
+	say('topics', `через ${activeModel()}${authorQueueNote()}: паков без разметки ${queue.length}`
+		+ `${upgrade ? ' (считая размеченные моделью послабее)' : ''}. ${usageLine(activeModel())}`);
 
 	// Паки, разобранные старой версией, хранят только названия тем — по ним модель угадывает плохо
 	const withoutSamples = queue.filter(row => !normalizeRounds(row.rounds).some(r => r.themes.some(t => t.sample))).length;
 
 	if (withoutSamples > queue.length / 5) {
-		console.log(`    у ${withoutSamples} паков нет образцов ответов: сначала стоит выполнить node src/indexer.js --parse-only --reparse`);
+		say('topics', `у ${withoutSamples} паков нет образцов ответов: сначала стоит выполнить node src/indexer.js --parse-only --reparse`);
 	}
 
 	let labelled = 0;
 	let mixed = 0;
 	let repeats = 0;
 
-	for (let i = 0; i < queue.length; i++) {
-		const row = queue[i];
-		const themes = listThemes(row.id, normalizeRounds(row.rounds));
-		progress('topics', i, queue.length);
+	await drain({
+		step: 'topics',
+		jobs: Math.max(1, config.geminiJobs),
+		stop: () => geminiQuotaSpent,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			const themes = listThemes(row.id, normalizeRounds(row.rounds));
+			const label = bar.label();
 
-		if (themes.length === 0) {
-			continue;
-		}
-
-		try {
-			const marks = await classifyThemes(themes);
-			const { shares, questions } = computeShares(themes, marks);
-			const { topic, share } = toPrimary(shares, questions);
-			const franchises = computeFranchises(themes, marks);
-			const top = franchises[0] ?? null;
-
-			updateTopics.run(
-				JSON.stringify(shares ?? {}),
-				topic,
-				share,
-				JSON.stringify(franchises),
-				top?.name ?? null,
-				top?.share ?? null,
-				Date.now(),
-				row.id,
-			);
-
-			if (topic && topic !== 'mixed') {
-				labelled++;
-			} else if (topic === 'mixed') {
-				mixed++;
+			if (themes.length === 0) {
+				return;
 			}
 
-			if (franchises.length > 0) {
-				repeats++;
+			try {
+				const model = activeModel();
+				const marks = await classifyThemes(themes);
+				const { shares, questions } = computeShares(themes, marks);
+				const { topic, share } = toPrimary(shares, questions);
+				const franchises = computeFranchises(themes, marks);
+				const top = franchises[0] ?? null;
+				const kinds = computeOtherKinds(themes, marks);
+
+				updateTopics.run(
+					JSON.stringify(shares ?? {}),
+					topic,
+					share,
+					JSON.stringify(franchises),
+					top?.name ?? null,
+					top?.share ?? null,
+					JSON.stringify(kinds),
+					Date.now(),
+					model,
+					row.id,
+				);
+
+				if (topic && topic !== 'mixed') {
+					labelled++;
+				} else if (topic === 'mixed') {
+					mixed++;
+				}
+
+				if (franchises.length > 0) {
+					repeats++;
+				}
+
+				const percents = Object.entries(shares ?? {})
+					.filter(([key, v]) => key !== 'other' && v > 0)
+					.sort((a, b) => b[1] - a[1])
+					.map(([key, v]) => `${key} ${Math.round(v * 100)}%`)
+					.join(', ');
+
+				// Повторы — вторая строка: в одну с процентами они не влезают
+				const repeated = franchises
+					.map(f => `${f.name} ×${f.themes}`)
+					.join(', ');
+
+				say('topics', `${label} «${row.name}»: ${percents || 'ничего тематического'} -> ${topic ?? 'мало вопросов'}`);
+
+				if (repeated) {
+					say('topics', `      повторы: ${repeated}`);
+				}
+
+				// Чем оказалось «прочее»: без этой строки в логе видно только
+				// «прочего 40%», а сорок процентов чего — непонятно
+				if (kinds.length > 0) {
+					say('topics', `      прочее: ${kinds.map(kind => `${OTHER_KINDS[kind.key]} ${Math.round(kind.share * 100)}%`).join(', ')}`);
+				}
+			} catch (error) {
+				say('topics', `${label} «${row.name}»: ${error.message}`);
+
+				// Ключ, модель или кончившиеся лимиты — дальше будет то же самое
+				if (isFatalGeminiError(error)) {
+					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
+					say('topics', stopReason(error));
+				}
 			}
+		},
+	});
 
-			const percents = Object.entries(shares ?? {})
-				.filter(([key, v]) => key !== 'other' && v > 0)
-				.sort((a, b) => b[1] - a[1])
-				.map(([key, v]) => `${key} ${Math.round(v * 100)}%`)
-				.join(', ');
-
-			// Повторы — вторая строка: в одну с процентами они не влезают
-			const repeated = franchises
-				.map(f => `${f.name} ×${f.themes}`)
-				.join(', ');
-
-			console.log(`[${i + 1}/${queue.length}] «${row.name}»: ${percents || 'ничего тематического'} -> ${topic ?? 'мало вопросов'}`);
-
-			if (repeated) {
-				console.log(`      повторы: ${repeated}`);
-			}
-		} catch (error) {
-			console.log(`[${i + 1}/${queue.length}] «${row.name}»: ${error.message}`);
-
-			// Ключ, модель или кончившиеся лимиты — дальше будет то же самое
-			if (isFatalGeminiError(error)) {
-				geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
-				console.log(stopReason(error, queue.length - i));
-				break;
-			}
-		}
-
-		await sleep(config.geminiDelayMs);
-	}
-
-	progress('topics', queue.length, queue.length);
-	console.log(`Тематики: ярлык получили ${labelled} паков, солянок ${mixed}, с повторами франшиз ${repeats}.`);
+	say('topics', `ярлык получили ${labelled} паков, солянок ${mixed}, с повторами франшиз ${repeats}. ${usageLine(activeModel())}`);
 }
 
-/** Просит модель описать каждый пак одной строкой: о чём он вообще. */
+/**
+ * Просит модель описать каждый пак одной строкой: о чём он вообще.
+ *
+ * Описание составляется всем разобранным пакам без исключения — в том числе тем,
+ * под которыми в обсуждении уже написано целое сочинение. Это разные вещи и стоят
+ * они на карточке порознь: авторский текст — слова выложившего, как он их написал,
+ * а эта строка — то, что в паке на самом деле, по ответам его вопросов. Первое
+ * бывает и на десять абзацев, и «всем привет, вот пак», и рассказывает скорее
+ * о поводе, чем о содержимом.
+ */
 async function refreshSummaries() {
-	if (!hasGemini()) {
-		console.log('--- Описания: пропускаю, нет ключа Gemini (data/gemini-key.txt или GEMINI_API_KEY)');
+	if (!geminiReady('summary')) {
 		return;
 	}
 
-	if (geminiQuotaSpent) {
-		console.log('--- Описания: пропускаю, лимиты Gemini кончились на предыдущем шаге');
-		return;
-	}
-
-	const condition = resummary ? '' : 'AND p.summary_at IS NULL';
+	const weaker = weakerModelSql('summary_model');
+	const condition = resummary ? '' : `AND (p.summary_at IS NULL${weaker.where})`;
 	const authors = authorQueueSql();
-	const rows = db.prepare(`
+	const pending = db.prepare(`
 		SELECT p.id, p.name, p.tags, p.rounds FROM packages p
-		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${authors.where}
+		WHERE p.status = 'ok' ${condition}${authors.where}
 		ORDER BY ${authors.order}
-	`).all(...authors.params);
+	`);
 
-	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Описания через ${config.geminiModel}${authorQueueNote()}: `
-		+ `паков без описания ${rows.length}, будет обработано ${queue.length}`);
-	progress('summary', 0, queue.length);
+	const params = [...weaker.params, ...authors.params];
+
+	say('summary', `через ${activeModel()}${authorQueueNote()}: паков без описания ${pending.all(...params).length}`
+		+ `${upgrade ? ' (считая описанные моделью послабее)' : ''}. ${usageLine(activeModel())}`);
 
 	let described = 0;
+	let silent = 0;
 
-	for (let i = 0; i < queue.length; i++) {
-		const row = queue[i];
-		const themes = listThemes(row.id, normalizeRounds(row.rounds));
-		progress('summary', i, queue.length);
+	await drain({
+		step: 'summary',
+		jobs: Math.max(1, config.geminiJobs),
+		stop: () => geminiQuotaSpent,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			const themes = listThemes(row.id, normalizeRounds(row.rounds));
+			const label = bar.label();
 
-		if (themes.length === 0) {
-			continue;
-		}
+			try {
+				const model = activeModel();
+				const summary = await describePack({
+					name: row.name ?? '',
+					tags: jsonOrDefault(row.tags, []),
+					themes,
+				});
 
-		try {
-			const summary = await describePack({
-				name: row.name ?? '',
-				tags: jsonOrDefault(row.tags, []),
-				themes,
-			});
+				updateSummary.run(summary || null, Date.now(), model, row.id);
 
-			updateSummary.run(summary || null, Date.now(), row.id);
+				if (summary) {
+					described++;
+				} else {
+					silent++;
+				}
 
-			if (summary) {
-				described++;
+				say('summary', `${label} «${row.name}»: ${summary || 'сказать нечего'}`);
+			} catch (error) {
+				say('summary', `${label} «${row.name}»: ${error.message}`);
+
+				if (isFatalGeminiError(error)) {
+					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
+					say('summary', stopReason(error));
+				}
 			}
+		},
+	});
 
-			console.log(`[${i + 1}/${queue.length}] «${row.name}»: ${summary || 'сказать нечего'}`);
-		} catch (error) {
-			console.log(`[${i + 1}/${queue.length}] «${row.name}»: ${error.message}`);
-
-			if (isFatalGeminiError(error)) {
-				geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
-				console.log(stopReason(error, queue.length - i));
-				break;
-			}
-		}
-
-		await sleep(config.geminiDelayMs);
-	}
-
-	progress('summary', queue.length, queue.length);
-	console.log(`Описания: получили ${described} паков.`);
+	say('summary', `описание получили ${described} паков${silent ? `, сказать нечего про ${silent}` : ''}. ${usageLine(activeModel())}`);
 }
 
 /** Пересчитывает уровни по уже сохранённым числам — нужен после правки порогов в настройках. */
@@ -1075,7 +1480,7 @@ function recalcLevels() {
 		}
 	}
 
-	console.log(`--- Пересчёт уровней: обработано ${rows.length}, оценку получили ${changed}`);
+	say('recalc', `уровни: обработано ${rows.length}, оценку получили ${changed}`);
 }
 
 /** Пересчитывает ярлыки паков по сохранённым долям — нужен после правки порога. */
@@ -1102,7 +1507,7 @@ function recalcTopics() {
 		}
 	}
 
-	console.log(`--- Пересчёт тематик: обработано ${rows.length}, ярлык получили ${labelled}`);
+	say('recalc', `тематики: обработано ${rows.length}, ярлык получили ${labelled}`);
 }
 
 /** Общий пересчёт по сохранённым данным: и уровни, и ярлыки. */
@@ -1117,6 +1522,7 @@ function printSummary() {
 	const errors = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'error'`).get().c;
 	const deadLinks = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'dead'`).get().c;
 	const gone = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'gone'`).get().c;
+	const waiting = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'new'`).get().c;
 	const withStats = db.prepare('SELECT COUNT(*) AS c FROM stats WHERE found = 1').get().c;
 	const withLogo = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE logo_state = 'ok'`).get().c;
 	const described = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE summary IS NOT NULL AND summary <> ''`).get().c;
@@ -1125,11 +1531,15 @@ function printSummary() {
 	const specials = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'ok' AND special_count IS NULL`).get().c;
 	const levels = db.prepare('SELECT level, COUNT(*) AS c FROM stats WHERE level IS NOT NULL GROUP BY level ORDER BY level DESC').all();
 	const topics = db.prepare('SELECT primary_topic, COUNT(*) AS c FROM packages WHERE primary_topic IS NOT NULL GROUP BY primary_topic ORDER BY c DESC').all();
+	const byModel = db.prepare(`
+		SELECT COALESCE(topics_model, 'до появления пометки') AS model, COUNT(*) AS c
+		FROM packages WHERE topics_at IS NOT NULL GROUP BY model ORDER BY c DESC
+	`).all();
 
 	console.log('');
 	console.log('=== Итого');
 	console.log(`Паков в базе: ${total} (разобрано ${parsed}, мёртвых ссылок ${deadLinks}, с ошибками ${errors}`
-		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''})`);
+		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''}${waiting > 0 ? `, ждут разбора ${waiting}` : ''})`);
 	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}. С описанием: ${described}. С повторами франшиз: ${repeated}.`);
 
 	if (specials > 0) {
@@ -1150,7 +1560,21 @@ function printSummary() {
 			console.log(`  ${topic.primary_topic}: ${topic.c}`);
 		}
 	}
+
+	if (byModel.length > 0) {
+		console.log('Чем размечено:');
+
+		for (const row of byModel) {
+			console.log(`  ${row.model}: ${row.c}`);
+		}
+	}
+
+	if (hasGemini()) {
+		console.log(`Расход Gemini: ${usageLine(activeModel())} (${activeModel()})`);
+	}
 }
+
+// ————— служебные ключи, после которых ничего не делается —————
 
 if (has('--gemini-models')) {
 	try {
@@ -1164,38 +1588,113 @@ if (has('--gemini-models')) {
 	process.exit(0);
 }
 
+if (has('--gemini-usage')) {
+	const state = usageReport();
+	console.log(`Расход за сутки ${state.day} (по тихоокеанскому времени: там сбрасываются квоты Google)`);
+
+	for (const model of state.models) {
+		const limit = model.limit === null ? 'предел неизвестен' : `${model.spent} из ${model.exact ? '' : '≈'}${model.limit}`;
+		const state_ = model.unavailable ? ' — закрыта для этого ключа' : model.spentOut ? ' — лимит кончился' : '';
+		console.log(`  ${model.current ? '*' : ' '} ${model.id.padEnd(26)} ${limit}${state_}`);
+	}
+
+	console.log('Звёздочкой отмечена выбранная модель. Точные пределы (без «≈») — те, что Gemini назвал сам, отказав.');
+	process.exit(0);
+}
+
 /**
- * Шаги идут в этом порядке независимо от того, в каком их попросили: сначала
- * собрать и разобрать, потом уже спрашивать про них чужие сервисы.
- * Логотипы стоят после разбора, потому что разбор их и так качает, — этот шаг
- * нужен только для паков, у которых логотипа почему-то не оказалось.
+ * Шаги и то, кто кому подносит работу.
+ *
+ * `feeds` — не «выполнять после», а «пока он работает, у меня может прибавиться»:
+ * обход ВК находит паки для разбора, разбор готовит их для статистики и модели.
+ * Полосы при этом стартуют все разом (см. drain).
+ *
+ * `after` — настоящее ожидание, и оно ровно одно: пересчёт уровней и ярлыков
+ * считает по тому, что уже лежит в базе, и начинать его раньше, чем статистика
+ * с тематиками закончат складывать туда числа, попросту бессмысленно.
  */
 const STEPS = [
 	{ key: 'vk', name: 'Обход обсуждений ВК', flag: '--vk-only', run: scanVk, byDefault: true },
-	{ key: 'parse', name: 'Разбор паков', flag: '--parse-only', run: parsePackages, byDefault: true },
-	{ key: 'stats', name: 'Статистика и сложность', flag: '--stats-only', run: refreshStats, byDefault: true },
-	{ key: 'topics', name: 'Тематики и проценты', flag: '--topics-only', run: refreshTopics, byDefault: true },
-	{ key: 'summary', name: 'Краткие описания', flag: '--summary-only', run: refreshSummaries, byDefault: true },
-	{ key: 'logos', name: 'Логотипы', flag: '--logos', run: fetchLogos, byDefault: false },
-	{ key: 'specials', name: 'Спецвопросы', flag: '--specials', run: fetchSpecials, byDefault: false },
-	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', run: recalcAll, byDefault: false },
+	{ key: 'parse', name: 'Разбор паков', flag: '--parse-only', run: parsePackages, byDefault: true, feeds: ['vk'] },
+	{ key: 'stats', name: 'Статистика и сложность', flag: '--stats-only', run: () => refreshStats('all'), byDefault: true, feeds: ['parse'] },
+	// Тот же шаг, но только для паков, у которых статистики нет вовсе. Отдельным
+	// шагом, а не галочкой: его и полный обход выбирают в разных случаях, и по
+	// умолчанию не идёт ни один из двух, раз уж полный уже отмечен
+	{ key: 'statsnew', name: 'Статистика только у новых', flag: '--stats-new', run: () => refreshStats('new'), byDefault: false, feeds: ['parse'] },
+	{ key: 'topics', name: 'Тематики и проценты', flag: '--topics-only', run: refreshTopics, byDefault: true, feeds: ['parse'] },
+	{ key: 'summary', name: 'Краткие описания', flag: '--summary-only', run: refreshSummaries, byDefault: true, feeds: ['parse'] },
+	{ key: 'logos', name: 'Логотипы', flag: '--logos', run: fetchLogos, byDefault: false, feeds: ['parse'] },
+	{ key: 'specials', name: 'Спецвопросы', flag: '--specials', run: fetchSpecials, byDefault: false, feeds: ['parse'] },
+	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', run: recalcAll, byDefault: false, after: ['stats', 'statsnew', 'topics'] },
 ];
 
 /** Какие шаги делать: по флагам, по списку --steps= или, если не сказано, обычный полный проход. */
 function selectedSteps() {
 	const asked = new Set(text('steps').split(',').map(s => s.trim()).filter(Boolean));
 	const chosen = STEPS.filter(step => asked.has(step.key) || has(step.flag));
+	const steps = chosen.length > 0 ? chosen : STEPS.filter(step => step.byDefault);
 
-	return chosen.length > 0 ? chosen : STEPS.filter(step => step.byDefault);
+	// Полный обход статистики спрашивает и про новых тоже: делать рядом с ним ещё
+	// и короткий проход означало бы спросить их дважды
+	return steps.some(step => step.key === 'stats')
+		? steps.filter(step => step.key !== 'statsnew')
+		: steps;
 }
 
 const steps = selectedSteps();
-report({ plan: steps.map(step => ({ key: step.key, name: step.name })) });
+const chosenKeys = new Set(steps.map(step => step.key));
+const finished = new Set();
+
+/**
+ * Работает ли ещё шаг, который может подкинуть работы. Шаг, не выбранный в этот
+ * запуск, не работает по определению: разбор в одиночку не должен ждать обхода ВК,
+ * которого никто не просил.
+ */
+const isRunning = key => chosenKeys.has(key) && !finished.has(key);
 
 for (const step of steps) {
-	report({ step: step.key, state: 'start' });
-	await step.run();
-	report({ step: step.key, state: 'done' });
+	tracks.set(step.key, new Track(step.key));
 }
 
+report({ plan: steps.map(step => ({ key: step.key, name: step.name })) });
+
+let broke = false;
+
+/** Один шаг: дождаться тех, после кого положено, сделать своё, отметиться. */
+async function runStep(step, waitFor) {
+	await Promise.all(waitFor);
+	report({ step: step.key, state: 'start' });
+
+	try {
+		await step.run();
+	} catch (error) {
+		broke = true;
+		console.error(`[${TAGS[step.key]}] шаг сорвался: ${error.message}`);
+	} finally {
+		finished.add(step.key);
+		track(step.key).finish();
+	}
+}
+
+const started = new Map();
+
+for (const step of steps) {
+	// Ждать надо только тех, кого в этот запуск действительно позвали
+	const waitFor = (step.after ?? [])
+		.filter(key => chosenKeys.has(key))
+		.map(key => started.get(key))
+		.filter(Boolean);
+
+	// Последовательный режим ждёт всех, кто уже запущен: это и есть прежний порядок
+	started.set(step.key, runStep(step, serial ? [...started.values()] : waitFor));
+}
+
+await Promise.all(started.values());
+
 printSummary();
+
+// Сорвавшийся шаг не должен выглядеть удачным запуском: по коду выхода ночной
+// обход решает, выкладывать ли собранное наверх (см. scripts/nightly.js).
+if (broke) {
+	process.exitCode = 1;
+}

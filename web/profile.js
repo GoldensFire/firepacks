@@ -12,7 +12,7 @@
 
 const LEVEL_ORDER = [4, 3, 2, 1];
 /** Порядок тот же, что в колонке фильтров библиотеки (см. web/app.js). */
-const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'music', 'unknown'];
+const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'books', 'music', 'unknown'];
 
 const EXTRA_TOPICS = {
 	mixed: { name: 'Солянка', packName: 'Солянка' },
@@ -345,8 +345,16 @@ function renderLibrary() {
 	grid.textContent = '';
 
 	if (profile.packages.length === 0) {
-		grid.append(element('div', 'empty',
-			'Здесь появятся паки, отмеченные сыгранными. Отметить можно в библиотеке — кнопкой на карточке.'));
+		// Без входа отметки лежат в самом браузере и до профиля не доходят: он
+		// показывает то, что знает сервер. Сказать об этом надо здесь — иначе
+		// человек, отметивший вчера десяток паков, решит, что они пропали.
+		const anonymous = !user && facets.localBlacklist !== true;
+
+		grid.append(element('div', 'empty', anonymous
+			? 'Здесь появятся паки, отмеченные сыгранными. Пока входа нет, отметки живут '
+				+ 'в самом браузере и сюда не попадают: войдите через Discord — они переедут в учётную запись.'
+			: 'Здесь появятся паки, отмеченные сыгранными. Отметить можно в библиотеке — кнопкой на карточке.'));
+
 		$('resultInfo').textContent = '';
 		return;
 	}

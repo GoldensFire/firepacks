@@ -120,8 +120,10 @@ export async function* readTopic(topicUrl, options = {}) {
 		const comments = parseComments(html, topicUrl);
 		page++;
 
+		// Сколько всего сообщений в теме, со страницы не видно: total остаётся пустым,
+		// и полоска выполнения у этого способа обхода просто считает прочитанное
 		if (options.onPage) {
-			options.onPage(page, offset, comments.length);
+			options.onPage({ page, offset, found: comments.length, read: offset + PAGE_SIZE, total: null });
 		}
 
 		for (const comment of comments) {

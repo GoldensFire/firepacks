@@ -56,6 +56,155 @@ export function buildAuthorKey(author) {
 	return author.trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
 }
 
+// ————— составные подписи —————
+//
+// В поле <author> внутри пака нередко записаны сразу несколько человек, и записаны
+// как придётся: «Vieldy,Pa4ok,Slime», «r1v1_666 & Wiqox & adderall», «vadim и
+// бурмалда», «Бурмалда, drugs (аптека)». Для базы это была одна подпись целиком:
+// нажать на неё можно было только вместе, паки Бурмалды по такой строке
+// не находились, а в топе авторов каждое такое сочетание стояло отдельным
+// «автором» — при том, что все его паки уже посчитаны каждому из них порознь.
+//
+// Разбор нарочно осторожный: где непонятно, строка остаётся целой. Лишний
+// несуществующий автор в списке хуже, чем неразобранная подпись, — его паки
+// потеряются, а вторую половину подписи потом не найти.
+
+/**
+ * Части, которые именем не являются: так подписывают «и все остальные».
+ * Сравниваются по buildAuthorKey, поэтому пишутся здесь в нижнем регистре.
+ */
+const NOT_AUTHORS = new Set([
+	'др', 'и др', 'другие', 'и другие', 'прочие', 'остальные', 'все',
+	'etc', 'co', 'ко', 'feat', 'ft', 'и', 'and', 'хз', 'люди', 'др.',
+]);
+
+/**
+ * Похоже на ссылку, а не на подпись. Такие строки не режем вовсе: косые черты
+ * и точки в адресе — часть адреса, и «https://vk.com/narygrown» превратилось бы
+ * в двух авторов «https:» и «vk.com».
+ */
+const LOOKS_LIKE_LINK = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|ru|tv|me|to|org|net|io)\b/i;
+
+/**
+ * Разделители перечисления. Косая черта — только с пробелами вокруг: «Tw/LastGoMer»
+ * и «B()tYaR/\3I» это цельные прозвища, а «sentsuri / 86» — двое.
+ *
+ * Флаг y (липучий) нужен, чтобы спрашивать «стоит ли разделитель ровно здесь»,
+ * а не «есть ли он где-нибудь дальше».
+ */
+const SEPARATORS = /\s*[,;&+]\s*|\s+\/\s+/y;
+
+/** Союз между двумя подписями. Тоже липучий и по той же причине. */
+const AND_WORD = /\s+(?:и|and)\s+/iy;
+
+/** Сколько слов в части. По ним решается, перечисление ли это через «и». */
+const wordCount = text => text.split(/\s+/).filter(Boolean).length;
+
+/**
+ * Режет по разделителям верхнего уровня: то, что в скобках, остаётся целым.
+ * «bbonbon8(1-й раунд), h0b0t(2,3 раунд)» — двое, а не четверо.
+ */
+function splitTopLevel(text) {
+	const parts = [];
+	let depth = 0;
+	let start = 0;
+
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i];
+
+		if (char === '(' || char === '[') {
+			depth++;
+			continue;
+		}
+
+		if (char === ')' || char === ']') {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+
+		if (depth > 0) {
+			continue;
+		}
+
+		SEPARATORS.lastIndex = i;
+
+		if (SEPARATORS.test(text)) {
+			parts.push(text.slice(start, i));
+			start = SEPARATORS.lastIndex;
+			i = start - 1;
+		}
+	}
+
+	parts.push(text.slice(start));
+	return parts;
+}
+
+/**
+ * «Лиса и Помидор» — двое, а «Господи ну и дурак этот Кубик» — один. Отличаются
+ * они длиной сторон: перечисляют прозвищами, а не предложениями, поэтому режем
+ * только когда с обеих сторон стоит не больше двух слов.
+ */
+function splitByAnd(text) {
+	for (let i = 0; i < text.length; i++) {
+		AND_WORD.lastIndex = i;
+
+		if (!AND_WORD.test(text)) {
+			continue;
+		}
+
+		const left = text.slice(0, i).trim();
+		const right = text.slice(AND_WORD.lastIndex).trim();
+
+		if (!left || !right || wordCount(left) > 2 || wordCount(right) > 2) {
+			continue;
+		}
+
+		return [left, right];
+	}
+
+	return [text];
+}
+
+/**
+ * Подписи паков по одному человеку. Ничего не находит — возвращает то, что было:
+ * потерять автора хуже, чем оставить составную подпись неразобранной.
+ *
+ * @param {string[]} authors как записано в самом файле пака
+ * @returns {string[]} по имени в строке, без повторов
+ */
+export function splitAuthors(authors) {
+	const out = [];
+	const seen = new Set();
+
+	for (const raw of authors ?? []) {
+		const text = String(raw ?? '').trim();
+
+		if (!text) {
+			continue;
+		}
+
+		const pieces = LOOKS_LIKE_LINK.test(text)
+			? [text]
+			: splitTopLevel(text).flatMap(splitByAnd);
+
+		for (const piece of pieces) {
+			// Хвостовые точки и многоточия к имени не относятся: «NSPants и др.»
+			const name = piece.trim().replace(/[.,;\s]+$/u, '').trim();
+			const key = buildAuthorKey(name);
+
+			if (!key || NOT_AUTHORS.has(key) || seen.has(key)) {
+				continue;
+			}
+
+			seen.add(key);
+			out.push(name);
+		}
+	}
+
+	// Разобрали в ноль (подпись была из одних «и др.») — пусть остаётся как есть
+	return out.length > 0 ? out : (authors ?? []).map(a => String(a).trim()).filter(Boolean);
+}
+
 /**
  * Ключ пака, общий для всех его копий: один и тот же файл нередко выложен
  * в обсуждение не по разу, и всё, что человек про пак говорит, — отметка

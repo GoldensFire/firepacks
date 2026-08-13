@@ -3,10 +3,13 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES } from './config.js';
-import { db, jsonOrDefault, normalizeRounds, buildAuthorKey, packKey, PACK_KEY_SQL, LOCAL_USER_ID } from './db.js';
+import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS } from './config.js';
+import {
+	db, jsonOrDefault, normalizeRounds, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
+} from './db.js';
 import { runSearch } from './search.js';
-import { startUpdate, stopUpdate, updateState, subscribe, UPDATE_STEPS } from './updater.js';
+import { groupSubjects, subjectMatches } from './subject.js';
+import { startUpdate, stopUpdate, updateState, subscribe, updateModels, UPDATE_STEPS } from './updater.js';
 import {
 	hasDiscord, redirectUri, currentUser, startLogin, finishLogin, logout,
 	rate, setBlacklisted, listBlacklist,
@@ -79,6 +82,7 @@ const SORTS = {
 	games_share: shareOf('games'),
 	movies: shareOf('movies'),
 	cartoons: shareOf('cartoons'),
+	books: shareOf('books'),
 	music: shareOf(MUSIC_KEY),
 	franchise: 'COALESCE(p.franchise_top_share, -1)',
 	// Паки без нужного числа оценок сортировать не по чему: они уходят в конец,
@@ -118,6 +122,36 @@ function authorPackCounts() {
 }
 
 /**
+ * Типы паков «целиком про одно», сведённые к предмету: «Дота» и «Дота 2» —
+ * одна строка в колонке фильтров и один отбор (см. subject.js). Считается
+ * по готовой колонке franchise_top, обе колонки отбора лежат в указателе
+ * ix_packages_ok_subject, поэтому строк это не читает.
+ *
+ * Ответ нужен и колонке фильтров, и самому отбору (по названию типа надо знать,
+ * какие написания в него входят), и меняется он только при обходе обсуждения —
+ * поэтому запоминается на те же полминуты, что и число паков у авторов.
+ */
+const subjectsQuery = db.prepare(`
+	SELECT p.franchise_top AS name, COUNT(*) AS count
+	FROM packages p
+	WHERE p.status = 'ok' AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
+	GROUP BY p.franchise_top
+`);
+
+const SUBJECTS_TTL = 30_000;
+let subjectsCache = null;
+let subjectsAt = 0;
+
+function subjectGroups() {
+	if (!subjectsCache || Date.now() - subjectsAt > SUBJECTS_TTL) {
+		subjectsCache = groupSubjects(subjectsQuery.all(config.subjectPackShare));
+		subjectsAt = Date.now();
+	}
+
+	return subjectsCache;
+}
+
+/**
  * Чей чёрный список применять и пополнять. Вошедшему — его собственный,
  * а без входа на своей машине список принадлежит установке: прятать паки
  * можно так же без спроса, как отмечать их сыгранными (см. config.localBlacklist).
@@ -132,7 +166,10 @@ function blacklistOwner(user) {
 }
 
 function toPackage(row) {
-	const authors = jsonOrDefault(row.authors, []);
+	// Подпись из файла разбирается на людей: «Vieldy,Pa4ok,Slime» — это трое,
+	// и нажиматься на карточке каждый должен по отдельности. В самой колонке
+	// подпись остаётся как есть: по ней пак ищется в статистике SIGame.
+	const authors = splitAuthors(jsonOrDefault(row.authors, []));
 	const ratingCount = row.rating_count ?? 0;
 	const counts = authorPackCounts();
 
@@ -169,6 +206,8 @@ function toPackage(row) {
 		primaryShare: row.primary_share,
 		// Франшизы, к которым пак возвращается не по одному разу
 		franchises: jsonOrDefault(row.franchises, []),
+		// Чем оказалось «прочее»: стримеры, история, спорт — только то, чего набралось заметно
+		otherKinds: jsonOrDefault(row.other_kinds, []),
 		summary: row.summary,
 		// Имя выложившего наружу не отдаём: в интерфейсе это просто «Источник»
 		vkDate: row.vk_date,
@@ -313,11 +352,15 @@ function buildWhere(query, userId) {
 	// там вопрос «где эта франшиза вообще встречается», а здесь «какие паки этого
 	// типа», и пак, у которого про Вархаммер две темы из тридцати, паком
 	// по Вархаммеру не является (см. subjectPackShare).
+	//
+	// Написаний у типа бывает несколько: «Дота» и «Дота 2» — один тип, и нажатие
+	// на него обязано показать паки по обоим (см. subject.js).
 	const subject = (query.get('subject') ?? '').trim();
 
 	if (subject) {
-		conditions.push('p.franchise_top = ? AND p.franchise_top_share >= ?');
-		params.push(subject, config.subjectPackShare);
+		const names = subjectMatches(subjectGroups(), subject);
+		conditions.push(`p.franchise_top IN (${names.map(() => '?').join(',')}) AND p.franchise_top_share >= ?`);
+		params.push(...names, config.subjectPackShare);
 	}
 
 	if (query.get('hidePlayed') === '1') {
@@ -515,14 +558,11 @@ function getFacets() {
 	// таблице ради поля, которое никто не читает, — самый дорогой запрос из всех,
 	// что тут были. Здесь читается готовая колонка с самым частым предметом,
 	// и обе колонки отбора лежат в указателе (ix_packages_ok_subject).
-	const subjects = db.prepare(`
-		SELECT p.franchise_top AS name, COUNT(*) AS c
-		FROM packages p
-		WHERE p.status = 'ok' AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
-		GROUP BY p.franchise_top
-		ORDER BY c DESC, name
-		LIMIT ?
-	`).all(config.subjectPackShare, config.subjectLimit);
+	//
+	// Отсечка по числу стоит после сведения, а не в самом запросе: сведённая
+	// «Дота» — это сумма «Доты» и «Доты 2», и обрезать список до сведения значило
+	// бы иногда отрезать половину типа.
+	const subjects = subjectGroups().slice(0, config.subjectLimit);
 
 	// Языки паков. Считаются по тому, что записано в самом файле; там же, где
 	// язык не указан, стоит unknown — таких паков в базе заметная часть,
@@ -563,9 +603,16 @@ function getFacets() {
 		hardRight: config.hardRightPercent,
 		franchiseMinThemes: config.franchiseMinThemes,
 		franchiseDominantShare: config.franchiseDominantShare,
-		// Дополнительные типы паков и порог, с которого пак считается паком про одно
-		subjects: subjects.map(row => ({ name: row.name, count: row.c })),
+		// Дополнительные типы паков и порог, с которого пак считается паком про одно.
+		// key — то же название латиницей и без номера части: по нему в колонке
+		// фильтров находится «Дота», когда набирают «dota»
+		subjects: subjects.map(group => ({ name: group.name, key: group.key, count: group.count })),
 		subjectPackShare: config.subjectPackShare,
+		// Пак про одну вселенную: с этой доли ярлык называет её прямо — «Кинопак (Гарри Поттер)»
+		universePackShare: config.universePackShare,
+		// Виды «прочего» и порог, с которого их стоит называть вслух: «Прочее: стримеры, история»
+		otherKindNames: OTHER_KINDS,
+		otherKindShare: config.otherKindShare,
 		// На хостинге собирать базу нечем: сайт не показывает ни страницы обновления, ни ссылки на неё
 		readOnly: config.readOnly,
 		playerUri: config.playerUri,
@@ -625,12 +672,14 @@ function getTopAuthors(query) {
 		LEFT JOIN stats s ON s.package_id = picked.id
 		GROUP BY a.author_key
 		ORDER BY games DESC, packs DESC, name COLLATE NOCASE
-		LIMIT 200
 	`).all(...params);
 
 	return {
 		period: periodKey,
-		// Сколько всего авторов попало в подборку — список обрезан двумя сотнями
+		// Все, кто вообще подписал хоть один пак. Раньше список обрывался на двухстах,
+		// и человек, чей единственный пак играли полсотни раз, в нём просто
+		// не существовал — а страница называется «топ авторов», и вопрос «а я тут
+		// где» ей задают чаще всего.
 		total: rows.length,
 		authors: rows.map((row, index) => ({
 			place: index + 1,
@@ -688,6 +737,33 @@ function setPlayed(id, played) {
 	}
 
 	return ids.length;
+}
+
+/** Строки паков по общему ключу: у копий одного файла ключ один на всех. */
+const packagesByKey = db.prepare(`SELECT p.id FROM packages p WHERE ${PACK_KEY_SQL} = ?`);
+
+/**
+ * Отметить сыгранными сразу список паков, названных общим ключом. Нужно переносу
+ * отметок, сделанных до входа: без учётной записи они лежат в самом браузере
+ * (см. web/app.js), а номера строк для этого не годятся — они меняются при
+ * каждой пересборке базы, ключ же считается из самого файла.
+ */
+function setPlayedKeys(keys, played) {
+	let affected = 0;
+
+	for (const key of new Set((keys ?? []).map(value => String(value ?? '').trim()).filter(Boolean))) {
+		for (const row of packagesByKey.all(key)) {
+			if (played) {
+				markPlayed.run(row.id, Date.now());
+			} else {
+				unmarkPlayed.run(row.id);
+			}
+
+			affected++;
+		}
+	}
+
+	return affected;
 }
 
 /**
@@ -944,7 +1020,17 @@ const server = http.createServer(async (request, response) => {
 		}
 
 		if (url.pathname === '/api/played' && request.method === 'POST') {
-			const { id, played } = JSON.parse(await readBody(request));
+			const { id, packKeys, played } = JSON.parse(await readBody(request));
+
+			// Списком ключей приезжают отметки, сделанные до входа: на хостинге
+			// они до этого мига лежали в самом браузере (см. web/app.js). Дома
+			// такого не бывает — отметки тут и без входа принадлежат установке, —
+			// но метод один на обе половины, и отвечать он должен одинаково.
+			if (Array.isArray(packKeys)) {
+				sendJson(response, { played: !!played, affected: setPlayedKeys(packKeys, played) });
+				return;
+			}
+
 			const affected = setPlayed(id, played);
 
 			sendJson(response, { id, played: !!played, affected });
@@ -966,6 +1052,13 @@ const server = http.createServer(async (request, response) => {
 
 		if (url.pathname === '/api/update/steps') {
 			sendJson(response, { steps: UPDATE_STEPS, hasGemini: Boolean(config.geminiKey), hasVkToken: Boolean(config.vkToken) });
+			return;
+		}
+
+		// Модели и расход запросов. Отдельным методом, а не вместе с шагами:
+		// расход меняется прямо во время работы, и страница спрашивает его заново
+		if (url.pathname === '/api/update/models') {
+			sendJson(response, updateModels());
 			return;
 		}
 
@@ -1011,9 +1104,15 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
-		// Значок лежит в корне проекта рядом с ярлыками, а не в папке сайта
+		// Значок лежит в корне проекта рядом с ярлыками, а не в папке сайта.
+		//
+		// Вечного кэша ему не даём нарочно, в отличие от обложек: имя у значка
+		// одно и то же, а сам файл меняют — и с «immutable» браузер год не спросил
+		// бы про него ни разу. Новый значок при этом не появлялся бы ни в закладке,
+		// ни во вкладке, и выглядело бы это как «замена не сработала». Весит он
+		// семь килобайт, и спросить про него лишний раз ничего не стоит.
 		if (url.pathname === '/favicon.ico') {
-			sendFile(response, config.iconPath, request, true);
+			sendFile(response, config.iconPath, request);
 			return;
 		}
 

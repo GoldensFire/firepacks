@@ -11,8 +11,9 @@
 //   2. Отметки «сыграно» лежат по общему ключу пака и принадлежат вошедшему,
 //      а не установке: посетителей тут много, см. cf/schema.sql.
 
-import { settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY } from '../../src/settings.js';
-import { jsonOrDefault, normalizeRounds, buildAuthorKey, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import { settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS } from '../../src/settings.js';
+import { jsonOrDefault, normalizeRounds, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import { groupSubjects, subjectMatches } from '../../src/subject.js';
 import { findHits, idList } from './search.js';
 
 /**
@@ -52,6 +53,7 @@ const SORTS = {
 	games_share: shareOf('games'),
 	movies: shareOf('movies'),
 	cartoons: shareOf('cartoons'),
+	books: shareOf('books'),
 	music: shareOf(MUSIC_KEY),
 	franchise: 'COALESCE(p.franchise_top_share, -1)',
 	// Паки без нужного числа оценок сортировать не по чему: они уходят в конец,
@@ -116,8 +118,44 @@ async function authorPackCounts(db) {
 	return authorCountsCache;
 }
 
+/**
+ * Типы паков «целиком про одно», сведённые к предмету: «Дота» и «Дота 2» —
+ * одна строка в колонке фильтров и один отбор (см. src/subject.js). Ответ нужен
+ * и колонке, и самому отбору: по названию типа надо знать, какие написания
+ * в него входят.
+ *
+ * Меняется только при заливке базы, поэтому изолят держит его у себя так же,
+ * как остальную общую часть. Обе колонки отбора лежат в указателе
+ * ix_packages_ok_subject — строк этот запрос не читает.
+ */
+const SUBJECTS_TTL = 5 * 60 * 1000;
+
+let subjectsCache = null;
+let subjectsAt = 0;
+
+async function subjectGroups(db) {
+	if (subjectsCache && Date.now() - subjectsAt < SUBJECTS_TTL) {
+		return subjectsCache;
+	}
+
+	const { results } = await db.prepare(`
+		SELECT p.franchise_top AS name, COUNT(*) AS count
+		FROM packages p
+		WHERE p.status = 'ok' AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
+		GROUP BY p.franchise_top
+	`).bind(settings.subjectPackShare).all();
+
+	subjectsCache = groupSubjects(results);
+	subjectsAt = Date.now();
+	return subjectsCache;
+}
+
 function toPackage(row, counts) {
-	const authors = jsonOrDefault(row.authors, []);
+	// Подпись из файла разбирается на людей: «Vieldy,Pa4ok,Slime» — это трое,
+	// и нажиматься на карточке каждый должен по отдельности. Разбор общий
+	// с домашним сайтом (src/keys.js), иначе имена авторов разошлись бы
+	// с ключами в pack_authors, по которым ищутся их паки.
+	const authors = splitAuthors(jsonOrDefault(row.authors, []));
 	const ratingCount = row.rating_count ?? 0;
 
 	return {
@@ -154,6 +192,8 @@ function toPackage(row, counts) {
 		primaryShare: row.primary_share,
 		// Франшизы, к которым пак возвращается не по одному разу
 		franchises: jsonOrDefault(row.franchises, []),
+		// Чем оказалось «прочее»: стримеры, история, спорт — только то, чего набралось заметно
+		otherKinds: jsonOrDefault(row.other_kinds, []),
 		summary: row.summary,
 		// Имя выложившего наружу не отдаём: в интерфейсе это просто «Источник»
 		vkDate: row.vk_date,
@@ -193,8 +233,14 @@ function toPackage(row, counts) {
  * Условия отбора и параметры к ним. Порядок параметров — это порядок, в котором
  * условия стоят в тексте запроса: D1 подставляет их подряд, и перестановка
  * условий местами без перестановки параметров тихо ломает выдачу.
+ *
+ * Сведённые типы паков приходят готовым списком, а не спрашиваются здесь: сам
+ * этот разбор синхронный, а за списком надо в базу. Дома он берётся прямо тут —
+ * там база под рукой и запросы к ней не асинхронные.
+ *
+ * @param {Array} groups сведённые типы паков (см. subjectGroups)
  */
-function buildWhere(query, userId, hits) {
+function buildWhere(query, userId, hits, groups = []) {
 	const conditions = [`p.status = 'ok'`];
 	const params = [];
 
@@ -293,11 +339,15 @@ function buildWhere(query, userId, hits) {
 	// там вопрос «где эта франшиза вообще встречается», а здесь «какие паки этого
 	// типа», и пак, у которого про Вархаммер две темы из тридцати, паком
 	// по Вархаммеру не является (см. subjectPackShare).
+	//
+	// Написаний у типа бывает несколько: «Дота» и «Дота 2» — один тип, и нажатие
+	// на него обязано показать паки по обоим (см. src/subject.js).
 	const subject = (query.get('subject') ?? '').trim();
 
 	if (subject) {
-		conditions.push('p.franchise_top = ? AND p.franchise_top_share >= ?');
-		params.push(subject, settings.subjectPackShare);
+		const names = subjectMatches(groups, subject);
+		conditions.push(`p.franchise_top IN (${names.map(() => '?').join(',')}) AND p.franchise_top_share >= ?`);
+		params.push(...names, settings.subjectPackShare);
 	}
 
 	if (query.get('hidePlayed') === '1') {
@@ -328,12 +378,12 @@ function buildWhere(query, userId, hits) {
  * Сама сложность из подсчёта выброшена нарочно: иначе у выбранного уровня
  * стояло бы его же число, а у остальных — нули, и переключиться было бы не на что.
  */
-function levelsQuery(db, query, userId, hits) {
+function levelsQuery(db, query, userId, hits, groups) {
 	const asked = new URLSearchParams(query);
 	asked.delete('levels');
 	asked.set('unrated', '1');
 
-	const { where, params } = buildWhere(asked, userId, hits);
+	const { where, params } = buildWhere(asked, userId, hits, groups);
 
 	return db.prepare(`
 		SELECT s.level AS level, COUNT(*) AS c
@@ -398,9 +448,15 @@ function rememberCounts(key, value) {
 }
 
 export async function listPackages(db, query, userId) {
-	// Поиск считается в памяти: он прощает опечатки, а такое сравнение SQL не умеет
-	const hits = await findHits(db, query.get('search') ?? '');
-	const { where, params } = buildWhere(query, userId, hits);
+	// Поиск считается в памяти: он прощает опечатки, а такое сравнение SQL не умеет.
+	// Сведённые типы паков нужны отбору, но спрашиваются заранее: сам разбор условий
+	// синхронный, а тут за списком надо в базу.
+	const [hits, groups] = await Promise.all([
+		findHits(db, query.get('search') ?? ''),
+		subjectGroups(db),
+	]);
+
+	const { where, params } = buildWhere(query, userId, hits, groups);
 
 	const sortKey = query.get('sort') ?? 'added';
 	const direction = query.get('dir') === 'asc' ? 'ASC' : 'DESC';
@@ -465,7 +521,7 @@ export async function listPackages(db, query, userId) {
 		const [total, list, levels] = await db.batch([
 			db.prepare(`SELECT COUNT(*) AS c ${BASE_FROM} WHERE ${where}`).bind(userId, ...params),
 			listQuery,
-			levelsQuery(db, query, userId, hits),
+			levelsQuery(db, query, userId, hits, groups),
 		]);
 
 		const levelCounts = {};
@@ -506,8 +562,12 @@ export async function getFacets(db) {
 		return facetsCache;
 	}
 
-	const [tagRows, levelRows, topicRows, unknownTopic, musicTopic, subjectRows, languageRows, totals] =
-		await db.batch([
+	// Типы паков спрашиваются отдельно от общей пачки: их ответ нужен не только
+	// колонке фильтров, но и самому отбору, и лежит он в своей копилке
+	// (см. subjectGroups) — в общую пачку такое не сложить. Но и ждать его
+	// по очереди незачем: обе ходки уходят разом.
+	const [subjects, [tagRows, levelRows, topicRows, unknownTopic, musicTopic, languageRows, totals]] =
+		await Promise.all([subjectGroups(db), db.batch([
 			db.prepare(`SELECT tags FROM packages WHERE status = 'ok'`),
 			db.prepare('SELECT level, COUNT(*) AS c FROM stats WHERE level IS NOT NULL GROUP BY level'),
 			db.prepare(`
@@ -521,22 +581,6 @@ export async function getFacets(db) {
 				SELECT COUNT(*) AS c FROM packages p
 				WHERE p.status = 'ok' AND p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?
 			`).bind(settings.musicThreshold),
-			// Дополнительные типы паков: те, что целиком про один предмет, —
-			// «пак по Вархаммеру», «пак по футболу». Читается готовая колонка
-			// с самым частым предметом, и обе колонки отбора лежат в указателе
-			// (ix_packages_ok_subject), поэтому строк это не читает.
-			//
-			// Полного списка франшиз здесь по-прежнему нет: json_each по всей
-			// таблице стоил дороже всех прочих запросов вместе взятых — на D1
-			// это ещё и строки, которые считаются по тарифу.
-			db.prepare(`
-				SELECT p.franchise_top AS name, COUNT(*) AS c
-				FROM packages p
-				WHERE p.status = 'ok' AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
-				GROUP BY p.franchise_top
-				ORDER BY c DESC, name
-				LIMIT ?
-			`).bind(settings.subjectPackShare, settings.subjectLimit),
 			// Языки паков. Там, где язык не указан, стоит unknown — таких паков
 			// в базе заметная часть, и прятать их из фильтра нельзя.
 			db.prepare(`
@@ -550,7 +594,7 @@ export async function getFacets(db) {
 					(SELECT COUNT(*) FROM stats WHERE level IS NOT NULL) AS rated,
 					(SELECT COUNT(*) FROM packages WHERE status = 'ok' AND vk_ts IS NOT NULL) AS dated
 			`),
-		]);
+		])]);
 
 	// Теги в паках пишут кто как: «Аниме», «аниме», «anime». Считаем их одним и тем же
 	// и показываем то написание, которое встречается чаще.
@@ -623,9 +667,17 @@ export async function getFacets(db) {
 		hardRight: settings.hardRightPercent,
 		franchiseMinThemes: settings.franchiseMinThemes,
 		franchiseDominantShare: settings.franchiseDominantShare,
-		// Дополнительные типы паков и порог, с которого пак считается паком про одно
-		subjects: subjectRows.results.map(row => ({ name: row.name, count: row.c })),
+		// Дополнительные типы паков и порог, с которого пак считается паком про одно.
+		// key — то же название латиницей и без номера части: по нему в колонке
+		// фильтров находится «Дота», когда набирают «dota»
+		subjects: subjects.slice(0, settings.subjectLimit)
+			.map(group => ({ name: group.name, key: group.key, count: group.count })),
 		subjectPackShare: settings.subjectPackShare,
+		// Пак про одну вселенную: с этой доли ярлык называет её прямо — «Кинопак (Гарри Поттер)»
+		universePackShare: settings.universePackShare,
+		// Виды «прочего» и порог, с которого их стоит называть вслух: «Прочее: стримеры, история»
+		otherKindNames: OTHER_KINDS,
+		otherKindShare: settings.otherKindShare,
 		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё
 		readOnly: true,
 		playerUri: settings.playerUri,
@@ -683,12 +735,13 @@ export async function getTopAuthors(db, query) {
 		LEFT JOIN stats s ON s.package_id = picked.id
 		GROUP BY a.author_key
 		ORDER BY games DESC, packs DESC, name COLLATE NOCASE
-		LIMIT 200
 	`).bind(...params).all();
 
 	return {
 		period: periodKey,
-		// Сколько всего авторов попало в подборку — список обрезан двумя сотнями
+		// Все, кто вообще подписал хоть один пак: список больше не обрывается
+		// на двухстах. Ответ общий для всех и лежит в кэше Cloudflare пять минут
+		// (см. cf/src/index.js), поэтому лишних чтений базы это не стоит.
 		total: results.length,
 		authors: results.map((row, index) => ({
 			place: index + 1,
@@ -726,6 +779,33 @@ export async function setPlayed(db, userId, id, played) {
 	}
 
 	return { id, played: Boolean(played), affected: 1 };
+}
+
+/**
+ * То же самое, но сразу по ключам паков. Нужно переносу отметок, сделанных
+ * до входа: без учётной записи они лежат в самом браузере (см. web/app.js),
+ * и в тот миг, когда хозяин у них появляется, все разом переезжают в базу.
+ *
+ * Номера строк для этого не годятся: браузер помнит паки по общему ключу,
+ * а номера меняются при каждой заливке базы.
+ */
+export async function setPlayedKeys(db, userId, keys, played) {
+	const list = [...new Set((keys ?? []).map(key => String(key ?? '').trim()).filter(Boolean))].slice(0, 2000);
+
+	if (list.length === 0) {
+		return { affected: 0 };
+	}
+
+	const now = Date.now();
+
+	const statements = played
+		? list.map(key => db.prepare('INSERT OR REPLACE INTO played (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
+			.bind(userId, key, now))
+		: list.map(key => db.prepare('DELETE FROM played WHERE user_id = ? AND pack_key = ?').bind(userId, key));
+
+	await db.batch(statements);
+
+	return { affected: list.length, played: Boolean(played) };
 }
 
 /**

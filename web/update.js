@@ -54,18 +54,48 @@ function renderSteps() {
 	}
 }
 
-/** Полоски выполнения: по одной на шаг нынешнего запуска. */
+/** Человеческая запись остатка времени: «2 ч 05 мин», «14 мин», «40 с». */
+function formatSpan(ms) {
+	if (!ms || !Number.isFinite(ms)) {
+		return '';
+	}
+
+	const seconds = Math.round(ms / 1000);
+
+	if (seconds < 90) {
+		return `${seconds} с`;
+	}
+
+	const minutes = Math.round(seconds / 60);
+
+	if (minutes < 90) {
+		return `${minutes} мин`;
+	}
+
+	return `${Math.floor(minutes / 60)} ч ${String(minutes % 60).padStart(2, '0')} мин`;
+}
+
+/**
+ * Полоски выполнения: по одной на шаг нынешнего запуска.
+ *
+ * Шаги идут разом, поэтому «идёт» не один, а несколько, и у каждого свой остаток
+ * времени. Знак «+» у числа значит, что работа этому шагу ещё подносится: обход
+ * ВК находит паки для разбора, разбор готовит их для статистики и модели, — общее
+ * число до конца работы не окончательно.
+ */
 function renderProgress(state) {
 	const box = $('progress');
 	box.textContent = '';
+
+	const active = new Set(state.active ?? []);
 
 	for (const step of state.steps ?? []) {
 		const item = state.progress?.[step.key] ?? {};
 		const total = item.total ?? 0;
 		const done = item.finished ? total : item.done ?? 0;
-		const active = state.current === step.key;
+		const live = active.has(step.key);
 
-		const row = element('div', `progress__row${active ? ' progress__row--active' : ''}`);
+		const row = element('div', `progress__row${live ? ' progress__row--active' : ''}`);
 		row.append(element('span', 'progress__name', step.name));
 
 		const bar = element('div', 'progress__bar');
@@ -74,9 +104,16 @@ function renderProgress(state) {
 		bar.append(fill);
 		row.append(bar);
 
-		const state_ = item.finished ? 'готово' : total > 0 ? `${done} из ${total}` : active ? 'работаю' : 'в очереди';
-		row.append(element('span', 'progress__count', state_));
+		const counted = total > 0 ? `${done} из ${total}${item.growing ? '+' : ''}` : `${done || ''}`.trim() || 'работаю';
+		const text = item.finished ? 'готово' : live ? counted : total > 0 ? counted : 'в очереди';
 
+		const count = element('span', 'progress__count', text);
+
+		if (!item.finished && live && item.eta) {
+			count.append(element('span', 'progress__eta', `~${formatSpan(item.eta)}`));
+		}
+
+		row.append(count);
 		box.append(row);
 	}
 }
@@ -97,13 +134,25 @@ function formatTime(ms) {
 	return minutes > 0 ? `${minutes} мин ${seconds % 60} с` : `${seconds} с`;
 }
 
+/**
+ * «Уже столько-то, осталось столько-то». Общий остаток — самый долгий из шагов,
+ * а не их сумма: шаги идут одновременно, и складывать их остатки означало бы
+ * обещать вчетверо больше, чем есть на самом деле.
+ */
+function statusTime(state) {
+	const spent = state.startedAt ? `уже ${formatTime(Date.now() - state.startedAt)}` : '';
+	const left = Math.max(0, ...Object.values(state.progress ?? {}).map(item => (item.finished ? 0 : item.eta ?? 0)));
+
+	return left > 0 ? `${spent}, осталось ~${formatSpan(left)}` : spent;
+}
+
 function renderStatus(state) {
 	running = state.running;
 
 	$('start').disabled = running;
 	$('stop').disabled = !running;
 
-	for (const id of ['reparse', 'retry', 'retopics', 'resummary', 'limit', 'pages']) {
+	for (const id of ['reparse', 'retry', 'retopics', 'resummary', 'upgrade', 'serial', 'limit', 'pages', 'model']) {
 		$(id).disabled = running;
 	}
 
@@ -112,10 +161,16 @@ function renderStatus(state) {
 	}
 
 	if (running) {
-		const current = state.steps?.find(step => step.key === state.current);
-		$('statusText').textContent = current ? `Идёт: ${current.name.toLowerCase()}` : 'Запускаю…';
+		const active = (state.active ?? [])
+			.map(key => state.steps?.find(step => step.key === key)?.name)
+			.filter(Boolean)
+			.map(name => name.toLowerCase());
+
+		// Шагов сразу несколько — перечисляем все, а не выбираем из них главный
+		$('statusText').textContent = active.length > 0 ? `Идёт: ${active.join(', ')}` : 'Запускаю…';
 		$('statusText').className = 'update__state update__state--running';
-		$('statusTime').textContent = state.startedAt ? `уже ${formatTime(Date.now() - state.startedAt)}` : '';
+
+		$('statusTime').textContent = statusTime(state);
 		return;
 	}
 
@@ -140,7 +195,7 @@ function watchClock(state) {
 
 	if (state.running && state.startedAt) {
 		timer = setInterval(() => {
-			$('statusTime').textContent = `уже ${formatTime(Date.now() - state.startedAt)}`;
+			$('statusTime').textContent = statusTime(state);
 		}, 1000);
 	}
 }
@@ -148,11 +203,17 @@ function watchClock(state) {
 let lastState = {};
 
 function applyState(state) {
+	const was = running;
 	lastState = { ...lastState, ...state };
 
 	renderProgress(lastState);
 	renderStatus(lastState);
 	watchClock(lastState);
+
+	// Работа кончилась — самое время посмотреть, сколько запросов она съела
+	if (was && !running) {
+		loadModels();
+	}
 }
 
 function listen() {
@@ -189,6 +250,79 @@ function listen() {
 	});
 }
 
+/**
+ * Список моделей с расходом за сутки.
+ *
+ * Сколько запросов осталось, Gemini не сообщает никаким методом — расход считает
+ * сама база, отмечая каждый запрос (см. src/models.js). Поэтому число обновляется
+ * и во время работы: пока идёт разметка, остаток тает на глазах.
+ */
+async function loadModels() {
+	const response = await fetch('/api/update/models');
+	const info = response.ok ? await response.json() : {};
+
+	if (!Array.isArray(info.models)) {
+		// Старый сервер этого метода ещё не знает. Список моделей — не то, без чего
+		// нельзя запускать обновление, поэтому просто говорим об этом и живём дальше
+		$('modelHint').textContent = 'Список моделей не получен: сайт запущен из старой сборки. '
+			+ 'Обновление запустится на модели, выбранной в прошлый раз; перезапустите сайт, чтобы вернуть выбор.';
+		return { models: [] };
+	}
+
+	const box = $('model');
+	const chosen = box.value || info.current;
+
+	box.textContent = '';
+
+	for (const model of info.models) {
+		const option = element('option', null, `${model.title} — ${describeLimit(model)}`);
+		option.value = model.id;
+		option.selected = model.id === chosen;
+		box.append(option);
+	}
+
+	renderModelHint(info);
+	return info;
+}
+
+/** «осталось 963 из ≈1000» — или «лимит на сегодня кончился». */
+function describeLimit(model) {
+	if (model.unavailable) {
+		return 'закрыта для этого ключа';
+	}
+
+	if (model.spentOut) {
+		return 'лимит на сегодня кончился';
+	}
+
+	if (model.limit === null) {
+		return `потрачено ${model.spent}, предел неизвестен`;
+	}
+
+	return `осталось ${model.left} из ${model.exact ? '' : '≈'}${model.limit} в сутки`;
+}
+
+function renderModelHint(info) {
+	const model = info.models.find(item => item.id === $('model').value) ?? info.models.find(item => item.current);
+
+	if (!model) {
+		return;
+	}
+
+	if (model.unavailable) {
+		$('modelHint').textContent = `Эту модель ключу не дают: «${model.refusal ?? 'отказ без объяснений'}». `
+			+ 'Выберите другую — пометка снимется сама, если модель когда-нибудь ответит.';
+		return;
+	}
+
+	const exact = model.exact
+		? 'Предел точный: его назвал сам Gemini, когда отказал.'
+		: 'Предел приблизительный, из списка в src/models.js: настоящий станет виден, когда в него упрёмся.';
+
+	$('modelHint').textContent = `${model.note}. Потрачено сегодня: ${model.spent}. ${exact} `
+		+ `Сутки считаются по тихоокеанскому времени — там Google сбрасывает квоты.`;
+}
+
 async function start() {
 	const body = {
 		steps: [...selected],
@@ -197,18 +331,27 @@ async function start() {
 			retry: $('retry').checked,
 			retopics: $('retopics').checked,
 			resummary: $('resummary').checked,
+			upgrade: $('upgrade').checked,
+			serial: $('serial').checked,
+			model: $('model').value,
 			limit: $('limit').value,
 			pages: $('pages').value,
 		},
 	};
 
-	const response = await fetch('/api/update/start', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body),
-	});
+	let data;
 
-	const data = await response.json();
+	try {
+		const response = await fetch('/api/update/start', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+
+		data = await response.json();
+	} catch (error) {
+		data = { error: `Сайт не ответил на запуск: ${error.message}` };
+	}
 
 	if (data.error) {
 		$('statusText').textContent = data.error;
@@ -226,6 +369,12 @@ async function stop() {
 }
 
 async function init() {
+	// Кнопки оживают первыми. Всё остальное здесь ходит по сети, а любая заминка
+	// там оставляла страницу с нарисованной, но мёртвой кнопкой «Запустить»
+	$('start').addEventListener('click', start);
+	$('stop').addEventListener('click', stop);
+	$('model').addEventListener('change', () => loadModels());
+
 	const info = await (await fetch('/api/update/steps')).json();
 	steps = info.steps;
 
@@ -249,8 +398,14 @@ async function init() {
 
 	renderSteps();
 
-	$('start').addEventListener('click', start);
-	$('stop').addEventListener('click', stop);
+	await loadModels();
+
+	// Пока идёт работа, остаток запросов тает — раз в полминуты спрашиваем заново
+	setInterval(() => {
+		if (running) {
+			loadModels();
+		}
+	}, 30000);
 
 	$('log').addEventListener('scroll', event => {
 		const node = event.target;
@@ -263,4 +418,9 @@ async function init() {
 	listen();
 }
 
-init();
+// Молча оборваться посреди подготовки страница не должна: кнопки к этому времени
+// уже работают, и человеку надо сказать, чего именно не хватило
+init().catch(error => {
+	$('statusText').textContent = `Страница загрузилась не до конца: ${error.message}`;
+	$('statusText').className = 'update__state update__state--failed';
+});

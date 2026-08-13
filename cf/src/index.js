@@ -14,7 +14,7 @@
 
 import {
 	listPackages, getFacets, getTopAuthors, getProfile,
-	setPlayed, isPlayedPack, playedCount,
+	setPlayed, setPlayedKeys, isPlayedPack, playedCount,
 } from './library.js';
 
 import {
@@ -208,11 +208,21 @@ export default {
 			}
 
 			if (url.pathname === '/api/played' && request.method === 'POST') {
+				// Без входа отметке негде лежать: посетителей много, и общий список
+				// значил бы, что один отметил, а загорелось у всех. Но это не «нельзя
+				// отмечать вовсе»: до входа отметки живут прямо в браузере, а сюда
+				// приезжают все разом в тот миг, когда хозяин появляется
+				// (см. web/app.js, перенос местных отметок).
 				if (!user) {
 					return json({ error: 'Отмечать паки сыгранными можно, только войдя через Discord' }, 401);
 				}
 
-				const { id, played } = await readJson(request) ?? {};
+				const { id, packKeys, played } = await readJson(request) ?? {};
+
+				if (Array.isArray(packKeys)) {
+					return json(await setPlayedKeys(env.DB, userId, packKeys, played));
+				}
+
 				const result = await setPlayed(env.DB, userId, id, played);
 
 				return json(result, result.error ? 404 : 200);

@@ -1,12 +1,28 @@
 // Определение тематики тем через Gemini. Темы уходят пачками, ответ приходит строгим JSON.
 
-import { config, EXCLUSIVE_TOPIC_KEYS } from './config.js';
+import { config, EXCLUSIVE_TOPIC_KEYS, OTHER_KINDS, OTHER_KIND_KEYS } from './config.js';
+import { currentModel, modelInfo, noteRequest, noteQuotaHit, noteUnavailable } from './models.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /** Есть ли ключ. Без него шаг с тематиками просто пропускается. */
 export function hasGemini() {
 	return Boolean(config.geminiKey);
+}
+
+/**
+ * Модель этого запуска. По умолчанию та, что выбрана на странице обновления
+ * (она лежит в базе), но ключ --model= перебивает выбор на один раз, не меняя
+ * его для ночного обхода.
+ */
+let chosen = null;
+
+export function useModel(id) {
+	chosen = id || null;
+}
+
+export function activeModel() {
+	return chosen ?? currentModel();
 }
 
 class GeminiError extends Error {
@@ -20,10 +36,12 @@ class GeminiError extends Error {
 		 * с той же ошибкой по всем оставшимся пакам (см. quota).
 		 */
 		this.fatal = options.fatal ?? false;
-		/** Лимиты кончились: ждать бесполезно до самой смены суток. */
+		/** Суточные лимиты кончились: ждать бесполезно до самой смены суток. */
 		this.quota = options.quota ?? false;
 		/** Через сколько миллисекунд Gemini разрешает повторить запрос, если сказал. */
 		this.retryAfterMs = options.retryAfterMs ?? null;
+		/** Суточный предел, названный самим Gemini в отказе. */
+		this.dayLimit = options.dayLimit ?? null;
 	}
 }
 
@@ -41,6 +59,73 @@ function retryDelayFrom(error) {
 	}
 
 	return null;
+}
+
+/**
+ * Какой именно лимит кончился и чему он равен.
+ *
+ * Отказ 429 приходит на два разных повода, и путать их дорого. Минутный лимит
+ * отпускает через десяток секунд — надо просто подождать. Суточный не отпустит
+ * до полуночи в Калифорнии, и ждать его означает потерять ночь. Раньше различить
+ * их было нечем, и всякий 429 после трёх попыток объявлялся концом суток.
+ *
+ * На самом деле Gemini говорит прямо: в подробностях отказа лежит QuotaFailure,
+ * а в нём quotaId вида «GenerateRequestsPerDayPerProjectPerModel-FreeTier»
+ * и quotaValue — то самое число, которого мы не знали. Отсюда же берётся точный
+ * суточный предел модели (см. noteQuotaHit в models.js).
+ *
+ * @returns {{perDay: boolean, dayLimit: number|null}}
+ */
+function quotaFailureFrom(error) {
+	let perDay = false;
+	let dayLimit = null;
+
+	for (const detail of error?.details ?? []) {
+		for (const violation of detail.violations ?? []) {
+			const id = String(violation.quotaId ?? '') + String(violation.quotaMetric ?? '');
+			const value = Number(violation.quotaValue);
+
+			if (/per_?day/i.test(id)) {
+				perDay = true;
+
+				if (Number.isFinite(value) && value > 0) {
+					dayLimit = value;
+				}
+			}
+		}
+	}
+
+	return { perDay, dayLimit };
+}
+
+/**
+ * Общий на всех темп обращений к модели.
+ *
+ * Шаги теперь идут одновременно, и тематики с описаниями стучатся к Gemini
+ * вдвоём, каждый ещё и несколькими работниками. Пауза «поспать после запроса»
+ * такое не удерживает вовсе: считает она только своего работника, а лимит
+ * у модели общий и минутный. Поэтому очередь одна на весь процесс: каждый
+ * запрос занимает ближайшее свободное окошко, а окошки расставлены по минутному
+ * пределу выбранной модели.
+ */
+let nextSlot = 0;
+
+async function takeTurn() {
+	const perMinute = modelInfo(activeModel()).rpm || 10;
+	const gap = Math.max(config.geminiMinGapMs, Math.round(60_000 / perMinute));
+	const now = Date.now();
+	const at = Math.max(now, nextSlot);
+
+	nextSlot = at + gap;
+
+	if (at > now) {
+		await sleep(at - now);
+	}
+}
+
+/** Отодвигает очередь целиком: раз уж уперлись в минутный лимит, ждать всем. */
+function holdBack(ms) {
+	nextSlot = Math.max(nextSlot, Date.now() + ms);
 }
 
 async function call(path, options = {}) {
@@ -62,16 +147,22 @@ async function call(path, options = {}) {
 	if (!response.ok) {
 		let message = text.slice(0, 300);
 		let retryAfterMs = null;
+		let quota = { perDay: false, dayLimit: null };
 
 		try {
 			const error = JSON.parse(text).error;
 			message = error?.message ?? message;
 			retryAfterMs = retryDelayFrom(error);
+			quota = quotaFailureFrom(error);
 		} catch {
 			// оставляем как есть
 		}
 
-		throw new GeminiError(message, response.status, { retryAfterMs });
+		throw new GeminiError(message, response.status, {
+			retryAfterMs,
+			quota: quota.perDay,
+			dayLimit: quota.dayLimit,
+		});
 	}
 
 	return JSON.parse(text);
@@ -92,12 +183,18 @@ const INSTRUCTION = `Ты разбираешь темы из пакетов во
 anime    — аниме, манга, японская анимация, персонажи и сэйю аниме
 games    — компьютерные, мобильные, консольные и настольные игры, киберспорт, персонажи игр
 movies   — игровое кино и сериалы: фильмы, актёры, режиссёры, экранизации, кадры и цитаты
-cartoons — мультфильмы и мультсериалы, кроме японского аниме: Disney, Pixar, DreamWorks,
+cartoons — мультики и мультсериалы, кроме японского аниме: Disney, Pixar, DreamWorks,
            советские и российские мультики, «Симпсоны», «Рик и Морти», мультперсонажи
+books    — книги и то, что живёт на бумаге: романы, писатели, поэзия, литературные
+           герои и сюжеты, комиксы и графические романы, манга без экранизации
 other    — всё остальное: наука, история, география, спорт, мемы, эрудиция, общие знания
 
 Отдельно отметь музыку (поле m): true, если тему отгадывают по музыке или песням —
 опенинги, саундтреки, исполнители, альбомы, клипы, тексты песен. Иначе false.
+
+Если категория other, назови ещё и вид «прочего» (поле k) — одно значение из списка:
+${OTHER_KIND_KEYS.map(key => `${key} — ${OTHER_KINDS[key]}`).join('\n')}
+Ничего из списка не подходит или категория не other — оставь пустую строку.
 
 Ещё назови предмет темы — то одно, чему тема посвящена целиком, в двух
 написаниях: по-русски (поле f) и латиницей (поле fe, ромадзи или английское
@@ -132,7 +229,12 @@ Kyojin». У other — область, которой тема посвящен�
 - Музыка не отменяет категорию, а идёт вместе с ней: опенинги аниме — c=anime, m=true;
   саундтреки игр — c=games, m=true; песни из мультфильмов — c=cartoons, m=true;
   эстрада, рок, рэп и прочая музыка сама по себе — c=other, m=true.
-- Аниме важнее мультфильмов: японская анимация — всегда anime, даже если это мультсериал.
+- Аниме важнее мультиков: японская анимация — всегда anime, даже если это мультсериал.
+- Экранизация решается по тому, о чём спрашивают: кадры, актёры и реплики из фильма —
+  movies; сюжет, герои и текст книги — books. «Гарри Поттер» бывает и тем, и другим.
+- Предмет (f и fe) называй у КАЖДОЙ темы, где он виден, а не только у явных: по нему
+  считаются повторы пака — то, к чему он возвращается снова и снова. Промолчав там,
+  где произведение названо прямо в ответах, ты прячешь повтор, которого не увидит никто.
 - Ответы важнее названия темы: названия часто шуточные и ничего не значат.
 - Если тема смешанная или непонятная — c=other. Не угадывай.
 - Ответь массивом JSON, по объекту на каждую тему, в том же порядке.`;
@@ -147,8 +249,13 @@ const SCHEMA = {
 			m: { type: 'BOOLEAN' },
 			f: { type: 'STRING' },
 			fe: { type: 'STRING' },
+			// Вид «прочего». Перечислением (enum) не ограничен нарочно: пустая строка
+			// здесь законный ответ — «вида нет», — а перечисление, в котором есть
+			// пустая строка, часть моделей отвергает целиком, невнятным 400 на весь
+			// запрос. Проверка всё равно наша: чужое слово отсеется при разборе ответа
+			k: { type: 'STRING' },
 		},
-		required: ['i', 'c', 'm', 'f', 'fe'],
+		required: ['i', 'c', 'm', 'f', 'fe', 'k'],
 	},
 };
 
@@ -170,7 +277,7 @@ function buildPrompt(batch) {
  * argument», без единого слова про thinking).
  */
 function thinkingConfig() {
-	const version = Number.parseFloat(/gemini-(\d+(?:\.\d+)?)/.exec(config.geminiModel)?.[1] ?? '0');
+	const version = Number.parseFloat(/gemini-(\d+(?:\.\d+)?)/.exec(activeModel())?.[1] ?? '0');
 	return version >= 3 ? { thinkingLevel: 'low' } : { thinkingBudget: 0 };
 }
 
@@ -185,7 +292,15 @@ async function askOnce(prompt, schema, withThinking) {
 		},
 	};
 
-	const data = await call(`models/${config.geminiModel}:generateContent`, {
+	const model = activeModel();
+
+	await takeTurn();
+
+	// Расход отмечается до ответа, а не после: в лимит запрос попадает уже тем,
+	// что ушёл, и отказ по нему — такая же потраченная попытка, как удача
+	noteRequest(model);
+
+	const data = await call(`models/${model}:generateContent`, {
 		method: 'POST',
 		body: JSON.stringify(body),
 	});
@@ -230,21 +345,40 @@ async function ask(prompt, schema) {
 
 			// Ключ или запрос неверны — повторять бессмысленно
 			if (error.status === 400 || error.status === 401 || error.status === 403 || error.status === 404) {
+				// Модель закрыли для новых ключей — по списку доступных этого не видно,
+				// узнаётся только так. Запоминаем, чтобы на странице обновления она
+				// была видна закрытой, а не выглядела рабочей до следующей ночи
+				if (/no longer available|is not found|not supported|has been deprecated/i.test(error.message)) {
+					noteUnavailable(activeModel(), error.message);
+				}
+
 				error.fatal = true;
 				throw error;
 			}
 
-			// Кончились лимиты. Минутный отпускает через несколько секунд, дневной
-			// не отпустит вовсе, а различить их по ответу нельзя. Поэтому пробуем
-			// столько раз, сколько сказано в настройках, и если лимит так и не
-			// отпустил — объявляем его кончившимся: дальше шаг бросается целиком,
-			// а не идёт с той же ошибкой по всем оставшимся пакам.
+			// Кончились лимиты. Какие именно — сказано в самом отказе (см.
+			// quotaFailureFrom): суточный не отпустит до полуночи в Калифорнии,
+			// и ждать его бессмысленно — шаг бросается сразу, вместе с ним
+			// запоминается названный предел. Минутный отпускает через десяток
+			// секунд: отодвигаем общую очередь и пробуем снова.
 			if (error.status === 429) {
+				if (error.quota) {
+					noteQuotaHit(activeModel(), error.dayLimit);
+					error.fatal = true;
+					throw error;
+				}
+
+				const wait = Math.min(error.retryAfterMs ?? config.geminiDelayMs * attempt * 4, MAX_QUOTA_WAIT_MS);
+				holdBack(wait);
+
 				if (attempt < config.geminiRetries) {
-					await sleep(Math.min(error.retryAfterMs ?? config.geminiDelayMs * attempt * 4, MAX_QUOTA_WAIT_MS));
+					await sleep(wait);
 					continue;
 				}
 
+				// Про какой лимит речь, Gemini так и не сказал. Считаем суточным:
+				// три отказа подряд с ожиданием — это уже не минутная заминка
+				noteQuotaHit(activeModel());
 				error.fatal = true;
 				error.quota = true;
 				throw error;
@@ -317,7 +451,6 @@ export async function classifyThemes(themes, options = {}) {
 			if (batch.length > 1 && !error.fatal) {
 				const middle = Math.ceil(batch.length / 2);
 				await process(batch.slice(0, middle));
-				await sleep(config.geminiDelayMs);
 				await process(batch.slice(middle));
 				return;
 			}
@@ -339,6 +472,9 @@ export async function classifyThemes(themes, options = {}) {
 					// Второе написание нужно не для показа, а чтобы связать между собой
 					// темы, названные по-разному (см. franchise.js)
 					franchiseEn: cleanFranchise(answer.fe),
+					// Вид «прочего»: чем эта общая куча оказалась на деле — стримерами,
+					// историей, спортом. У остальных категорий вида нет и быть не должно
+					kind: answer.c === 'other' && OTHER_KIND_KEYS.includes(answer.k) ? answer.k : '',
 				});
 			}
 		}
@@ -346,7 +482,7 @@ export async function classifyThemes(themes, options = {}) {
 		// Темы, по которым модель промолчала, считаем неопределёнными
 		for (const theme of batch) {
 			if (!result.has(theme.key)) {
-				result.set(theme.key, { category: 'other', music: false, franchise: '', franchiseEn: '' });
+				result.set(theme.key, { category: 'other', music: false, franchise: '', franchiseEn: '', kind: '' });
 			}
 		}
 
@@ -357,12 +493,10 @@ export async function classifyThemes(themes, options = {}) {
 		}
 	};
 
+	// Пауз между пачками здесь больше нет: темп держит общая очередь запросов
+	// (см. takeTurn), и она считает всех сразу, а не каждого работника по себе
 	for (let i = 0; i < themes.length; i += config.geminiBatchSize) {
 		await process(themes.slice(i, i + config.geminiBatchSize));
-
-		if (i + config.geminiBatchSize < themes.length) {
-			await sleep(config.geminiDelayMs);
-		}
 	}
 
 	return result;
@@ -412,13 +546,19 @@ export async function describePack(pack) {
 		return `- ${theme.name}${sample}`;
 	});
 
-	if (themes.length === 0) {
+	// Тем нет вовсе — спрашиваем всё равно, по названию и тегам. Пак без разобранных
+	// тем ничем не заслужил остаться единственным без описания, а сказать по одному
+	// названию модели чаще всего есть что; не найдёт смысла — вернёт пустую строку.
+	if (themes.length === 0 && !pack.name) {
 		return '';
 	}
 
 	const tags = pack.tags?.length > 0 ? `\nТеги: ${pack.tags.join(', ')}` : '';
 	const cut = pack.themes.length > themes.length ? `\n(и ещё ${pack.themes.length - themes.length} тем)` : '';
-	const prompt = `${SUMMARY_INSTRUCTION}\n\nПак: «${pack.name}»${tags}\nТемы:\n${themes.join('\n')}${cut}`;
+	const list = themes.length > 0
+		? `\nТемы:\n${themes.join('\n')}${cut}`
+		: '\n(тем в паке разобрать не удалось: суди по названию и тегам, а не найдёшь смысла — верни пустую строку)';
+	const prompt = `${SUMMARY_INSTRUCTION}\n\nПак: «${pack.name}»${tags}${list}`;
 
 	const answer = await ask(prompt, SUMMARY_SCHEMA);
 

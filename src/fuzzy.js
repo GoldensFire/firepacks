@@ -10,6 +10,7 @@
 // таблицу SQLite, cf/src/search.js — в обычный Set. Всё остальное общее.
 
 import { jsonOrDefault } from './keys.js';
+import { toLatin } from './subject.js';
 
 /**
  * Сколько опечаток прощаем слову запроса. Короткие слова не прощаем вовсе:
@@ -116,13 +117,21 @@ function buildBlob(row) {
 /**
  * Строка базы в том виде, в каком её сравнивают со словами запроса: сплошная
  * строка для поиска подстрокой и отдельные слова для сравнения с допуском.
+ *
+ * Рядом лежит та же строка латиницей. Названия в паках сплошь русские, а ищут
+ * их как придётся — «dota», «naruto», «vedmak»: переключать раскладку ради
+ * строки поиска никто не станет. Когда кириллицы в строке нет, вторая копия
+ * не заводится вовсе — это та же самая строка, и памяти она не стоит.
  */
 export function buildEntry(row) {
 	const blob = buildBlob(row);
+	const spaced = ` ${blob} `;
+	const latin = toLatin(blob);
 
 	return {
 		id: row.id,
-		blob: ` ${blob} `,
+		blob: spaced,
+		latin: latin === blob ? spaced : ` ${latin} `,
 		words: [...new Set(blob.split(' '))].filter(Boolean),
 	};
 }
@@ -133,6 +142,14 @@ export function buildEntry(row) {
  */
 export function matchToken(entry, token) {
 	if (entry.blob.includes(token)) {
+		return 'exact';
+	}
+
+	// То же слово в другой раскладке: «dota» находит «Доту», «дота» — «Dota».
+	// Только вхождением, без прощения опечаток: список слов латиницей — это
+	// вторая такая же копия всей базы в памяти, а «нашлось не совсем то, что
+	// набрали, да ещё и в другой раскладке» — уже гадание.
+	if (entry.latin.includes(toLatin(token))) {
 		return 'exact';
 	}
 

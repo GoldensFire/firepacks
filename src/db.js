@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
-import { jsonOrDefault, buildTagsKey, buildAuthorKey } from './keys.js';
+import { jsonOrDefault, buildTagsKey, buildAuthorKey, splitAuthors } from './keys.js';
 
 // Ключи пака и чтение его полей лежат в keys.js: тот файл ничего не знает
 // про node:sqlite, и его читает двойник сайта на Cloudflare Workers (см. cf/).
@@ -122,6 +122,39 @@ CREATE TABLE IF NOT EXISTS ratings (
 
 CREATE INDEX IF NOT EXISTS ix_ratings_user ON ratings (user_id);
 
+/* Настройки, которые ставятся из окна сайта, а не правкой файла: выбранная модель
+   и тому подобное. Здесь, а не в config.js, потому что их меняют на ходу, и знать
+   о них должен и сайт, и ночной обход, который запускается сам по себе. */
+CREATE TABLE IF NOT EXISTS app_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
+/* Сколько запросов к каждой модели потрачено за сутки. Считаем сами: сколько
+   осталось от бесплатного лимита, Gemini не рассказывает никаким методом —
+   про лимит он сообщает единственным способом, отказом, когда тот уже кончился.
+
+   Сутки тут тихоокеанские: квоты Google сбрасываются в полночь по Лос-Анджелесу,
+   и «сегодня» по местным часам разошлось бы со сбросом на полдня (см. quotaDay). */
+CREATE TABLE IF NOT EXISTS gemini_usage (
+	day TEXT NOT NULL,
+	model TEXT NOT NULL,
+	requests INTEGER NOT NULL DEFAULT 0,
+	quota_hits INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (day, model)
+);
+
+/* Что мы узнали про модель на деле, а не из списка: суточный предел, названный
+   самим Gemini в отказе (429 приносит QuotaFailure с quotaValue), и отказ работать
+   вовсе — старые модели закрывают для новых ключей, и по списку доступных этого
+   не видно никак (см. src/models.js). Живёт отдельно от расхода: расход про
+   сегодня, а это знание о модели, и терять его при смене суток незачем. */
+CREATE TABLE IF NOT EXISTS gemini_limits (
+	model TEXT PRIMARY KEY,
+	day_limit INTEGER,
+	seen_at INTEGER NOT NULL
+);
+
 /* Личный чёрный список: kind = 'author' (author_key) или 'pack' (pack_key).
    Общего ЧС нет намеренно — это не модерация, а «не показывайте мне вот это». */
 CREATE TABLE IF NOT EXISTS blacklist (
@@ -171,6 +204,9 @@ for (const [name, definition] of [
 	['summary_at', 'INTEGER'],
 	// Франшизы, встретившиеся в паке больше одного раза: [{name, themes, questions, share}]
 	['franchises', `TEXT NOT NULL DEFAULT '[]'`],
+	// Чем оказалось «прочее»: [{key, questions, share}] — стримеры, история, спорт.
+	// Только то, что взяло порог otherKindShare: остальное на карточке не пишется
+	['other_kinds', `TEXT NOT NULL DEFAULT '[]'`],
 	// Самая частая из них — вынесена отдельно, чтобы по ней можно было искать и сортировать
 	['franchise_top', 'TEXT'],
 	['franchise_top_share', 'REAL'],
@@ -185,9 +221,31 @@ for (const [name, definition] of [
 	// или нет, — иначе сломанный файл переспрашивался бы каждую ночь до скончания
 	// века (см. scanVk и parsePackages в indexer.js).
 	['recheck', 'INTEGER NOT NULL DEFAULT 0'],
+	// Какой моделью размечен пак и какой описан. Нужны, чтобы слабую разметку
+	// можно было потом переспросить у сильной модели, не трогая уже хорошую
+	// (см. --upgrade в indexer.js). NULL значит «размечено до появления колонки».
+	['topics_model', 'TEXT'],
+	['summary_model', 'TEXT'],
 ]) {
 	if (!existingColumns.has(name)) {
 		db.exec(`ALTER TABLE packages ADD COLUMN ${name} ${definition}`);
+	}
+}
+
+// Дозаливка колонок в таблицу знаний о моделях
+{
+	const columns = new Set(db.prepare(`PRAGMA table_info(gemini_limits)`).all().map(c => c.name));
+
+	for (const [name, definition] of [
+		// Модель отказалась работать с этим ключом насовсем: «no longer available
+		// to new users». Проверить это заранее нельзя — в списке доступных моделей
+		// такая выглядит совершенно обычной
+		['unavailable', 'INTEGER NOT NULL DEFAULT 0'],
+		['note', 'TEXT'],
+	]) {
+		if (!columns.has(name)) {
+			db.exec(`ALTER TABLE gemini_limits ADD COLUMN ${name} ${definition}`);
+		}
 	}
 }
 
@@ -301,14 +359,40 @@ export function parseVkDate(raw, at = Date.now()) {
 	return new Date(year, month, Number(parts[1]), hours, minutes).getTime();
 }
 
+const readSetting = db.prepare('SELECT value FROM app_settings WHERE key = ?');
+const writeSetting = db.prepare(`
+	INSERT INTO app_settings (key, value) VALUES (?, ?)
+	ON CONFLICT (key) DO UPDATE SET value = excluded.value
+`);
+
+/** Настройка, поставленная из окна сайта. Не поставлена — вернётся fallback. */
+export function getSetting(key, fallback = null) {
+	return readSetting.get(key)?.value ?? fallback;
+}
+
+export function setSetting(key, value) {
+	writeSetting.run(key, String(value));
+}
+
 const deleteAuthors = db.prepare('DELETE FROM pack_authors WHERE package_id = ?');
 const insertAuthor = db.prepare('INSERT OR IGNORE INTO pack_authors (package_id, author_key, author) VALUES (?, ?, ?)');
 
-/** Переписывает авторов пака. Вызывается после каждого разбора. */
+/**
+ * Переписывает авторов пака. Вызывается после каждого разбора.
+ *
+ * Составная подпись разбирается на людей: «Vieldy,Pa4ok,Slime» — это трое,
+ * и в таблице им место по строке на каждого (см. splitAuthors). Иначе паки
+ * Vieldy по его имени не находились, а в топе авторов такое сочетание стояло
+ * отдельной строкой, никак не связанной с самими Vieldy и Pa4ok.
+ *
+ * В самой колонке packages.authors подпись при этом остаётся ровно такой, как
+ * записана в файле: по ней пак ищется в сервисе статистики SIGame, и там его
+ * знают именно под ней (см. fetchPackageStats).
+ */
 export function saveAuthors(packageId, authors) {
 	deleteAuthors.run(packageId);
 
-	for (const author of authors ?? []) {
+	for (const author of splitAuthors(authors)) {
 		const key = buildAuthorKey(author);
 
 		if (key) {
@@ -340,6 +424,41 @@ export function saveAuthors(packageId, authors) {
 
 	for (const row of missing) {
 		saveAuthors(row.id, jsonOrDefault(row.authors, []));
+	}
+}
+
+// Разбор составных подписей для паков, записанных до того, как их научились
+// разбирать: «Vieldy,Pa4ok,Slime» лежало в таблице одной строкой. Переписываем
+// только тех, у кого разбор что-то меняет, — сравнением набора ключей: перебирать
+// полторы тысячи паков дешевле, чем оставить половину авторов ненажимаемыми,
+// а переиндексация ради этого не нужна вовсе, подпись уже лежит в базе.
+{
+	const rows = db.prepare(`
+		SELECT p.id, p.authors,
+			(SELECT GROUP_CONCAT(a.author_key, CHAR(10)) FROM (
+				SELECT author_key FROM pack_authors WHERE package_id = p.id ORDER BY author_key
+			) a) AS stored
+		FROM packages p
+		WHERE p.status = 'ok' AND p.authors <> '[]'
+	`).all();
+
+	let fixed = 0;
+
+	for (const row of rows) {
+		const wanted = splitAuthors(jsonOrDefault(row.authors, []))
+			.map(buildAuthorKey)
+			.filter(Boolean)
+			.sort()
+			.join('\n');
+
+		if (wanted !== (row.stored ?? '')) {
+			saveAuthors(row.id, jsonOrDefault(row.authors, []));
+			fixed++;
+		}
+	}
+
+	if (fixed > 0) {
+		console.log(`Составных подписей авторов разобрано: ${fixed}.`);
 	}
 }
 

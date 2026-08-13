@@ -47,10 +47,17 @@ const LEVEL_ORDER = [4, 3, 2, 1];
  * он должен с того, во что упирается большинство паков. Дальше — тематические,
  * от самых частых, и «без разметки» в самом конце: это не тип, а его отсутствие.
  */
-const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'music', 'unknown'];
+const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'books', 'music', 'unknown'];
 
 /** Категории, которые делят вопросы между собой: их доли складываются в сотню. */
-const SHARE_ORDER = ['anime', 'games', 'movies', 'cartoons', 'other'];
+const SHARE_ORDER = ['anime', 'games', 'movies', 'cartoons', 'books', 'other'];
+
+/**
+ * Музыка среди тематик стоит особняком: она не спорит с остальными, а идёт поверх
+ * («по музыке это и отгадывают»), и в сотню долей не входит. Ключ вынесен, потому
+ * что нужен в двух местах сразу — ярлык музпака и подпись куска «прочее».
+ */
+const MUSIC_TOPIC = 'music';
 
 /**
  * Из чего сделаны вопросы. Считается разбором самого файла (см. siq.js), и здесь
@@ -61,7 +68,11 @@ const CONTENT_ORDER = ['text', 'image', 'audio', 'video', 'html'];
 const CONTENT_NAMES = {
 	text: 'Текст',
 	image: 'Картинки',
-	audio: 'Музыка и звук',
+	// Просто «Звук»: полоска отвечает на вопрос «из чего сделаны вопросы», и ответ
+	// у неё про вид файла, а не про то, музыка там или лай собаки. Слово «музыка»
+	// здесь ещё и спорило с верхней полоской, где оно значит совсем другое —
+	// «по музыке эти вопросы и отгадывают».
+	audio: 'Звук',
 	video: 'Видео',
 	html: 'HTML',
 };
@@ -99,6 +110,47 @@ const topicInfo = key => facets.topicNames[key] ?? EXTRA_TOPICS[key] ?? { name: 
 
 /** Как называется вид спецвопроса. Имена приходят с сервера вместе с остальными настройками. */
 const specialName = key => facets.specialNames?.[key] ?? key;
+
+/**
+ * Чем оказалось «прочее» этого пака: «стримеры, история». Пустая строка значит,
+ * что ничего заметного там нет, — тогда «Прочее» так и остаётся прочим.
+ *
+ * Считает не сайт: доли видов размечены моделью и посчитаны при разборе
+ * (см. computeOtherKinds в src/topics.js), сюда приезжает готовый список,
+ * из которого выброшено всё мельче порога.
+ */
+function otherKindsLine(pack) {
+	return (pack.otherKinds ?? [])
+		.map(kind => facets.otherKindNames?.[kind.key] ?? kind.key)
+		.join(', ');
+}
+
+/**
+ * Пак про одну вселенную — тот, что целиком, без остатка, состоит из одной
+ * тематики и одного произведения: не просто кинопак, а кинопак по Гарри Поттеру.
+ *
+ * Такому паку ярлык «Кинопак 100%» не говорит ничего: сотня процентов кино —
+ * это и так видно по полоске, а вот чего именно кино — нет. Поэтому вселенная
+ * встаёт прямо в ярлык, а список повторов у такого пака не показывается вовсе:
+ * «Гарри Поттер ×27» — это пересказ того же самого числом.
+ *
+ * Солянки и «прочее» сюда не попадают нарочно: у них про предмет уже есть свой
+ * ярлык-мишень, и он честнее — пак про футбол не становится «Солянкой (Футбол)».
+ */
+function universeOf(pack) {
+	const share = facets.universePackShare ?? 0.9;
+	const top = (pack.franchises ?? [])[0];
+
+	if (!top || top.share < share) {
+		return null;
+	}
+
+	if (!pack.primaryTopic || pack.primaryTopic === 'mixed' || pack.primaryTopic === 'other') {
+		return null;
+	}
+
+	return (pack.primaryShare ?? 0) >= share ? top : null;
+}
 
 function buildQuery() {
 	const query = new URLSearchParams({
@@ -155,6 +207,34 @@ function buildQuery() {
 	}
 
 	return query;
+}
+
+/**
+ * Галочки «скрыть сыгранные» и «только сыгранные». Отбирает по ним база, а значит
+ * работать они могут только с теми отметками, которые до базы доехали: пока входа
+ * нет, отметки лежат в самом браузере, и сервер о них не знает.
+ *
+ * Поэтому без входа галочки гаснут, а подсказка говорит, чего им не хватает.
+ * Работающими они при этом не притворяются — отметить сыгранным по-прежнему можно.
+ */
+function renderPlayedFilters() {
+	const locked = !serverMarks();
+
+	for (const id of ['hidePlayed', 'onlyPlayed']) {
+		const input = $(id);
+		input.disabled = locked;
+
+		if (locked) {
+			input.checked = false;
+		}
+
+		const row = input.closest('.check');
+		row.classList.toggle('check--disabled', locked);
+		row.title = locked
+			? 'Отбирает по отметкам база, а до входа они лежат в самом браузере. '
+				+ 'Войдите через Discord — отметки переедут в учётную запись, и отбор заработает'
+			: '';
+	}
 }
 
 /**
@@ -331,7 +411,13 @@ function renderSubjects() {
 	const filter = normalize($('subjectSearch').value);
 	container.textContent = '';
 
-	const subjects = (facets.subjects ?? []).filter(item => !filter || normalize(item.name).includes(filter));
+	// Ищется и по названию, и по его латинскому ключу: названия предметов в базе
+	// почти сплошь русские, а набирают их как придётся — «dota», «naruto». Ключ
+	// считает сервер (см. src/subject.js), он же без номера части, поэтому «dota»
+	// находит и «Доту», и «Доту 2» — то есть один и тот же тип пака.
+	const subjects = (facets.subjects ?? []).filter(item => !filter
+		|| normalize(item.name).includes(filter)
+		|| (item.key ?? '').includes(filter));
 
 	// Выбранный тип показываем всегда, даже если он не попал ни в список
 	// (тот короткий), ни под поиск: иначе снять его было бы нечем
@@ -565,12 +651,83 @@ function renderAccount() {
 const canHide = () => Boolean(user) || facets?.localBlacklist === true;
 
 /**
- * Можно ли отмечать паки сыгранными. Признак тот же самый, и это не лень:
- * вопрос у обоих один — есть ли у отметки хозяин. Дома хозяин — сама установка,
+ * Хранит ли отметки «сыграно» сервер. Дома хозяин отметки — сама установка,
  * и отмечать можно без входа; на общем сайте хозяина без входа нет, и отметка
  * одного человека зажигалась бы у всех сразу.
  */
-const canMark = canHide;
+const serverMarks = () => Boolean(user) || facets?.localBlacklist === true;
+
+// ————— отметки «сыграно» без входа —————
+//
+// Раньше кнопка «Отметить сыгранным» на общем сайте просто не нажималась, и это
+// выглядело придиркой: человек честно сыграл пак и хочет это где-то отметить,
+// а сайт отвечает «сначала заведите учётную запись». Хранить-то отметку и правда
+// негде — но негде на СЕРВЕРЕ, а браузер помнит не хуже.
+//
+// Поэтому до входа отметки живут прямо здесь, в самом браузере. Живут честно:
+// это тот же список, только он знает про один этот браузер, и об этом кнопка
+// прямо говорит. А в тот миг, когда человек всё же входит, весь список разом
+// переезжает в учётную запись (см. uploadLocalPlayed) — ничего не теряется,
+// и заново отмечать сыгранное не приходится.
+//
+// Паки помнятся по общему ключу, а не по номеру строки: номера меняются при
+// каждой заливке базы, ключ считается из самого файла (см. src/keys.js).
+
+const LOCAL_PLAYED_KEY = 'firepacks.played';
+
+/** Отметки этого браузера. Пустое множество, пока сайтом не пользовались. */
+let localPlayed = new Set();
+
+function loadLocalPlayed() {
+	try {
+		const saved = JSON.parse(window.localStorage.getItem(LOCAL_PLAYED_KEY) ?? '[]');
+		localPlayed = new Set(Array.isArray(saved) ? saved.filter(key => typeof key === 'string') : []);
+	} catch {
+		// Хранилище может быть закрыто настройками браузера — тогда отметок
+		// просто не будет, и это не повод ронять всю страницу
+		localPlayed = new Set();
+	}
+}
+
+function saveLocalPlayed() {
+	try {
+		window.localStorage.setItem(LOCAL_PLAYED_KEY, JSON.stringify([...localPlayed]));
+	} catch {
+		// Некуда сохранять — отметка проживёт до обновления страницы
+	}
+}
+
+/** Отмечен ли пак сыгранным: сервером или этим браузером. */
+const isPlayed = pack => pack.played || localPlayed.has(pack.packKey);
+
+/**
+ * Переносит отметки браузера в учётную запись. Вызывается один раз при загрузке
+ * страницы вошедшим: пока хозяина не было, отметки копились здесь, и первое, что
+ * человек ждёт после входа, — увидеть их на месте.
+ */
+async function uploadLocalPlayed() {
+	if (localPlayed.size === 0) {
+		return;
+	}
+
+	const keys = [...localPlayed];
+
+	const response = await fetch('/api/played', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ packKeys: keys, played: true }),
+	});
+
+	const result = await response.json().catch(() => ({ error: 'не удалось' }));
+
+	if (result.error) {
+		// Не вышло — список остаётся в браузере и попробует переехать в другой раз
+		return;
+	}
+
+	localPlayed.clear();
+	saveLocalPlayed();
+}
 
 /**
  * Карточки, которые сейчас на странице: пак и его узел. Нужны чёрному списку —
@@ -670,10 +827,15 @@ function clearBanned(card) {
 }
 
 function renderCounters() {
+	// Без входа сыгранное считается по отметкам самого браузера: сервер о них
+	// не знает и присылает ноль, а на счётчике должно стоять то же число, что
+	// человек видит на карточках
+	const played = serverMarks() ? facets.played : localPlayed.size;
+
 	$('counters').innerHTML =
 		`Паков: <b>${facets.total}</b>` +
 		` · С оценкой: <b>${facets.rated}</b>` +
-		` · Сыграно: <b id="playedCount">${facets.played}</b>`;
+		` · Сыграно: <b id="playedCount">${played}</b>`;
 }
 
 /** Плашки поверх выдачи: показывают, что список сужен, и снимают фильтр по клику. */
@@ -877,6 +1039,12 @@ function createFranchises(pack) {
 		return null;
 	}
 
+	// Пак про одну вселенную повторами не описывается: вселенная уже стоит в ярлыке
+	// («Кинопак (Гарри Поттер)»), а «Гарри Поттер ×27» — то же самое, сказанное числом
+	if (universeOf(pack)) {
+		return null;
+	}
+
 	const box = element('div', 'repeats');
 	box.append(iconText('repeat', 'Повторы:', 'repeats__title'));
 
@@ -1015,6 +1183,11 @@ function createShareBar(parts, className, suffix) {
  * вовсе, и цвета там не значили ничего. Точка перед словом того же цвета, что
  * и кусок полоски: без неё подпись и полоска остались бы двумя разными списками.
  *
+ * Порядок подписи — это порядок кусков в самой полоске, а не «от большего
+ * к меньшему»: подпись и полоска стоят друг под другом и читаются как одно,
+ * и когда цвета в них идут вразнобой, точку приходится искать глазами. Двойного
+ * упорядочивания тут не нужно вовсе — сама доля написана рядом словами.
+ *
  * Куски мельче половины процента в подпись не идут: в полоске тонкая цветная
  * черта честнее пустоты, а в строке «0% HTML» — только лишнее слово.
  */
@@ -1029,8 +1202,7 @@ function createShareLegend(parts) {
 
 	const visible = parts
 		.map(part => ({ ...part, percent: (part.value / total) * 100 }))
-		.filter(part => part.percent >= 0.5)
-		.sort((a, b) => b.percent - a.percent);
+		.filter(part => part.percent >= 0.5);
 
 	for (const part of visible) {
 		const item = element('span', 'shares__legend-item');
@@ -1078,8 +1250,28 @@ function createShares(pack) {
 	const shares = pack.topicShares ?? {};
 	const content = pack.contentStat ?? {};
 
+	// У музпака «прочее» — это и есть музыка. Пять тематик отвечают на вопрос
+	// «откуда вопрос»: аниме, игры, кино, мультфильмы — а всё остальное сваливается
+	// в «прочее». Песня, которая не из фильма и не из аниме, попадает туда же,
+	// и у пака, который весь про музыку, полоска говорила «55% Прочее» — то есть
+	// не говорила ничего. Ярлык пака к этому времени уже посчитан моделью
+	// (primaryTopic = music, см. toPrimary), и назвать этот кусок можно честно.
+	// А у остальных «прочее» называется тем, чем оно оказалось: «Прочее: стримеры,
+	// история». Кусок этот у половины паков самый крупный, и подпись «Прочее»
+	// на трети полоски отвечает на вопрос «о чём пак» ровно ничем.
+	const kinds = otherKindsLine(pack);
+	const otherName = pack.primaryTopic === MUSIC_TOPIC
+		? topicInfo(MUSIC_TOPIC).name
+		: kinds
+			? `${topicInfo('other').name}: ${kinds}`
+			: topicInfo('other').name;
+
 	const topics = createShareRow(
-		SHARE_ORDER.map(key => ({ key, name: topicInfo(key).name, value: shares[key] ?? 0 })),
+		SHARE_ORDER.map(key => ({
+			key,
+			name: key === 'other' ? otherName : topicInfo(key).name,
+			value: shares[key] ?? 0,
+		})),
 		'shares__bar--topics',
 		'вопросов пака',
 		'О чём вопросы пака',
@@ -1137,11 +1329,16 @@ function createSpecials(pack) {
 }
 
 function createCard(pack) {
-	const card = element('div', `card${pack.played ? ' card--played' : ''}`);
+	const card = element('div', `card${isPlayed(pack) ? ' card--played' : ''}`);
 
-	// Самая верхняя строка карточки: слева дата, справа — сколько раз играли.
-	// Оба числа отвечают на один вопрос — «стоит ли вообще смотреть дальше»:
-	// свежий пак или лежит с позапрошлого года, играют его или он никому не нужен.
+	// Самая верхняя строка карточки: слева дата, посередине число вопросов,
+	// справа — сколько раз играли. Все три отвечают на один и тот же вопрос —
+	// «стоит ли вообще смотреть дальше»: свежий пак или лежит с позапрошлого года,
+	// на один вечер он или на три, играют его или он никому не нужен.
+	//
+	// Число вопросов раньше стояло внизу, в строке мелких цифр под описанием, —
+	// а решает оно не меньше сложности: пак на полсотни вопросов и пак на четыре
+	// сотни это разные вечера, и знать это надо до того, как читать про пак дальше.
 	const top = element('div', 'card__top');
 	const date = packDate(pack);
 
@@ -1152,6 +1349,20 @@ function createCard(pack) {
 	} else {
 		// Пустышка держит плашку игр справа, даже когда даты нет
 		top.append(element('span', 'card__date card__date--empty'));
+	}
+
+	if (pack.questionCount) {
+		// Словом, а не одним значком: «178 вопросов» читается само, а знак вопроса
+		// рядом с числом в верхней строке спорил бы с плашкой игр — там тоже число
+		// со словом, и два разных числа со значками рядом сливаются в одно.
+		const questions = element('div', 'card__questions');
+		questions.append(
+			element('span', 'card__questions-value', formatNumber(pack.questionCount)),
+			element('span', 'card__questions-unit', plural(pack.questionCount, 'вопрос', 'вопроса', 'вопросов')),
+		);
+		questions.title = `Вопросов в паке: ${formatNumber(pack.questionCount)}`
+			+ (pack.roundCount ? `, раундов: ${pack.roundCount}` : '');
+		top.append(questions);
 	}
 
 	top.append(createGames(pack));
@@ -1254,12 +1465,17 @@ function createCard(pack) {
 		badges.append(numbers);
 	}
 
-	/** Ярлык тематики: по клику показывает все такие же паки. */
-	const createTopicBadge = (key, share, title) => {
+	/**
+	 * Ярлык тематики: по клику показывает все такие же паки.
+	 *
+	 * `text` перебивает обычную подпись «Кинопак 100%» — им называется вселенная
+	 * пака про одно («Кинопак (Гарри Поттер)») и виды прочего у солянки.
+	 */
+	const createTopicBadge = (key, share, title, text = null) => {
 		const info = topicInfo(key);
 		const percent = share !== null && share !== undefined && key !== 'mixed' ? ` ${Math.round(share * 100)}%` : '';
 		const badge = element('span', `badge badge--topic topic--${key}`);
-		badge.append(topicIcon(key), element('span', null, `${info.packName}${percent}`));
+		badge.append(topicIcon(key), element('span', null, text ?? `${info.packName}${percent}`));
 		badge.title = title;
 
 		// Клик по ярлыку — это «покажи только такие»: прежний набор типов заменяется,
@@ -1280,19 +1496,36 @@ function createCard(pack) {
 	// половины вопросов; предметы приходят отсортированными от частых к редким,
 	// поэтому это первый в списке (см. computeFranchises).
 	const mostCommon = (pack.franchises ?? [])[0];
-	const subject = mostCommon && mostCommon.share >= facets.subjectPackShare ? mostCommon : null;
+	const universe = universeOf(pack);
+	// У пака про одну вселенную мишень не нужна: вселенная уже названа в самом
+	// ярлыке тематики, и два одинаковых ярлыка подряд — это не подробность
+	const subject = !universe && mostCommon && mostCommon.share >= facets.subjectPackShare ? mostCommon : null;
+
+	// Чем оказалось «прочее»: у солянки и у пака с ярлыком «Прочее» это
+	// единственное, что вообще говорит, о чём он. «Солянка (стримеры, история)»
+	const kinds = pack.primaryTopic === 'mixed' || pack.primaryTopic === 'other' ? otherKindsLine(pack) : '';
 
 	// Солянка вместе с таким типом не показывается: «Солянка · Футбол» —
 	// это спор с самим собой. Солянкой пак про футбол числится только потому,
 	// что спорт живёт в «прочем» и ни одна из пяти тематик порога не берёт;
 	// сказать про такой пак «он про футбол» и точнее, и полезнее.
 	if (pack.primaryTopic && !(subject && pack.primaryTopic === 'mixed')) {
+		const info = topicInfo(pack.primaryTopic);
+
 		badges.append(createTopicBadge(
 			pack.primaryTopic,
 			pack.primaryShare,
-			pack.primaryTopic === 'mixed'
-				? `Ни одна тематика не набрала ${Math.round(facets.topicThreshold * 100)}% вопросов`
-				: `${topicInfo(pack.primaryTopic).name}: ${Math.round(pack.primaryShare * 100)}% вопросов пака`,
+			universe
+				? `Пак целиком про одно: «${universe.name}» — ${universe.themes} `
+					+ `${plural(universe.themes, 'тема', 'темы', 'тем')} и ${Math.round(universe.share * 100)}% вопросов пака`
+				: pack.primaryTopic === 'mixed'
+					? `Ни одна тематика не набрала ${Math.round(facets.topicThreshold * 100)}% вопросов`
+						+ (kinds ? `. Больше всего вопросов про это: ${kinds}` : '')
+					: `${topicInfo(pack.primaryTopic).name}: ${Math.round(pack.primaryShare * 100)}% вопросов пака`
+						+ (kinds ? ` (${kinds})` : ''),
+			// Процент у пака про одну вселенную не пишется: он и так стоит рядом
+			// на полоске долей, а место в ярлыке нужнее самой вселенной
+			universe ? `${info.packName} (${universe.name})` : kinds ? `${info.packName} (${kinds})` : null,
 		));
 	}
 
@@ -1339,7 +1572,7 @@ function createCard(pack) {
 	// Поэтому блок оценок пересобирается, когда отметку ставят или снимают, —
 	// звёзды тут же становятся нажимаемыми (см. кнопку «Отметить сыгранным»).
 	const buildRating = () => {
-		const canRate = Boolean(user) && pack.played;
+		const canRate = Boolean(user) && isPlayed(pack);
 
 		const box = createRating(pack, {
 			canRate,
@@ -1422,14 +1655,8 @@ function createCard(pack) {
 	const meta = element('div', 'meta');
 	const size = formatSize(pack.size);
 
-	// Даты здесь больше нет: она вынесена в самую верхнюю строку карточки,
-	// рядом с числом игр
-
-	if (pack.questionCount) {
-		const questions = iconText('question', pack.questionCount);
-		questions.title = `Вопросов в паке: ${pack.questionCount}`;
-		meta.append(questions);
-	}
+	// Ни даты, ни числа вопросов здесь больше нет: оба вынесены в самую верхнюю
+	// строку карточки, к числу игр
 
 	if (pack.roundCount) {
 		meta.append(iconText('rounds', `${pack.roundCount} ${plural(pack.roundCount, 'раунд', 'раунда', 'раундов')}`));
@@ -1508,22 +1735,21 @@ function createCard(pack) {
 	download.rel = 'noreferrer noopener';
 	actions.append(download);
 
-	const played = element('button', `button${pack.played ? ' button--active' : ''}`);
+	const played = element('button', `button${isPlayed(pack) ? ' button--active' : ''}`);
 	played.type = 'button';
 
-	// Кнопка остаётся на месте и без входа, но не нажимается: убери её совсем —
-	// и на сайте не осталось бы места, где сказано, что отметки вообще есть
-	// и чего им не хватает. Подсказка ровно об этом и говорит.
-	played.disabled = !canMark();
-
-	if (!canMark()) {
-		played.title = 'Отмечать паки сыгранными можно, войдя через Discord: иначе у отметки нет хозяина';
+	// Кнопка нажимается всегда. Без входа отметка ложится не на сервер, а в сам
+	// браузер, и подсказка честно говорит, чем одно отличается от другого: обещать
+	// «сохранено навсегда» там, где список знает только эта машина, нельзя.
+	if (!serverMarks()) {
+		played.title = 'Отметка сохранится в этом браузере. Войдите через Discord — '
+			+ 'и все отметки переедут в учётную запись, где их видно с любого устройства';
 	}
 
 	const renderPlayed = () => {
 		played.textContent = '';
 
-		if (pack.played) {
+		if (isPlayed(pack)) {
 			played.append(icon('check'), element('span', null, 'Сыграно'));
 		} else {
 			played.append(element('span', null, 'Отметить сыгранным'));
@@ -1536,33 +1762,50 @@ function createCard(pack) {
 		played.disabled = true;
 
 		try {
-			const response = await fetch('/api/played', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ id: pack.id, played: !pack.played }),
-			});
+			const next = !isPlayed(pack);
 
-			const result = await response.json();
-			pack.played = result.played;
+			if (serverMarks()) {
+				const response = await fetch('/api/played', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ id: pack.id, played: next }),
+				});
+
+				const result = await response.json();
+				pack.played = result.played;
+			} else if (next) {
+				localPlayed.add(pack.packKey);
+				saveLocalPlayed();
+			} else {
+				localPlayed.delete(pack.packKey);
+				saveLocalPlayed();
+			}
 
 			renderPlayed();
-			played.classList.toggle('button--active', pack.played);
-			card.classList.toggle('card--played', pack.played);
+			played.classList.toggle('button--active', isPlayed(pack));
+			card.classList.toggle('card--played', isPlayed(pack));
 
 			// Оценивать можно только сыгранное — значит, звёзды меняют своё
 			// состояние вместе с этой кнопкой, а не после обновления страницы
-			const next = buildRating();
-			rating.replaceWith(next);
-			rating = next;
+			const stars = buildRating();
+			rating.replaceWith(stars);
+			rating = stars;
 
-			facets.played += pack.played ? 1 : -1;
+			if (serverMarks()) {
+				facets.played += pack.played ? 1 : -1;
+			}
+
 			renderCounters();
 
-			if (state.hidePlayed && pack.played) {
+			// Прятать сыгранное умеет только сервер: отбор идёт по базе, и местных
+			// отметок он не видит. Пока их не перенесли, карточка просто остаётся
+			// на месте отмеченной — это честнее, чем прятать её на одной странице
+			// и показывать на следующей.
+			if (serverMarks() && state.hidePlayed && pack.played) {
 				load();
 			}
 		} finally {
-			played.disabled = !canMark();
+			played.disabled = false;
 		}
 	});
 
@@ -1709,6 +1952,71 @@ function renderPager(total) {
 	}
 
 	addButton('›', state.page + 1, state.page === pageCount);
+
+	// Многоточие между кнопками — это не только пропуск, но и тупик: со страницы
+	// второй на сороковую приходилось идти вручную, по пять номеров за нажатие,
+	// потому что кнопки показывают только соседей. Поле рядом с ними эту дорогу
+	// и сокращает: номер — и сразу туда.
+	//
+	// Заводится только там, где ему есть что делать: на трёх страницах номера
+	// и так все на виду.
+	if (pageCount > 5) {
+		pager.append(createPageJump(pageCount));
+	}
+}
+
+/** Поле «перейти к странице»: номер и переход по Enter или по кнопке. */
+function createPageJump(pageCount) {
+	const box = element('form', 'pager__jump');
+
+	const input = element('input', 'pager__jump-input');
+	input.type = 'number';
+	input.min = '1';
+	input.max = String(pageCount);
+	input.step = '1';
+	input.inputMode = 'numeric';
+	input.placeholder = String(state.page);
+	input.setAttribute('aria-label', `Перейти к странице от 1 до ${pageCount}`);
+	input.title = `Введите номер страницы от 1 до ${pageCount}`;
+
+	const go = element('button', 'pager__jump-go', 'Перейти');
+	go.type = 'submit';
+	go.title = 'Открыть страницу с этим номером';
+
+	box.append(
+		element('span', 'pager__jump-label', `из ${pageCount}:`),
+		input,
+		go,
+	);
+
+	box.addEventListener('submit', event => {
+		// Форма здесь ради одного только Enter: без неё нажатие Enter в поле
+		// не значило бы ничего, а тянуться мышью до кнопки ради номера страницы —
+		// ровно та работа, от которой поле и избавляет.
+		event.preventDefault();
+
+		const asked = parseInt(input.value, 10);
+
+		if (!Number.isFinite(asked)) {
+			return;
+		}
+
+		// Номер за пределами списка прижимаем к краю, а не отвергаем: «999»
+		// в поле означает «в самый конец», и отвечать на это молчанием незачем.
+		const page = Math.min(Math.max(asked, 1), pageCount);
+
+		input.value = '';
+
+		if (page === state.page) {
+			return;
+		}
+
+		state.page = page;
+		load();
+		window.scrollTo({ top: 0, behavior: 'smooth' });
+	});
+
+	return box;
 }
 
 /**
@@ -1879,6 +2187,7 @@ function resetFilters() {
 
 	renderLevels();
 	renderUnrated();
+	renderPlayedFilters();
 	renderTopics();
 	renderSubjects();
 	renderLanguages();
@@ -1930,13 +2239,15 @@ function readUrlState() {
 
 async function start() {
 	// Фильтры из адреса читаются до всякой сети: они берутся из самой ссылки,
-	// и без них нельзя составить запрос выдачи.
+	// и без них нельзя составить запрос выдачи. Отметки, сделанные до входа,
+	// лежат там же, где и фильтры, — под рукой, и спрашивать о них некого.
 	readUrlState();
+	loadLocalPlayed();
 
 	// Оба обращения к серверу уходят разом. Выдача не зависит от настроек —
 	// ждать их ответа, чтобы только начать спрашивать паки, значило дарить
 	// каждому открытию страницы лишнюю ходку до сервера.
-	const packages = fetch(`/api/packages?${buildQuery()}`);
+	let packages = fetch(`/api/packages?${buildQuery()}`);
 
 	facets = await (await fetch('/api/facets')).json();
 	user = facets.user ?? null;
@@ -1963,9 +2274,23 @@ async function start() {
 		$('updateLink').remove();
 	}
 
+	// Вход состоялся, а в браузере ещё лежат отметки, сделанные до него: самое
+	// время им переехать. Делается это до выдачи нарочно — иначе первая же
+	// страница показала бы паки неотмеченными, и человек решил бы, что отметки
+	// пропали при входе.
+	if (serverMarks() && localPlayed.size > 0) {
+		await uploadLocalPlayed();
+
+		// Настройки и выдачу спрашиваем заново: те ответы уехали с сервера до
+		// переезда отметок, и паки в них ещё не отмечены
+		packages = fetch(`/api/packages?${buildQuery()}`);
+		facets = await (await fetch('/api/facets')).json();
+	}
+
 	renderAccount();
 	renderLevels();
 	renderUnrated();
+	renderPlayedFilters();
 	renderTopics();
 	renderSubjects();
 	renderLanguages();

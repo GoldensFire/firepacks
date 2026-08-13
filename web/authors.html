@@ -26,6 +26,11 @@
 				<h1 class="authors__heading" id="heading">Топ авторов паков</h1>
 
 				<label class="toolbar__field">
+					<span class="toolbar__label">Автор</span>
+					<input id="authorSearch" class="select" type="search" placeholder="Найти автора" autocomplete="off">
+				</label>
+
+				<label class="toolbar__field">
 					<span class="toolbar__label">Период</span>
 					<select id="period" class="select">
 						<option value="all">За всё время</option>
@@ -39,6 +44,8 @@
 			<p class="hint" id="periodHint"></p>
 
 			<div id="table" class="authors"></div>
+
+			<div id="pager" class="pager"></div>
 		</section>
 	</main>
 

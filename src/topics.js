@@ -1,6 +1,6 @@
 // Доли тематик в паке. Категорию каждой темы определяет Gemini, здесь только арифметика.
 
-import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY } from './config.js';
+import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS } from './config.js';
 import { Names, nameKey, isFormatMarker, mergeRelated } from './franchise.js';
 
 /** Устойчивый ключ темы: по нему ответ модели возвращается на своё место. */
@@ -70,6 +70,48 @@ export function computeShares(themes, marks) {
 	shares[MUSIC_KEY] = round(music);
 
 	return { shares, questions: total };
+}
+
+/**
+ * Считает, чем оказалось «прочее»: сколько вопросов пака про стримеров, сколько
+ * про историю, сколько про спорт.
+ *
+ * Доли считаются от всего пака, а не от одного «прочего», и это нарочно: вопрос,
+ * на который отвечает этот список, — «стоит ли писать это на карточке», а не
+ * «как поделено прочее внутри себя». Пак, где прочего пять процентов и всё оно
+ * про стримеров, стримерским не является никак.
+ *
+ * @param {Array} themes темы из listThemes
+ * @param {Map<string, {category: string, kind: string}>} marks
+ * @returns {Array<{key: string, questions: number, share: number}>} от частых
+ *   к редким, только те, что взяли порог otherKindShare
+ */
+export function computeOtherKinds(themes, marks) {
+	const weights = new Map();
+	let total = 0;
+
+	for (const theme of themes) {
+		const weight = theme.questions > 0 ? theme.questions : 1;
+		total += weight;
+
+		const mark = marks.get(theme.key);
+
+		if (mark?.category !== 'other' || !OTHER_KIND_KEYS.includes(mark.kind)) {
+			continue;
+		}
+
+		weights.set(mark.kind, (weights.get(mark.kind) ?? 0) + weight);
+	}
+
+	if (total === 0) {
+		return [];
+	}
+
+	return [...weights.entries()]
+		.map(([key, questions]) => ({ key, questions, share: Math.round((questions / total) * 1000) / 1000 }))
+		.filter(kind => kind.share >= config.otherKindShare)
+		.sort((a, b) => b.questions - a.questions)
+		.slice(0, config.otherKindLimit);
 }
 
 /**

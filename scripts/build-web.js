@@ -54,6 +54,14 @@ const SKIP = new Set(['update.html', 'update.js']);
  */
 const VERSIONED = ['app.js', 'common.js', 'icons.js', 'authors.js', 'profile.js', 'style.css'];
 
+/**
+ * Значок туда же, хотя лежит он не в web, а в корне проекта. Имя у него одно
+ * и то же всегда, а сам файл иногда меняют, — и без отпечатка новый значок
+ * не появлялся бы неделю: ровно столько его держит у себя браузер (см. HEADERS).
+ * Выглядит это как «замену не приняли», хотя файл давно другой.
+ */
+const ICON = 'favicon.ico';
+
 /** Отпечаток содержимого: восьми знаков хватает, чтобы имена не совпали. */
 const fingerprint = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 8);
 
@@ -89,6 +97,10 @@ ${VERSIONED.map(name => `/${name}\n  Cache-Control: public, max-age=31536000, im
 /favicon.ico
   Cache-Control: public, max-age=604800
 `;
+
+// Неделя значку теперь не страшна: в вёрстке на него стоит ссылка с отпечатком
+// (см. ICON), и после замены файла адрес будет другой. По голому /favicon.ico
+// ходят закладки и старые вкладки — им неделя как раз впору.
 
 /** Обложки, на которые ссылается база. Лишние наверх не уезжают. */
 function usedLogos() {
@@ -148,7 +160,7 @@ async function main() {
 	// их просят, и этого хватает, чтобы браузер взял новый файл вместо старого.
 	const stamps = new Map();
 
-	for (const name of VERSIONED) {
+	for (const name of [...VERSIONED, ICON]) {
 		const file = path.join(publicPath, name);
 
 		if (fs.existsSync(file)) {

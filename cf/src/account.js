@@ -14,6 +14,16 @@ import { buildAuthorKey } from '../../src/keys.js';
 const DISCORD_API = 'https://discord.com/api/v10';
 const AUTHORIZE_URL = 'https://discord.com/oauth2/authorize';
 
+// Прав просим два: identify даёт имя и аватар, email — не саму почту, а признак
+// того, что она в Discord подтверждена. Без подтверждённой почты вход не
+// состоится: пустой аккаунт заводится за минуту, и десяток таких накрутил бы
+// паку любую оценку. Подробности — в заголовке src/auth.js.
+const SCOPE = 'identify email';
+
+/** Отказ, ради которого всё и затевалось. Текст один на оба отказа — и когда
+    почта не подтверждена, и когда Discord о ней вовсе промолчал. */
+const EMAIL_NOT_VERIFIED = 'Для входа необходимо подтвердить адрес электронной почты в Discord.';
+
 export const SESSION_COOKIE = 'firepacks_session';
 const STATE_COOKIE = 'firepacks_state';
 
@@ -78,6 +88,8 @@ function cookieHeader(name, value, maxAgeSeconds) {
 	return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${maxAgeSeconds}`;
 }
 
+const DAY = 24 * 60 * 60 * 1000;
+
 /** Кто прислал запрос, или null. Заодно изредка подчищает истёкшие сессии. */
 export async function currentUser(db, request) {
 	const token = parseCookies(request)[SESSION_COOKIE];
@@ -92,14 +104,30 @@ export async function currentUser(db, request) {
 		await db.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(Date.now()).run();
 	}
 
+	const now = Date.now();
+	const hash = await hashToken(token);
+
 	const row = await db.prepare(`
-		SELECT u.id, u.discord_id, u.username, u.global_name, u.avatar
+		SELECT u.id, u.discord_id, u.username, u.global_name, u.avatar, s.expires_at
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ? AND s.expires_at > ?
-	`).bind(await hashToken(token), Date.now()).first();
+	`).bind(hash, now).first();
 
 	if (!row) {
 		return null;
+	}
+
+	// Пришёл — значит, сайтом пользуются, и конец сессии отодвигается. Двигается
+	// срок в базе, а не кука: куку без ответа не переставить, а каким именно
+	// ответом закончится этот запрос, здесь ещё не известно. Поэтому кука выдана
+	// сразу надолго (cookieDays), а настоящий срок хранится тут.
+	//
+	// Реже, чем раз в sessionRenewDays, база не трогается: у D1 каждая запись —
+	// расход по тарифу, а открытий страницы за день бывает много.
+	const fresh = now + settings.sessionDays * DAY;
+
+	if (row.expires_at < fresh - settings.sessionRenewDays * DAY) {
+		await db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').bind(fresh, hash).run();
 	}
 
 	return {
@@ -120,7 +148,7 @@ export function startLogin(env, url) {
 		client_id: env.DISCORD_CLIENT_ID,
 		redirect_uri: redirectUri(env, url),
 		response_type: 'code',
-		scope: 'identify',
+		scope: SCOPE,
 		state,
 		// prompt здесь не указан нарочно. С prompt=none Discord обещает провести
 		// человека молча, но только того, кто уже разрешил приложению доступ:
@@ -175,17 +203,26 @@ export async function finishLogin(db, env, request, url) {
 
 	const back = redirectUri(env, url);
 
-	const tokenResponse = await fetch(`${DISCORD_API}/oauth2/token`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({
-			client_id: env.DISCORD_CLIENT_ID,
-			client_secret: env.DISCORD_CLIENT_SECRET,
-			grant_type: 'authorization_code',
-			code,
-			redirect_uri: back,
-		}),
-	});
+	let tokenResponse;
+
+	try {
+		tokenResponse = await fetch(`${DISCORD_API}/oauth2/token`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				client_id: env.DISCORD_CLIENT_ID,
+				client_secret: env.DISCORD_CLIENT_SECRET,
+				grant_type: 'authorization_code',
+				code,
+				redirect_uri: back,
+			}),
+		});
+	} catch (error) {
+		// Discord недоступен. Раньше такое вылетало наружу пятисотой страницей —
+		// а это не поломка сайта, и попытку имеет смысл повторить.
+		console.error(`Discord не ответил на запрос токена: ${error.message}`);
+		return fail('Discord не отвечает. Попробуйте войти ещё раз через минуту');
+	}
 
 	if (!tokenResponse.ok) {
 		// Почти всегда это несовпадение адреса возврата: Discord сверяет его
@@ -197,17 +234,61 @@ export async function finishLogin(db, env, request, url) {
 		return fail(`Discord отказал в входе. Проверьте, что адрес возврата в настройках приложения совпадает с ${back}`);
 	}
 
-	const { access_token: accessToken } = await tokenResponse.json();
+	const { access_token: accessToken } = await tokenResponse.json().catch(() => ({}));
 
-	const meResponse = await fetch(`${DISCORD_API}/users/@me`, {
-		headers: { Authorization: `Bearer ${accessToken}` },
-	});
+	if (!accessToken) {
+		console.error('Discord ответил на запрос токена без access_token');
+		return fail('Discord не отдал ключ доступа. Попробуйте войти ещё раз');
+	}
+
+	let meResponse;
+
+	try {
+		meResponse = await fetch(`${DISCORD_API}/users/@me`, {
+			headers: { Authorization: `Bearer ${accessToken}` },
+		});
+	} catch (error) {
+		console.error(`Discord не ответил на запрос профиля: ${error.message}`);
+		return fail('Discord не отвечает. Попробуйте войти ещё раз через минуту');
+	}
 
 	if (!meResponse.ok) {
 		return fail('Не удалось прочитать профиль Discord');
 	}
 
-	const me = await meResponse.json();
+	const me = await meResponse.json().catch(() => null);
+
+	// Номер аккаунта — то единственное, чем человек в базе и опознаётся. Приходит
+	// он строкой, но приводится к ней явно: дальше он идёт в запросы, а не в текст,
+	// и что именно окажется в ответе, решает не сайт.
+	const discordId = String(me?.id ?? '');
+
+	if (!discordId) {
+		console.error('Discord отдал профиль без id');
+		return fail('Не удалось прочитать профиль Discord');
+	}
+
+	// ————— главная преграда накрутке —————
+	//
+	// Признак берётся из ответа Discord здесь, в Worker, и только отсюда: со
+	// страницы его не подменить, потому что страница его и не касается.
+	//
+	// verified !== true, а не === false: если прав email не дали или Discord
+	// поля не прислал вовсе, признака нет, а «нет признака» — это не «почта
+	// подтверждена». Пускать в таком случае значило бы обходить проверку,
+	// просто убрав из ответа поле.
+	if (me.verified !== true) {
+		// Отказ распространяется и на тех, кто вошёл до этой проверки: пока
+		// у аккаунта не подтверждена почта, ни одной живой сессии у него быть
+		// не должно, а не только новой. Чужих сессий это не трогает — сносятся
+		// строки ровно того аккаунта, которому сейчас отказали.
+		await db.prepare(
+			'DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE discord_id = ?)',
+		).bind(discordId).run();
+
+		return fail(EMAIL_NOT_VERIFIED);
+	}
+
 	const now = Date.now();
 
 	const user = await db.prepare(`
@@ -219,16 +300,17 @@ export async function finishLogin(db, env, request, url) {
 			avatar = excluded.avatar,
 			seen_at = excluded.seen_at
 		RETURNING id
-	`).bind(me.id, me.username ?? '', me.global_name ?? null, me.avatar ?? null, now, now).first();
+	`).bind(discordId, me.username ?? '', me.global_name ?? null, me.avatar ?? null, now, now).first();
 
 	const token = randomToken(32);
-	const maxAge = settings.sessionDays * 24 * 60 * 60;
 
 	await db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-		.bind(await hashToken(token), user.id, now, now + maxAge * 1000).run();
+		.bind(await hashToken(token), user.id, now, now + settings.sessionDays * DAY).run();
 
 	const headers = new Headers({ Location: '/' });
-	headers.append('Set-Cookie', cookieHeader(SESSION_COOKIE, token, maxAge));
+	// Кука надолго, настоящий срок — в базе, и его отодвигают посещения
+	// (см. currentUser): иначе сайт выкидывал бы того, кто заходит каждый день
+	headers.append('Set-Cookie', cookieHeader(SESSION_COOKIE, token, settings.cookieDays * 24 * 60 * 60));
 	headers.append('Set-Cookie', cookieHeader(STATE_COOKIE, '', 0));
 
 	return new Response(null, { status: 302, headers });

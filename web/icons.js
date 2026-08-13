@@ -62,6 +62,8 @@ const ICON_PATHS = {
 	clapper: '<path d="M3 9.6h18V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m3.4 9.6.7-4.1 16.6 2-.4 2.1"/><path d="m8.6 5.3.9 3.9M13.9 6.1l.9 3.9"/>',
 	bear: '<circle cx="12" cy="14" r="5.6"/><circle cx="6.6" cy="7.4" r="2.6"/><circle cx="17.4" cy="7.4" r="2.6"/><path d="M10.3 13h.1M13.7 13h.1"/><path d="M10.2 16.3a2.6 2.6 0 0 0 3.6 0"/>',
 	music: '<path d="M9 17.5V5.8l11-2v11.4"/><circle cx="6.4" cy="17.7" r="2.6"/><circle cx="17.4" cy="15.4" r="2.6"/>',
+	// Книги: раскрытый том с корешком посередине
+	book: '<path d="M12 7c-2-2-5-2.6-8-2.4v12.8c3-.2 6 .4 8 2.4"/><path d="M12 7c2-2 5-2.6 8-2.4v12.8c-3-.2-6 .4-8 2.4"/><path d="M12 7v13"/>',
 	dice: '<rect x="3.4" y="3.4" width="17.2" height="17.2" rx="3.4"/><path d="M8.4 8.4h.1M15.6 8.4h.1M12 12h.1M8.4 15.6h.1M15.6 15.6h.1"/>',
 };
 
@@ -71,6 +73,7 @@ const TOPIC_ICONS = {
 	games: 'gamepad',
 	movies: 'clapper',
 	cartoons: 'bear',
+	books: 'book',
 	music: 'music',
 	other: 'dice',
 	mixed: 'dice',

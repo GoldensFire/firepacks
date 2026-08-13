@@ -27,6 +27,19 @@
 
 			<div id="steps" class="steps"></div>
 
+			<h2 class="filters__title">Нейросеть</h2>
+			<p class="hint">Ею размечаются проценты категорий и составляются краткие описания. Модели отличаются
+				не столько качеством, сколько суточным лимитом бесплатного ключа: у лёгких его пятьсот запросов
+				в сутки, у старших — двадцать. Обычный порядок — проходить базу лёгкой ночь за ночью,
+				а старшей день за днём переспрашивать самое важное.</p>
+
+			<label class="field">
+				<span>Модель</span>
+				<select id="model"></select>
+			</label>
+
+			<p class="hint" id="modelHint"></p>
+
 			<h2 class="filters__title">Переделать заново</h2>
 			<p class="hint">Обычно шаг трогает только то, чего в базе ещё нет. Эти галочки заставляют пройти по уже готовому.</p>
 
@@ -34,6 +47,7 @@
 			<label class="check"><input type="checkbox" id="retry"><span>Повторить паки, на которых была ошибка</span></label>
 			<label class="check"><input type="checkbox" id="retopics"><span>Переспросить проценты у уже размеченных</span></label>
 			<label class="check"><input type="checkbox" id="resummary"><span>Переписать готовые описания</span></label>
+			<label class="check"><input type="checkbox" id="upgrade"><span>Переспросить размеченное моделью послабее</span></label>
 
 			<h2 class="filters__title">Ограничения</h2>
 
@@ -46,6 +60,8 @@
 				<span>Страниц обсуждения</span>
 				<input type="number" id="pages" min="1" placeholder="все" inputmode="numeric">
 			</label>
+
+			<label class="check"><input type="checkbox" id="serial"><span>Шаги по очереди, а не разом</span></label>
 
 			<div class="update__actions">
 				<button id="start" class="button button--primary" type="button">Запустить</button>

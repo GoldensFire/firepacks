@@ -6,6 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { config, PROGRESS_PREFIX } from './config.js';
+import { usageReport, chooseModel, MODELS } from './models.js';
 
 /** Шаги в том порядке, в каком их показывает страница. Ключи совпадают с --steps=. */
 export const UPDATE_STEPS = [
@@ -22,19 +23,29 @@ export const UPDATE_STEPS = [
 	{
 		key: 'stats',
 		name: 'Статистика и сложность',
-		hint: 'Обновляет число игр, доли попыток ответа и правильных ответов. Стоит запускать регулярно.',
+		hint: 'Обновляет число игр, доли попыток ответа и правильных ответов — у всех паков заново. '
+			+ 'Стоит запускать регулярно, но это пять тысяч запросов к чужому сервису и полчаса времени.',
+	},
+	{
+		key: 'statsnew',
+		name: 'Статистика только у новых',
+		hint: 'То же самое, но спрашивает лишь про паки, у которых статистики нет вовсе, — про сегодняшние. '
+			+ 'Десятки запросов вместо тысяч: после разбора новых паков обычно нужен именно он. '
+			+ 'Вместе с шагом выше не идёт: тот и так спрашивает про всех.',
 	},
 	{
 		key: 'topics',
 		name: 'Проценты категорий',
-		hint: 'Спрашивает Gemini, о чём каждая тема: аниме, игры, кино, мультики, музыка. '
+		hint: 'Спрашивает Gemini, о чём каждая тема: аниме, игры, кино, мультики, книги, музыка, прочее. '
 			+ 'Уже размеченные паки пропускаются, заново их спрашивает только галочка ниже.',
 	},
 	{
 		key: 'summary',
 		name: 'Краткие описания',
 		hint: 'Одна строка про то, что в паке: «Вселенная Гарри Поттера», «Логотипы компаний». '
-			+ 'Паки с готовым описанием пропускаются.',
+			+ 'Составляется всем разобранным пакам, в том числе тем, под которыми автор '
+			+ 'уже написал своё описание: это разные вещи и стоят они на карточке порознь. '
+			+ 'Второй раз спрашивается только по галочке ниже.',
 	},
 	{
 		key: 'logos',
@@ -61,6 +72,8 @@ const OPTIONS = {
 	retopics: '--retopics',
 	resummary: '--resummary',
 	retry: '--retry',
+	upgrade: '--upgrade',
+	serial: '--serial',
 };
 
 /** Сколько строк вывода держим, чтобы показать их вкладке, открытой посреди работы. */
@@ -69,7 +82,10 @@ const LOG_LIMIT = 3000;
 const state = {
 	running: false,
 	steps: [],
-	current: null,
+	// Шагов, идущих прямо сейчас, теперь бывает несколько: индексатор ведёт их
+	// разом, а не лесенкой (см. src/indexer.js). Прежнее одиночное «current»
+	// осталось бы враньём — оно показывало бы один шаг из пяти работающих.
+	active: [],
 	progress: {},
 	startedAt: null,
 	finishedAt: null,
@@ -87,7 +103,7 @@ export function updateState() {
 	return {
 		running: state.running,
 		steps: state.steps,
-		current: state.current,
+		active: state.active,
 		progress: state.progress,
 		startedAt: state.startedAt,
 		finishedAt: state.finishedAt,
@@ -159,15 +175,25 @@ function handleLine(line) {
 		}));
 
 		state.progress = {};
+		state.active = [];
 	} else if (event.state === 'start') {
-		state.current = event.step;
+		state.active = [...new Set([...state.active, event.step])];
 	} else if (event.state === 'done') {
 		state.progress[event.step] = { ...state.progress[event.step], finished: true };
+		state.active = state.active.filter(key => key !== event.step);
 	} else if (event.step) {
-		state.progress[event.step] = { done: event.done, total: event.total };
+		state.progress[event.step] = {
+			...state.progress[event.step],
+			done: event.done,
+			total: event.total,
+			// Сколько осталось по нынешнему темпу и может ли работы ещё прибавиться:
+			// у шага, которому подносят, «всего» на месте не стоит
+			eta: event.eta ?? null,
+			growing: event.growing ?? false,
+		};
 	}
 
-	send({ type: 'progress', state: { steps: state.steps, current: state.current, progress: state.progress } });
+	send({ type: 'progress', state: { steps: state.steps, active: state.active, progress: state.progress } });
 }
 
 /** Разрезает поток на строки: одна порция данных редко совпадает со строкой. */
@@ -215,6 +241,12 @@ export function startUpdate(request) {
 	const options = request.options ?? {};
 	const args = ['--no-warnings', config.indexerPath, `--steps=${steps.join(',')}`];
 
+	// Выбранная модель запоминается, а не уходит одним ключом: тем же выбором
+	// должен пользоваться ночной обход, который никто не запускает руками
+	if (options.model && MODELS.some(model => model.id === options.model)) {
+		chooseModel(options.model);
+	}
+
 	for (const [name, flag] of Object.entries(OPTIONS)) {
 		if (options[name]) {
 			args.push(flag);
@@ -234,7 +266,7 @@ export function startUpdate(request) {
 
 	state.running = true;
 	state.steps = steps.map(key => ({ key, name: UPDATE_STEPS.find(s => s.key === key).name }));
-	state.current = null;
+	state.active = [];
 	state.progress = {};
 	state.startedAt = Date.now();
 	state.finishedAt = null;
@@ -263,7 +295,7 @@ export function startUpdate(request) {
 	child.on('close', (code, signal) => {
 		child = null;
 		state.running = false;
-		state.current = null;
+		state.active = [];
 		state.exitCode = code;
 		state.finishedAt = Date.now();
 
@@ -279,6 +311,15 @@ export function startUpdate(request) {
 	send({ type: 'state', state: updateState() });
 
 	return updateState();
+}
+
+/**
+ * Модели и расход запросов для страницы обновления. Считается на каждый запрос
+ * заново: расход растёт прямо во время работы, и вкладка должна видеть свежее
+ * число, а не то, что было при открытии.
+ */
+export function updateModels() {
+	return usageReport();
 }
 
 /** Останавливает работу. Пак, который разбирается прямо сейчас, просто не досчитается. */

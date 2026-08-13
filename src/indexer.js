@@ -16,6 +16,8 @@
 //   node src/indexer.js --gemini-models показать доступные модели Gemini
 //   node src/indexer.js --pages=5       ограничить число страниц обсуждения
 //   node src/indexer.js --limit=20      ограничить число обрабатываемых паков
+//   node src/indexer.js --jobs=8        сколько паков разбирать одновременно
+//   node src/indexer.js --authors=А,Б   спрашивать Gemini только про паки этих авторов
 //   node src/indexer.js --retry         попробовать заново паки с ошибками
 //
 // Шаги можно сочетать: --stats-only --topics-only сделает и то, и другое.
@@ -24,7 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config, TOPICS_VERSION, PROGRESS_PREFIX } from './config.js';
-import { db, buildMatchKey, buildTagsKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
+import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
 import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi.js';
 import { openRemoteZip, DeadLinkError } from './zip.js';
@@ -47,6 +49,79 @@ const resummary = has('--resummary');
 const retryFailed = has('--retry');
 const maxPages = value('pages', Infinity);
 const limit = value('limit', Infinity);
+
+/**
+ * Сколько паков разбирать одновременно.
+ *
+ * Разбор пака — это не скачивание, а несколько коротких запросов вглубь архива:
+ * оглавление, content.xml, логотип. Байт в них полторы сотни килобайт на пак,
+ * но каждый поход к хранилищу ВК стоит от полусекунды до трёх секунд сам по себе,
+ * сколько бы ни просили. Поэтому один пак в одиночку идёт секунд пять-десять,
+ * и всё это время канал простаивает: ждём ответа, а не качаем.
+ *
+ * Отсюда и способ ускорения — не быстрее качать, а ждать нескольких сразу.
+ * Замер на живых паках: десять хвостов подряд — 4.5 с на штуку, те же десять
+ * разом — 0.96 с на штуку.
+ */
+const jobs = Math.max(1, value('jobs', config.parseJobs));
+
+/**
+ * Авторы, чьи паки Gemini разбирает первыми.
+ *
+ * Их два списка, и делают они разное. `--authors=Имя,Имя` — разовый: очередь
+ * состоит только из паков этих авторов, всё остальное шаг не трогает вовсе.
+ * `config.priorityAuthors` — постоянный: очередь остаётся полной, но паки
+ * перечисленных авторов встают в её начало. Нужны оба: первым догоняют одного
+ * автора здесь и сейчас, вторым решают, кем каждую ночь начинать.
+ *
+ * Имена сводятся к ключу тем же правилом, что и в таблице pack_authors, —
+ * иначе «Кот» и «кот» оказались бы разными людьми.
+ */
+const onlyAuthors = text('authors').split(',').map(name => buildAuthorKey(name)).filter(Boolean);
+const priorityAuthors = (config.priorityAuthors ?? []).map(name => buildAuthorKey(name)).filter(Boolean);
+
+/**
+ * Кусок WHERE и кусок ORDER BY для шагов, которые спрашивают Gemini.
+ *
+ * Порядок внутри самих избранных остаётся прежним — по номеру строки: он тут
+ * ни на что не влияет, но без него две строки одного автора могли бы меняться
+ * местами между запусками, и прерванный на середине шаг начинал бы не с того
+ * места, на котором остановился.
+ */
+function authorQueueSql() {
+	const params = [];
+	let where = '';
+	let order = 'p.id';
+
+	if (onlyAuthors.length > 0) {
+		where = ` AND EXISTS (SELECT 1 FROM pack_authors a WHERE a.package_id = p.id
+			AND a.author_key IN (${onlyAuthors.map(() => '?').join(',')}))`;
+		params.push(...onlyAuthors);
+	}
+
+	if (priorityAuthors.length > 0) {
+		order = `(SELECT 1 FROM pack_authors a WHERE a.package_id = p.id
+			AND a.author_key IN (${priorityAuthors.map(() => '?').join(',')})) IS NULL, p.id`;
+		params.push(...priorityAuthors);
+	}
+
+	return { where, order, params };
+}
+
+/** Что написать в шапке шага про отбор по авторам. */
+function authorQueueNote() {
+	const parts = [];
+
+	if (onlyAuthors.length > 0) {
+		parts.push(`только авторы: ${text('authors')}`);
+	}
+
+	if (priorityAuthors.length > 0) {
+		parts.push(`сначала ${config.priorityAuthors.join(', ')}`);
+	}
+
+	return parts.length > 0 ? ` (${parts.join('; ')})` : '';
+}
 
 /**
  * Отчёт о ходе работы для страницы обновления базы: сколько сделано из скольких.
@@ -326,9 +401,16 @@ async function scanVk() {
 
 	const tally = { added: 0, edited: 0, back: 0, pending: [] };
 	let comments = 0;
+	let skipped = 0;
 
-	for (const topicUrl of config.vkTopics) {
-		console.log(`Тема: ${topicUrl}`);
+	for (const topic of config.vkTopics) {
+		const topicUrl = topic.url;
+
+		// Полночь по Москве: сама тема часового пояса не знает, а сообщения
+		// сравниваются с отсечкой по фактическому моменту, а не по строке даты.
+		const cutoff = topic.before ? Date.parse(`${topic.before}T00:00:00+03:00`) : null;
+
+		console.log(`Тема: ${topicUrl}${topic.before ? ` (паки до ${topic.before})` : ''}`);
 
 		try {
 			for await (const comment of readTopic(topicUrl, {
@@ -336,6 +418,16 @@ async function scanVk() {
 				onPage: (page, offset, found) => console.log(`  страница ${page} (offset ${offset}): сообщений с файлами — ${found}`),
 			})) {
 				comments++;
+
+				if (cutoff !== null) {
+					const ts = comment.ts ?? parseVkDate(comment.date);
+
+					if (ts === null || ts >= cutoff) {
+						skipped++;
+						continue;
+					}
+				}
+
 				syncComment(comment, useApi, tally);
 			}
 		} catch (error) {
@@ -346,7 +438,8 @@ async function scanVk() {
 	const known = db.prepare('SELECT COUNT(*) AS c FROM packages').get().c;
 	const applied = applyPending(tally.pending, known);
 
-	console.log(`Просмотрено сообщений с файлами: ${comments}. Новых паков: ${tally.added}.`);
+	console.log(`Просмотрено сообщений с файлами: ${comments}`
+		+ `${skipped ? ` (после отсечки не считали ${skipped})` : ''}. Новых паков: ${tally.added}.`);
 	console.log(`Изменений в прежних: файл заменён у ${applied.replaced}, `
 		+ `переписано сообщений ${tally.edited}, убрано файлов ${applied.gone}, вернулось ${tally.back}.`);
 }
@@ -386,6 +479,25 @@ async function fetchLogo(archive, logoName, packageId) {
 	fs.writeFileSync(path.join(config.logosPath, fileName), content);
 
 	return { file: fileName, state: 'ok' };
+}
+
+/**
+ * Прогоняет список через несколько одновременных работников.
+ *
+ * Порядок выполнения при этом теряется, и полагаться на него нельзя: строки
+ * базы друг от друга не зависят, а вот нумерация в выводе считается не по месту
+ * в очереди, а по числу законченных, — иначе номера скакали бы взад-вперёд.
+ */
+async function runPool(items, jobs, worker) {
+	let next = 0;
+
+	const workers = Array.from({ length: Math.min(jobs, items.length) }, async () => {
+		while (next < items.length) {
+			await worker(items[next++]);
+		}
+	});
+
+	await Promise.all(workers);
 }
 
 /** Обрыв соединения — обычное дело на больших файлах, стоит просто попробовать ещё раз. */
@@ -459,18 +571,19 @@ async function parsePackages() {
 
 	const queue = pending.slice(0, limit === Infinity ? undefined : limit);
 
-	console.log(`--- Разбор паков: в очереди ${pending.length}, будет обработано ${queue.length}`);
+	console.log(`--- Разбор паков: в очереди ${pending.length}, будет обработано ${queue.length}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 	progress('parse', 0, queue.length);
 
 	let ok = 0;
 	let failed = 0;
 	let dead = 0;
 	let logos = 0;
+	let done = 0;
 
-	for (let i = 0; i < queue.length; i++) {
-		const row = queue[i];
-		const label = `[${i + 1}/${queue.length}] ${row.file_name ?? row.url}`;
-		progress('parse', i, queue.length);
+	await runPool(queue, jobs, async row => {
+		const label = `[${++done}/${queue.length}] ${row.file_name ?? row.url}`;
+		progress('parse', done, queue.length);
 
 		try {
 			const result = await retryNetwork(() => withFreshUrl(row, async url => {
@@ -546,7 +659,7 @@ async function parsePackages() {
 				console.log(`${label} -> не вышло: ${error.message}`);
 			}
 		}
-	}
+	});
 
 	progress('parse', queue.length, queue.length);
 	console.log(`Разобрано: ${ok} (логотипов ${logos}), мёртвых ссылок: ${dead}, прочих ошибок: ${failed}.`);
@@ -561,16 +674,18 @@ async function fetchLogos() {
 	`).all();
 
 	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Логотипы: без логотипа ${rows.length}, будет обработано ${queue.length}`);
+	console.log(`--- Логотипы: без логотипа ${rows.length}, будет обработано ${queue.length}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 	progress('logos', 0, queue.length);
 
 	let ok = 0;
 	let none = 0;
 	let failed = 0;
+	let done = 0;
 
-	for (let i = 0; i < queue.length; i++) {
-		const row = queue[i];
-		progress('logos', i, queue.length);
+	await runPool(queue, jobs, async row => {
+		const at = ++done;
+		progress('logos', at, queue.length);
 
 		try {
 			const logo = await retryNetwork(() => withFreshUrl(row, async url => {
@@ -598,10 +713,10 @@ async function fetchLogos() {
 			console.log(`  ${row.name ?? row.file_name}: ${error.message}`);
 		}
 
-		if ((i + 1) % 25 === 0) {
-			console.log(`  обработано ${i + 1}/${queue.length}`);
+		if (at % 25 === 0) {
+			console.log(`  обработано ${at}/${queue.length}`);
 		}
-	}
+	});
 
 	progress('logos', queue.length, queue.length);
 	console.log(`Логотипы: скачано ${ok}, в паке нет ${none}, ошибок ${failed}.`);
@@ -622,16 +737,18 @@ async function fetchSpecials() {
 	`).all();
 
 	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Спецвопросы: не посчитаны у ${rows.length} паков, будет обработано ${queue.length}`);
+	console.log(`--- Спецвопросы: не посчитаны у ${rows.length} паков, будет обработано ${queue.length}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 	progress('specials', 0, queue.length);
 
 	let ok = 0;
 	let failed = 0;
 	let found = 0;
+	let done = 0;
 
-	for (let i = 0; i < queue.length; i++) {
-		const row = queue[i];
-		progress('specials', i, queue.length);
+	await runPool(queue, jobs, async row => {
+		const at = ++done;
+		progress('specials', at, queue.length);
 
 		try {
 			const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
@@ -656,10 +773,10 @@ async function fetchSpecials() {
 			console.log(`  ${row.name ?? row.file_name}: ${error.message}`);
 		}
 
-		if ((i + 1) % 25 === 0) {
-			console.log(`  обработано ${i + 1}/${queue.length}`);
+		if (at % 25 === 0) {
+			console.log(`  обработано ${at}/${queue.length}`);
 		}
-	}
+	});
 
 	progress('specials', queue.length, queue.length);
 	console.log(`Спецвопросы: посчитаны у ${ok} паков, из них со спецвопросами ${found}, ошибок ${failed}.`);
@@ -773,14 +890,16 @@ async function refreshTopics() {
 	// Разметка старее нынешних правил считается отсутствующей: доли в ней означают
 	// не то же самое, что теперь (см. TOPICS_VERSION).
 	const condition = retopics ? '' : `AND (p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION})`;
+	const authors = authorQueueSql();
 	const rows = db.prepare(`
 		SELECT p.id, p.name, p.rounds FROM packages p
-		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}
-		ORDER BY p.id
-	`).all();
+		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${authors.where}
+		ORDER BY ${authors.order}
+	`).all(...authors.params);
 
 	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Тематики через ${config.geminiModel}: паков без разметки ${rows.length}, будет обработано ${queue.length}`);
+	console.log(`--- Тематики через ${config.geminiModel}${authorQueueNote()}: `
+		+ `паков без разметки ${rows.length}, будет обработано ${queue.length}`);
 	progress('topics', 0, queue.length);
 
 	// Паки, разобранные старой версией, хранят только названия тем — по ним модель угадывает плохо
@@ -878,14 +997,16 @@ async function refreshSummaries() {
 	}
 
 	const condition = resummary ? '' : 'AND p.summary_at IS NULL';
+	const authors = authorQueueSql();
 	const rows = db.prepare(`
 		SELECT p.id, p.name, p.tags, p.rounds FROM packages p
-		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}
-		ORDER BY p.id
-	`).all();
+		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${authors.where}
+		ORDER BY ${authors.order}
+	`).all(...authors.params);
 
 	const queue = rows.slice(0, limit === Infinity ? undefined : limit);
-	console.log(`--- Описания через ${config.geminiModel}: паков без описания ${rows.length}, будет обработано ${queue.length}`);
+	console.log(`--- Описания через ${config.geminiModel}${authorQueueNote()}: `
+		+ `паков без описания ${rows.length}, будет обработано ${queue.length}`);
 	progress('summary', 0, queue.length);
 
 	let described = 0;

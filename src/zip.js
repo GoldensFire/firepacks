@@ -10,6 +10,13 @@ const EOCD64_LOCATOR_SIGNATURE = 0x07064b50;
 const EOCD64_SIGNATURE = 0x06064b50;
 const MAX_EOCD_SIZE = 65557;
 
+/**
+ * Сколько лишнего берём за локальным заголовком в надежде накрыть его целиком
+ * (см. read). Поле extra там обычно пустое или в несколько десятков байт;
+ * четверти килобайта хватает всегда, а стоит она нисколько.
+ */
+const LOCAL_EXTRA_SLACK = 256;
+
 /** ВК отдаёт HTML вместо файла, когда документ удалён или скрыт. */
 export class DeadLinkError extends Error {
 	constructor() {
@@ -31,6 +38,50 @@ async function fetchRange(url, from, to) {
 	}
 
 	return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * Хвост файла одним запросом — вместе с его полным размером.
+ *
+ * Обычный диапазон «от такого-то байта» тут не годится: чтобы посчитать, где
+ * начинается хвост, надо сперва узнать размер, а это ещё один поход к серверу.
+ * Запись «bytes=-N» просит последние N байт, не зная длины файла вовсе, а размер
+ * приезжает в ответном content-range: «bytes 58836106-58901662/58901663».
+ *
+ * Ради одного сбережённого запроса это не стоило бы делать, но у ВК каждый поход
+ * стоит от полусекунды до трёх независимо от того, байт в нём или сто килобайт
+ * (см. комментарий к parsePackages в indexer.js). Здесь экономится не трафик,
+ * а именно поход.
+ */
+async function fetchTail(url, length) {
+	const response = await fetch(url, {
+		headers: { 'User-Agent': config.userAgent, Range: `bytes=-${length}` },
+	});
+
+	if ((response.headers.get('content-type') ?? '').startsWith('text/html')) {
+		throw new DeadLinkError();
+	}
+
+	if (response.status !== 206 && response.status !== 200) {
+		throw new Error(`HTTP ${response.status} при чтении хвоста файла`);
+	}
+
+	const buffer = Buffer.from(await response.arrayBuffer());
+	const contentRange = response.headers.get('content-range');
+	const match = contentRange ? /\/(\d+)\s*$/.exec(contentRange) : null;
+
+	// Диапазон поняли: пришёл ровно хвост, и размер сказали в заголовке
+	if (response.status === 206 && match) {
+		const totalSize = Number(match[1]);
+
+		if (Number.isFinite(totalSize) && totalSize >= buffer.length) {
+			return { buffer, totalSize, tailStart: totalSize - buffer.length };
+		}
+	}
+
+	// Диапазон не поняли и прислали файл целиком. Лишний трафик, но искать
+	// оглавление в нём можно там же, где и в хвосте, — просто хвост тут весь файл.
+	return { buffer, totalSize: buffer.length, tailStart: 0 };
 }
 
 /** Возвращает размер файла, не скачивая его. */
@@ -133,15 +184,11 @@ function parseCentralDirectory(buffer) {
  * @param {string} url ссылка на архив
  */
 export async function openRemoteZip(url) {
-	const totalSize = await getRemoteSize(url);
+	const { buffer: tail, totalSize, tailStart } = await fetchTail(url, MAX_EOCD_SIZE);
 
 	if (totalSize > config.maxPackageSize) {
 		throw new Error(`пак слишком большой: ${Math.round(totalSize / 1024 / 1024)} МБ`);
 	}
-
-	const tailLength = Math.min(MAX_EOCD_SIZE, totalSize);
-	const tailStart = totalSize - tailLength;
-	const tail = await fetchRange(url, tailStart, totalSize - 1);
 
 	const location = readCentralDirectoryLocation(tail, tailStart, totalSize);
 
@@ -164,15 +211,42 @@ export async function openRemoteZip(url) {
 			?? entries.find(entry => variants.has(decodeSafe(entry.name).toLowerCase()));
 	};
 
-	/** Скачивает и распаковывает один файл. */
+	/**
+	 * Скачивает и распаковывает один файл.
+	 *
+	 * Данные лежат сразу за локальным заголовком, а его длина заранее неизвестна:
+	 * он повторяет имя файла и несёт собственное extra-поле, которое не обязано
+	 * совпадать с тем, что записано в оглавлении. Честный порядок — прочитать
+	 * заголовок, узнать длины, потом сходить за данными, — стоит двух походов
+	 * к серверу, и это ровно вдвое дороже самих данных: у ВК поход стоит секунду
+	 * с лишним независимо от размера.
+	 *
+	 * Поэтому берём сразу с запасом: заголовок с полем extra любого разумного
+	 * размера плюс сами данные. Настоящие длины читаются уже из полученного куска,
+	 * и данные из него же и вырезаются. Если запаса всё-таки не хватило —
+	 * дочитываем недостающий хвост вторым запросом, то есть как раньше.
+	 */
 	const read = async entry => {
-		// Локальный заголовок хранит собственные длины имени и extra-поля
-		const localHeader = await fetchRange(url, entry.localOffset, entry.localOffset + 29);
-		const nameLength = localHeader.readUInt16LE(26);
-		const extraLength = localHeader.readUInt16LE(28);
-		const dataStart = entry.localOffset + 30 + nameLength + extraLength;
+		if (entry.compressedSize === 0) {
+			return Buffer.alloc(0);
+		}
 
-		const raw = await fetchRange(url, dataStart, dataStart + entry.compressedSize - 1);
+		const guess = 30 + Buffer.byteLength(entry.name, 'utf8') + LOCAL_EXTRA_SLACK;
+		const head = await fetchRange(url, entry.localOffset, entry.localOffset + guess + entry.compressedSize - 1);
+
+		if (head.length < 30) {
+			throw new Error('обрезанный локальный заголовок');
+		}
+
+		const dataOffset = 30 + head.readUInt16LE(26) + head.readUInt16LE(28);
+		let raw = head.subarray(dataOffset, dataOffset + entry.compressedSize);
+
+		if (raw.length < entry.compressedSize) {
+			const from = entry.localOffset + dataOffset + raw.length;
+			const rest = await fetchRange(url, from, entry.localOffset + dataOffset + entry.compressedSize - 1);
+			raw = Buffer.concat([raw, rest]);
+		}
+
 		return entry.method === 0 ? raw : zlib.inflateRawSync(raw);
 	};
 

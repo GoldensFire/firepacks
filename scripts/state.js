@@ -26,7 +26,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -35,11 +34,25 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** Отметка релиза, к которой прикладывается состояние. Одна на всё время. */
 const TAG = 'state';
 
-/** Имя приложения. Оно же — имя файла, который скачивается при pull. */
-const ASSET = 'firepacks-state.tgz';
+/**
+ * Имя приложения. Совпадает с именем файла в WORK нарочно: gh называет приложение
+ * по файлу, который ему дали, и переименовать его при отправке нечем.
+ */
+const ASSET = 'state.tgz';
 
 /** Что кладём в свёрток. Пути от корня проекта: tar разворачивает их как есть. */
 const PARTS = ['data/sibase.db', 'data/thumbs'];
+
+/**
+ * Где свёрток лежит, пока его собирают или разворачивают. Место выбрано внутри
+ * проекта, и путь ниже всюду относительный, — это не прихоть.
+ *
+ * В Windows на пути обычно оказывается tar из состава Git, а он ведёт себя
+ * как в юниксе: путь с двоеточием для него не «диск C», а «машина C в сети»,
+ * и на «C:\Users\…» он честно пытается куда-то дозвониться. Относительному пути
+ * двоеточие взяться неоткуда, и обе разновидности tar понимают его одинаково.
+ */
+const WORK = 'data/state.tgz';
 
 const command = process.argv[2] ?? 'status';
 const force = process.argv.includes('--force');
@@ -49,10 +62,13 @@ const force = process.argv.includes('--force');
  * своя реакция на неудачу, и общее «умереть» ни одной не подходит.
  */
 function run(program, args, options = {}) {
+	// Без оболочки нарочно. В Windows она склеивает список доводов в одну строку,
+	// не расставляя кавычек, и «--title Рабочее состояние базы» приезжает к gh
+	// как заголовок «Рабочее» и два непонятно чьих слова следом. Запускаем здесь
+	// только gh и tar — обе настоящие программы, и оболочка для них не нужна.
 	const result = spawnSync(program, args, {
 		cwd: root,
 		stdio: options.quiet ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-		shell: process.platform === 'win32',
 		encoding: 'utf8',
 	});
 
@@ -152,22 +168,22 @@ function pull() {
 		process.exit(1);
 	}
 
-	const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'firepacks-'));
-	const file = path.join(temporary, ASSET);
-
 	console.log(`Забираю ${megabytes(there.size)} от ${when(there.updatedAt)}…`);
 
-	if (run('gh', ['release', 'download', TAG, '--pattern', ASSET, '--dir', temporary, '--clobber']).code !== 0) {
+	fs.mkdirSync(path.join(root, 'data'), { recursive: true });
+	fs.rmSync(path.join(root, WORK), { force: true });
+
+	if (run('gh', ['release', 'download', TAG, '--pattern', ASSET, '--output', WORK, '--clobber']).code !== 0) {
 		console.error('Не вышло скачать.');
 		process.exit(1);
 	}
 
-	if (run('tar', ['-xzf', file]).code !== 0) {
+	if (run('tar', ['-xzf', WORK]).code !== 0) {
 		console.error('Не вышло развернуть свёрток.');
 		process.exit(1);
 	}
 
-	fs.rmSync(temporary, { recursive: true, force: true });
+	fs.rmSync(path.join(root, WORK), { force: true });
 	console.log('Готово. База и обложки на месте.');
 }
 
@@ -191,11 +207,10 @@ function push() {
 		process.exit(1);
 	}
 
-	const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'firepacks-'));
-	const file = path.join(temporary, ASSET);
-
 	console.log('Складываю свёрток…');
-	pack(file);
+	pack(WORK);
+
+	const file = path.join(root, WORK);
 	console.log(`Свёрток: ${megabytes(fs.statSync(file).size)}. Отправляю…`);
 
 	// Отметки может ещё не быть — заводим. Черновик нарочно: это не выпуск
@@ -208,12 +223,12 @@ function push() {
 		]);
 	}
 
-	if (run('gh', ['release', 'upload', TAG, file, '--clobber']).code !== 0) {
+	if (run('gh', ['release', 'upload', TAG, WORK, '--clobber']).code !== 0) {
 		console.error('Не вышло отправить.');
 		process.exit(1);
 	}
 
-	fs.rmSync(temporary, { recursive: true, force: true });
+	fs.rmSync(file, { force: true });
 	console.log('Готово.');
 }
 

@@ -11,6 +11,7 @@ data/sibase.db-shm
 data/sibase.db-wal
 data/logos/
 data/thumbs/
+data/state.tgz
 
 # Отчёты о ночных обходах: у каждой машины свои
 data/nightly/

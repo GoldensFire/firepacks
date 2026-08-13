@@ -74,24 +74,43 @@ jobs:
 
       - run: npm ci
 
+      # Проверяем заранее, чтобы не узнать о нехватке ключа через полтора часа,
+      # на самом последнем шаге. Строго спрашиваются только ключи Cloudflare:
+      # без них выкладка сорвётся, а вся ночная работа пропадёт зря. Без ВК
+      # и Gemini обход просто беднее — обсуждения читаются разбором страниц,
+      # разметка новых паков откладывается до следующего раза, — и сказать
+      # об этом достаточно один раз в начале.
       - name: Проверить, что ключи на месте
         env:
           VK_TOKEN: ${{ secrets.VK_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOY: ${{ inputs.deploy }}
         run: |
+          for name in VK_TOKEN GEMINI_API_KEY; do
+            eval "value=\${$name}"
+            if [ -z "$value" ]; then echo "::warning::Ключа $name нет — обход пойдёт без него"; fi
+          done
+
+          if [ "$DEPLOY" = "false" ]; then
+            echo "Выкладки не будет, ключи Cloudflare не нужны."
+            exit 0
+          fi
+
           missing=""
-          for name in VK_TOKEN GEMINI_API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
             eval "value=\${$name}"
             if [ -z "$value" ]; then missing="$missing $name"; fi
           done
+
           if [ -n "$missing" ]; then
-            echo "Не хватает ключей:$missing"
-            echo "Кладутся так: gh secret set ИМЯ --repo ${{ github.repository }}"
+            echo "Без этого выкладывать нечем:$missing"
+            echo "Кладётся так: gh secret set ИМЯ --repo ${{ github.repository }}"
             exit 1
           fi
-          echo "Все четыре ключа на месте."
+
+          echo "Ключи Cloudflare на месте."
 
       - name: Забрать базу с полки
         id: state

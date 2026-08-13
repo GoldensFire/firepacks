@@ -12,6 +12,10 @@ const state = {
 	topics: new Set(),
 	languages: new Set(),
 	franchise: '',
+	// Дополнительный тип пака: пак целиком про одно — про Вархаммер, про футбол.
+	// Отдельно от franchise нарочно: там «где эта франшиза встречается вообще»,
+	// здесь «паки этого типа», и это разные списки (см. subjectPackShare).
+	subject: '',
 	author: '',
 	sort: 'added',
 	dir: 'desc',
@@ -36,7 +40,14 @@ let user = null;
 // а значки — в icons.js: icon(), topicIcon() и iconText()
 
 const LEVEL_ORDER = [4, 3, 2, 1];
-const TOPIC_ORDER = ['anime', 'games', 'movies', 'cartoons', 'music', 'mixed', 'unknown'];
+
+/**
+ * Порядок типов пака в колонке фильтров. Солянка стоит первой не потому, что
+ * она главная, а потому, что её больше всех: список читают сверху, и начинаться
+ * он должен с того, во что упирается большинство паков. Дальше — тематические,
+ * от самых частых, и «без разметки» в самом конце: это не тип, а его отсутствие.
+ */
+const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'music', 'unknown'];
 
 /** Категории, которые делят вопросы между собой: их доли складываются в сотню. */
 const SHARE_ORDER = ['anime', 'games', 'movies', 'cartoons', 'other'];
@@ -133,6 +144,10 @@ function buildQuery() {
 
 	if (state.franchise) {
 		query.set('franchise', state.franchise);
+	}
+
+	if (state.subject) {
+		query.set('subject', state.subject);
 	}
 
 	if (state.author) {
@@ -264,13 +279,17 @@ function renderTopics() {
 
 		// То же, что стояло абзацем под колонкой: отметить можно сколько угодно,
 		// а сам тип считается по долям тем. Здесь это читается тогда, когда нужно.
-		button.title = `${info.name}: паков ${count}. Можно отметить несколько типов сразу. `
+		//
+		// Название берётся packName, а не name: в колонке стоит вопрос «какого
+		// типа пак», и отвечать на него надо «Аниме-пак», а не «Аниме» — слово
+		// «Аниме» называет тематику вопросов, и им же подписан кусок полоски долей.
+		button.title = `${info.packName}: паков ${count}. Можно отметить несколько типов сразу. `
 			+ `Тип даётся паку, когда одна тематика занимает больше `
 			+ `${Math.round(facets.topicThreshold * 100)}% вопросов, иначе это солянка`;
 
 		button.append(
 			topicIcon(key, 'topic-icon'),
-			element('span', 'label', info.name),
+			element('span', 'label', info.packName),
 			element('span', 'count', String(count)),
 		);
 
@@ -292,6 +311,68 @@ function renderTopics() {
 
 	if (container.children.length === 0) {
 		container.append(element('p', 'hint', 'Тематики ещё не размечены. Запустите «Обновить базу» с ключом Gemini.'));
+	}
+}
+
+/**
+ * Дополнительные типы паков: те, которых в пяти основных быть не может.
+ *
+ * Пять тематик отвечают на вопрос «о чём вопросы», и на пак про футбол ответа
+ * у них нет: спорт живёт в «прочем», ни одна доля порога не берёт, и пак числится
+ * солянкой. Пак по Вархаммеру по ним — просто «игропак», каких сотни. Тип здесь
+ * даёт предмет, названный моделью у каждой темы (тот самый, по которому считаются
+ * повторы): если один предмет занял больше половины вопросов, пак — про него.
+ *
+ * Выбрать можно только один: это не «покажи всё, где встречается Вархаммер»
+ * (для этого есть повторы в самой карточке), а «покажи паки вот этого типа».
+ */
+function renderSubjects() {
+	const container = $('subjects');
+	const filter = normalize($('subjectSearch').value);
+	container.textContent = '';
+
+	const subjects = (facets.subjects ?? []).filter(item => !filter || normalize(item.name).includes(filter));
+
+	// Выбранный тип показываем всегда, даже если он не попал ни в список
+	// (тот короткий), ни под поиск: иначе снять его было бы нечем
+	const chosen = state.subject && !subjects.some(item => item.name === state.subject)
+		? [{ name: state.subject, count: null }]
+		: [];
+
+	for (const item of [...chosen, ...subjects]) {
+		const picked = state.subject === item.name;
+		const button = element('button', 'level-toggle');
+		button.type = 'button';
+		button.setAttribute('aria-pressed', String(picked));
+
+		button.title = picked
+			? 'Показать паки любых типов'
+			: `Паки, которые целиком про одно: «${item.name}» занимает у них `
+				+ `не меньше ${Math.round(facets.subjectPackShare * 100)}% вопросов`;
+
+		button.append(
+			icon('target', 'topic-icon'),
+			element('span', 'label', item.name),
+			// У выбранного вручную типа числа нет: список коротких, и считать его
+			// отдельным запросом ради одной строки не за что
+			element('span', 'count', item.count === null ? '·' : String(item.count)),
+		);
+
+		button.addEventListener('click', () => {
+			state.subject = picked ? '' : item.name;
+			state.page = 1;
+			renderSubjects();
+			renderActiveFilters();
+			load();
+		});
+
+		container.append(button);
+	}
+
+	if (container.children.length === 0) {
+		container.append(element('p', 'hint', filter
+			? 'Ничего не нашлось.'
+			: 'Появятся, когда паки разметит Gemini: тип берётся из предмета тем.'));
 	}
 }
 
@@ -610,6 +691,7 @@ function renderActiveFilters() {
 			renderLevels();
 			renderUnrated();
 			renderTopics();
+			renderSubjects();
 			renderLanguages();
 			renderTags();
 			renderActiveFilters();
@@ -629,7 +711,7 @@ function renderActiveFilters() {
 	}
 
 	for (const topic of state.topics) {
-		add(topicInfo(topic).name, () => state.topics.delete(topic));
+		add(topicInfo(topic).packName, () => state.topics.delete(topic));
 	}
 
 	for (const key of state.languages) {
@@ -641,8 +723,14 @@ function renderActiveFilters() {
 		add(`Тема: ${tag}`, () => state.tags.delete(tag));
 	}
 
+	if (state.subject) {
+		add(`Пак про одно: ${state.subject}`, () => { state.subject = ''; });
+	}
+
+	// «Предмет», а не «франшиза»: с тех пор как модель называет предмет и у тем
+	// категории «прочее», сюда попадают и футбол, и Вторая мировая война
 	if (state.franchise) {
-		add(`Франшиза: ${state.franchise}`, () => { state.franchise = ''; });
+		add(`Предмет: ${state.franchise}`, () => { state.franchise = ''; });
 	}
 
 	// Кнопка «Фильтры» показывает их число: на узком экране сама колонка свёрнута,
@@ -661,6 +749,7 @@ function countActiveFilters() {
 		+ state.languages.size
 		+ state.tags.size
 		+ (state.franchise ? 1 : 0)
+		+ (state.subject ? 1 : 0)
 		+ (state.author ? 1 : 0)
 		+ (state.hidePlayed ? 1 : 0)
 		+ (state.onlyPlayed ? 1 : 0)
@@ -919,6 +1008,65 @@ function createShareBar(parts, className, suffix) {
 }
 
 /**
+ * Подпись под полоской: из чего она состоит, словами — «50% Аниме, 30% Мультфильмы».
+ *
+ * Полоска показывает соотношение, но не называет его: чтобы прочитать доли,
+ * приходилось наводить мышью на каждый кусок по очереди, а на телефоне мыши нет
+ * вовсе, и цвета там не значили ничего. Точка перед словом того же цвета, что
+ * и кусок полоски: без неё подпись и полоска остались бы двумя разными списками.
+ *
+ * Куски мельче половины процента в подпись не идут: в полоске тонкая цветная
+ * черта честнее пустоты, а в строке «0% HTML» — только лишнее слово.
+ */
+function createShareLegend(parts) {
+	const total = parts.reduce((sum, part) => sum + part.value, 0);
+
+	if (total <= 0) {
+		return null;
+	}
+
+	const legend = element('div', 'shares__legend');
+
+	const visible = parts
+		.map(part => ({ ...part, percent: (part.value / total) * 100 }))
+		.filter(part => part.percent >= 0.5)
+		.sort((a, b) => b.percent - a.percent);
+
+	for (const part of visible) {
+		const item = element('span', 'shares__legend-item');
+		item.append(
+			element('i', `shares__dot shares__part--${part.key}`),
+			element('span', null, `${Math.round(part.percent)}% ${part.name}`),
+		);
+		legend.append(item);
+	}
+
+	return legend.children.length > 0 ? legend : null;
+}
+
+/** Полоска вместе с её подписью. */
+function createShareRow(parts, className, suffix, title) {
+	const bar = createShareBar(parts, className, suffix);
+
+	if (!bar) {
+		return null;
+	}
+
+	bar.title = title;
+
+	const row = element('div', 'shares__row');
+	row.append(bar);
+
+	const legend = createShareLegend(parts);
+
+	if (legend) {
+		row.append(legend);
+	}
+
+	return row;
+}
+
+/**
  * Полоски долей под названием. Сверху — тематики, поделившие вопросы между собой,
  * снизу — из чего эти вопросы сделаны: текст, картинки, музыка, видео и html.
  *
@@ -930,32 +1078,32 @@ function createShares(pack) {
 	const shares = pack.topicShares ?? {};
 	const content = pack.contentStat ?? {};
 
-	const topicBar = createShareBar(
+	const topics = createShareRow(
 		SHARE_ORDER.map(key => ({ key, name: topicInfo(key).name, value: shares[key] ?? 0 })),
 		'shares__bar--topics',
 		'вопросов пака',
+		'О чём вопросы пака',
 	);
 
-	const contentBar = createShareBar(
+	const contents = createShareRow(
 		CONTENT_ORDER.map(key => ({ key, name: CONTENT_NAMES[key], value: content[key] ?? 0 })),
 		'shares__bar--content',
 		'содержимого пака',
+		'Из чего сделаны вопросы',
 	);
 
-	if (!topicBar && !contentBar) {
+	if (!topics && !contents) {
 		return null;
 	}
 
 	const box = element('div', 'shares');
 
-	if (topicBar) {
-		topicBar.title = 'О чём вопросы пака. Наведите на цвет, чтобы узнать долю';
-		box.append(topicBar);
+	if (topics) {
+		box.append(topics);
 	}
 
-	if (contentBar) {
-		contentBar.title = 'Из чего сделаны вопросы. Наведите на цвет, чтобы узнать долю';
-		box.append(contentBar);
+	if (contents) {
+		box.append(contents);
 	}
 
 	return box;
@@ -1127,7 +1275,18 @@ function createCard(pack) {
 		return badge;
 	};
 
-	if (pack.primaryTopic) {
+	// Дополнительный тип: пак целиком про одно — про Вархаммер, про футбол,
+	// про Гарри Поттера. Берётся самый частый предмет пака, если он занял больше
+	// половины вопросов; предметы приходят отсортированными от частых к редким,
+	// поэтому это первый в списке (см. computeFranchises).
+	const mostCommon = (pack.franchises ?? [])[0];
+	const subject = mostCommon && mostCommon.share >= facets.subjectPackShare ? mostCommon : null;
+
+	// Солянка вместе с таким типом не показывается: «Солянка · Футбол» —
+	// это спор с самим собой. Солянкой пак про футбол числится только потому,
+	// что спорт живёт в «прочем» и ни одна из пяти тематик порога не берёт;
+	// сказать про такой пак «он про футбол» и точнее, и полезнее.
+	if (pack.primaryTopic && !(subject && pack.primaryTopic === 'mixed')) {
 		badges.append(createTopicBadge(
 			pack.primaryTopic,
 			pack.primaryShare,
@@ -1135,6 +1294,26 @@ function createCard(pack) {
 				? `Ни одна тематика не набрала ${Math.round(facets.topicThreshold * 100)}% вопросов`
 				: `${topicInfo(pack.primaryTopic).name}: ${Math.round(pack.primaryShare * 100)}% вопросов пака`,
 		));
+	}
+
+	if (subject) {
+		const badge = element('button', 'badge badge--subject');
+		badge.type = 'button';
+		badge.append(icon('target'), element('span', null, `${subject.name} ${Math.round(subject.share * 100)}%`));
+		badge.title = `Пак целиком про одно: «${subject.name}» — ${subject.themes} `
+			+ `${plural(subject.themes, 'тема', 'темы', 'тем')} и ${Math.round(subject.share * 100)}% вопросов пака. `
+			+ 'Нажмите, чтобы показать все паки этого типа';
+
+		badge.addEventListener('click', () => {
+			state.subject = subject.name;
+			state.page = 1;
+			renderSubjects();
+			renderActiveFilters();
+			load();
+			window.scrollTo({ top: 0, behavior: 'smooth' });
+		});
+
+		badges.append(badge);
 	}
 
 	// Музыка стоит вторым ярлыком: она не спорит с основной тематикой, а дополняет её —
@@ -1160,8 +1339,10 @@ function createCard(pack) {
 	// Поэтому блок оценок пересобирается, когда отметку ставят или снимают, —
 	// звёзды тут же становятся нажимаемыми (см. кнопку «Отметить сыгранным»).
 	const buildRating = () => {
+		const canRate = Boolean(user) && pack.played;
+
 		const box = createRating(pack, {
-			canRate: Boolean(user) && pack.played,
+			canRate,
 			reason: !user
 				? 'Оценивать паки можно, войдя через Discord'
 				: 'Оценка появится, когда пак будет отмечен сыгранным',
@@ -1184,10 +1365,12 @@ function createCard(pack) {
 			},
 		});
 
-		// Почему звёзды не нажимаются, написано и словами: одна подсказка при
-		// наведении на это не годится — на телефоне её попросту нет
-		if (user && !pack.played) {
-			box.append(element('span', 'rating__lock', 'оценка после отметки «сыграно»'));
+		// Пак отмечен сыгранным — значит, дело за оценкой, и звёзды становятся
+		// в карточке главным: встают по центру отдельной строкой и вырастают вдвое.
+		// Половина звезды здесь — целый балл, а мелкими она шириной в три пикселя,
+		// и «7 из 10» ставилось наугад; в крупные попадают с первого раза.
+		if (canRate) {
+			box.classList.add('rating--big');
 		}
 
 		return box;
@@ -1622,6 +1805,13 @@ function bind() {
 		tagTimer = setTimeout(renderTags, 150);
 	});
 
+	let subjectTimer = null;
+
+	$('subjectSearch').addEventListener('input', () => {
+		clearTimeout(subjectTimer);
+		subjectTimer = setTimeout(renderSubjects, 150);
+	});
+
 	$('sort').addEventListener('change', event => {
 		state.sort = event.target.value;
 		state.page = 1;
@@ -1673,6 +1863,7 @@ function resetFilters() {
 	state.topics.clear();
 	state.languages.clear();
 	state.franchise = '';
+	state.subject = '';
 	state.author = '';
 	state.sort = 'added';
 	state.dir = 'desc';
@@ -1682,12 +1873,14 @@ function resetFilters() {
 	$('hidePlayed').checked = false;
 	$('onlyPlayed').checked = false;
 	$('tagSearch').value = '';
+	$('subjectSearch').value = '';
 	$('sort').value = 'added';
 	$('dir').value = 'desc';
 
 	renderLevels();
 	renderUnrated();
 	renderTopics();
+	renderSubjects();
 	renderLanguages();
 	renderTags();
 	renderActiveFilters();
@@ -1724,6 +1917,7 @@ function readUrlState() {
 	}
 
 	state.franchise = query.get('franchise') ?? '';
+	state.subject = query.get('subject') ?? '';
 	state.author = query.get('author') ?? '';
 
 	if (query.get('sort')) {
@@ -1773,6 +1967,7 @@ async function start() {
 	renderLevels();
 	renderUnrated();
 	renderTopics();
+	renderSubjects();
 	renderLanguages();
 	renderTags();
 	renderCounters();

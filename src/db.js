@@ -215,6 +215,11 @@ db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_lang ON packages (status, lan
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_tags ON packages (status, tags)');
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_vk_ts ON packages (status, vk_ts)');
 
+// Дополнительные типы паков — те, что целиком про один предмет (см. subjectPackShare).
+// Колонка слева считает их по всей базе, и обе колонки, по которым идёт отбор,
+// лежат прямо здесь: ответ собирается из указателя, не поднимая строк.
+db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_subject ON packages (status, franchise_top, franchise_top_share)');
+
 // Журнал WAL растёт, пока его никто не подрезает, а подрезать его мешает любой
 // открытый читатель — то есть сам сайт, который держит базу открытой сутками.
 // Здесь он ещё никем не открыт, и это единственный надёжный миг всё сложить

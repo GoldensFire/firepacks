@@ -289,6 +289,17 @@ function buildWhere(query, userId, hits) {
 		params.push(franchise);
 	}
 
+	// Дополнительный тип пака: пак целиком про это. Отдельно от franchise нарочно —
+	// там вопрос «где эта франшиза вообще встречается», а здесь «какие паки этого
+	// типа», и пак, у которого про Вархаммер две темы из тридцати, паком
+	// по Вархаммеру не является (см. subjectPackShare).
+	const subject = (query.get('subject') ?? '').trim();
+
+	if (subject) {
+		conditions.push('p.franchise_top = ? AND p.franchise_top_share >= ?');
+		params.push(subject, settings.subjectPackShare);
+	}
+
 	if (query.get('hidePlayed') === '1') {
 		conditions.push('pl.pack_key IS NULL');
 	}
@@ -495,7 +506,7 @@ export async function getFacets(db) {
 		return facetsCache;
 	}
 
-	const [tagRows, levelRows, topicRows, unknownTopic, musicTopic, languageRows, totals] =
+	const [tagRows, levelRows, topicRows, unknownTopic, musicTopic, subjectRows, languageRows, totals] =
 		await db.batch([
 			db.prepare(`SELECT tags FROM packages WHERE status = 'ok'`),
 			db.prepare('SELECT level, COUNT(*) AS c FROM stats WHERE level IS NOT NULL GROUP BY level'),
@@ -510,10 +521,22 @@ export async function getFacets(db) {
 				SELECT COUNT(*) AS c FROM packages p
 				WHERE p.status = 'ok' AND p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?
 			`).bind(settings.musicThreshold),
-			// Списка франшиз здесь больше нет: отдельного фильтра по ним в колонке
-			// не осталось, а json_each по всей таблице стоил дороже всех прочих
-			// запросов вместе взятых — на D1 это ещё и строки, которые считаются.
+			// Дополнительные типы паков: те, что целиком про один предмет, —
+			// «пак по Вархаммеру», «пак по футболу». Читается готовая колонка
+			// с самым частым предметом, и обе колонки отбора лежат в указателе
+			// (ix_packages_ok_subject), поэтому строк это не читает.
 			//
+			// Полного списка франшиз здесь по-прежнему нет: json_each по всей
+			// таблице стоил дороже всех прочих запросов вместе взятых — на D1
+			// это ещё и строки, которые считаются по тарифу.
+			db.prepare(`
+				SELECT p.franchise_top AS name, COUNT(*) AS c
+				FROM packages p
+				WHERE p.status = 'ok' AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
+				GROUP BY p.franchise_top
+				ORDER BY c DESC, name
+				LIMIT ?
+			`).bind(settings.subjectPackShare, settings.subjectLimit),
 			// Языки паков. Там, где язык не указан, стоит unknown — таких паков
 			// в базе заметная часть, и прятать их из фильтра нельзя.
 			db.prepare(`
@@ -600,6 +623,9 @@ export async function getFacets(db) {
 		hardRight: settings.hardRightPercent,
 		franchiseMinThemes: settings.franchiseMinThemes,
 		franchiseDominantShare: settings.franchiseDominantShare,
+		// Дополнительные типы паков и порог, с которого пак считается паком про одно
+		subjects: subjectRows.results.map(row => ({ name: row.name, count: row.c })),
+		subjectPackShare: settings.subjectPackShare,
 		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё
 		readOnly: true,
 		playerUri: settings.playerUri,

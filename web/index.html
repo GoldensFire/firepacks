@@ -11,7 +11,7 @@
 	<header class="topbar">
 		<div class="topbar__inner">
 			<a class="brand" href="/" title="На главную страницу библиотеки">
-				<span class="brand__mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.6 3.4-1 5.1-2.7 6.9C7.6 10.6 6 12.4 6 15a6 6 0 0 0 12 0c0-2.3-1.1-4.2-2.4-5.7.1 1.2-.3 2.1-1.2 2.7.7-3.7-.9-7-2.4-10Z"/></svg></span>
+				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
 				<span class="brand__text">FirePacks</span>
 			</a>
 
@@ -104,6 +104,18 @@
 			<section class="filters__block">
 				<h2 class="filters__title">Тип пака</h2>
 				<div id="topics" class="levels"></div>
+			</section>
+
+			<!-- Пять основных тематик отвечают на вопрос «о чём вопросы», и на пак
+			     про футбол ответа у них нет: спорт живёт в «прочем», ни одна доля
+			     порога не берёт, и пак числится солянкой. А пак по Вархаммеру
+			     по ним — просто «игропак», каких сотни. Здесь стоят типы, которых
+			     в том списке быть не может: их называет разметка тем — тот самый
+			     предмет, по которому считаются повторы. -->
+			<section class="filters__block">
+				<h2 class="filters__title">Пак целиком про одно</h2>
+				<input id="subjectSearch" class="select" type="search" placeholder="Найти тип пака" autocomplete="off">
+				<div id="subjects" class="levels"></div>
 			</section>
 
 			<!-- Язык записан внутри самого файла пака. Указывают его далеко не все,

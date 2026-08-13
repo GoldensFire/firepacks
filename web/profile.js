@@ -11,11 +11,12 @@
 'use strict';
 
 const LEVEL_ORDER = [4, 3, 2, 1];
-const TOPIC_ORDER = ['anime', 'games', 'movies', 'cartoons', 'music', 'mixed', 'unknown'];
+/** Порядок тот же, что в колонке фильтров библиотеки (см. web/app.js). */
+const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'music', 'unknown'];
 
 const EXTRA_TOPICS = {
-	mixed: { name: 'Солянка' },
-	unknown: { name: 'Без разметки' },
+	mixed: { name: 'Солянка', packName: 'Солянка' },
+	unknown: { name: 'Без разметки', packName: 'Без разметки' },
 };
 
 /** Как человек себя назвал. Ничего, кроме подписи, за этим именем не стоит. */
@@ -24,7 +25,7 @@ const NAME_KEY = 'firepacks.profile.name';
 let facets = null;
 let profile = null;
 
-const topicInfo = key => facets.topicNames[key] ?? EXTRA_TOPICS[key] ?? { name: key };
+const topicInfo = key => facets.topicNames[key] ?? EXTRA_TOPICS[key] ?? { name: key, packName: key };
 
 /** Кто вошёл через Discord, или null. */
 let user = null;
@@ -269,7 +270,7 @@ function createCard(pack) {
 	if (pack.primaryTopic) {
 		const info = topicInfo(pack.primaryTopic);
 		const badge = element('span', `badge badge--topic topic--${pack.primaryTopic}`);
-		badge.append(topicIcon(pack.primaryTopic), element('span', null, info.name));
+		badge.append(topicIcon(pack.primaryTopic), element('span', null, info.packName));
 		badges.append(badge);
 	}
 
@@ -372,8 +373,10 @@ async function start() {
 		key => ({ name: facets.levelNames[key].name, className: `level--${facets.levelNames[key].key}` }),
 		key => `/?levels=${key}`);
 
+	// Здесь стоит вопрос «сколько паков какого типа сыграно», и отвечает на него
+	// packName — «Аниме-пак», а не «Аниме» (то же правило, что в web/app.js)
 	renderBreakdown('topics', TOPIC_ORDER, profile.topics,
-		key => ({ ...topicInfo(key), iconNode: topicIcon(key), className: `topic--${key}` }),
+		key => ({ name: topicInfo(key).packName, iconNode: topicIcon(key), className: `topic--${key}` }),
 		key => `/?topic=${encodeURIComponent(key)}`);
 
 	renderAuthors();

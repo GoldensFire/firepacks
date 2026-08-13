@@ -309,6 +309,17 @@ function buildWhere(query, userId) {
 		params.push(franchise);
 	}
 
+	// Дополнительный тип пака: пак целиком про это. Отдельно от franchise нарочно —
+	// там вопрос «где эта франшиза вообще встречается», а здесь «какие паки этого
+	// типа», и пак, у которого про Вархаммер две темы из тридцати, паком
+	// по Вархаммеру не является (см. subjectPackShare).
+	const subject = (query.get('subject') ?? '').trim();
+
+	if (subject) {
+		conditions.push('p.franchise_top = ? AND p.franchise_top_share >= ?');
+		params.push(subject, config.subjectPackShare);
+	}
+
 	if (query.get('hidePlayed') === '1') {
 		conditions.push('pl.package_id IS NULL');
 	}
@@ -496,10 +507,23 @@ function getFacets() {
 		WHERE p.status = 'ok' AND p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?
 	`).get(config.musicThreshold).c;
 
-	// Списка франшиз здесь больше нет: отдельного фильтра по ним в колонке не
-	// осталось, а обходить json_each по всей таблице ради поля, которое никто
-	// не читает, — самый дорогой запрос из всех, что тут были.
+	// Дополнительные типы паков: те, что целиком про один предмет, — «пак по
+	// Вархаммеру», «пак по футболу». Пяти основных тематик для них не хватает:
+	// пак про футбол по ним «солянка», а пак по Вархаммеру — просто «игропак».
 	//
+	// Полного списка франшиз здесь по-прежнему нет: обходить json_each по всей
+	// таблице ради поля, которое никто не читает, — самый дорогой запрос из всех,
+	// что тут были. Здесь читается готовая колонка с самым частым предметом,
+	// и обе колонки отбора лежат в указателе (ix_packages_ok_subject).
+	const subjects = db.prepare(`
+		SELECT p.franchise_top AS name, COUNT(*) AS c
+		FROM packages p
+		WHERE p.status = 'ok' AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
+		GROUP BY p.franchise_top
+		ORDER BY c DESC, name
+		LIMIT ?
+	`).all(config.subjectPackShare, config.subjectLimit);
+
 	// Языки паков. Считаются по тому, что записано в самом файле; там же, где
 	// язык не указан, стоит unknown — таких паков в базе заметная часть,
 	// и прятать их из фильтра нельзя.
@@ -539,6 +563,9 @@ function getFacets() {
 		hardRight: config.hardRightPercent,
 		franchiseMinThemes: config.franchiseMinThemes,
 		franchiseDominantShare: config.franchiseDominantShare,
+		// Дополнительные типы паков и порог, с которого пак считается паком про одно
+		subjects: subjects.map(row => ({ name: row.name, count: row.c })),
+		subjectPackShare: config.subjectPackShare,
 		// На хостинге собирать базу нечем: сайт не показывает ни страницы обновления, ни ссылки на неё
 		readOnly: config.readOnly,
 		playerUri: config.playerUri,

@@ -1679,10 +1679,9 @@ function createCard(pack, options = {}) {
 	// про сам пак, а не про игру им, и стоят они в конце строки одна за другой.
 	actions.append(createShareButton(pack));
 
-	// Точечное обновление — только на своей странице пака и только тому, кому
-	// обновлять можно: на хостинге индексатора нет вовсе, а дома кнопка
-	// принадлежит хозяину сайта (см. createUpdateButton и canUpdate в server.js)
-	if (standalone && facets.canUpdate) {
+	// Точечное обновление — только на своей странице пака и только дома:
+	// на хостинге индексатора нет вовсе (см. createUpdateButton)
+	if (standalone && !facets.readOnly) {
 		actions.append(createUpdateButton(pack));
 	}
 

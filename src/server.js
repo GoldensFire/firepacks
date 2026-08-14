@@ -1130,35 +1130,6 @@ function sendStatic(response, urlPath, request = null) {
 	sendFile(response, filePath, request, isLogo);
 }
 
-/**
- * Можно ли этому посетителю обновлять базу.
- *
- * Три случая, и все три нужны:
- * — на хостинге нельзя никому, даже хозяину: индексатора там нет (readOnly);
- * — список хозяев не заведён — можно всем, то есть ровно как раньше. Сайт
- *   на своей машине слушает localhost, и «все» там означает одного человека;
- * — список заведён — можно только тем, кто в нём назван, и только войдя:
- *   узнать, кто пришёл, иначе не из чего.
- */
-function canUpdate(user) {
-	if (config.readOnly) {
-		return false;
-	}
-
-	return config.adminIds.length === 0 || Boolean(user?.admin);
-}
-
-/** Чем именно отказано в обновлении: причины разные, и говорить их надо разное. */
-function updateDenial(user) {
-	if (config.readOnly) {
-		return { status: 403, error: 'Обновление базы отключено: сайт работает только на чтение' };
-	}
-
-	return user
-		? { status: 403, error: 'Обновлять базу может только владелец сайта' }
-		: { status: 401, error: 'Обновление базы доступно после входа через Discord' };
-}
-
 const server = http.createServer(async (request, response) => {
 	const url = new URL(request.url, `http://localhost:${config.port}`);
 
@@ -1272,9 +1243,7 @@ const server = http.createServer(async (request, response) => {
 		}
 
 		if (url.pathname === '/api/facets') {
-			// canUpdate считается здесь, а не в getFacets: тот про базу и её пороги,
-			// и про то, кто именно пришёл, не знает ничего
-			sendJson(response, { ...getFacets(), user, canUpdate: canUpdate(user) });
+			sendJson(response, { ...getFacets(), user });
 			return;
 		}
 
@@ -1321,15 +1290,14 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
-		// Обновление базы — не для всех, кто открыл сайт. На хостинге обновлять
-		// нечего вовсе: индексатора там нет, а Gemini и ВК с чужого адреса дёргать
-		// не следует. Дома же кнопка запускает разбор тысяч паков и тратит суточный
-		// лимит Gemini — заведён список хозяев, и остальным её не видно (adminIds
-		// в config.js). Отвечаем отказом до разбора конкретного метода, чтобы
-		// не осталось ни одной работающей лазейки.
-		if (url.pathname.startsWith('/api/update/') && !canUpdate(user)) {
-			const denial = updateDenial(user);
-			sendJson(response, { error: denial.error }, denial.status);
+		// На хостинге обновлять нечего: индексатора там нет, а Gemini и ВК с чужого
+		// адреса дёргать не следует. Отвечаем отказом до разбора конкретного метода,
+		// чтобы не осталось ни одной работающей лазейки.
+		//
+		// Никакого входа кнопка обновления при этом не требует: дома сайтом
+		// пользуется хозяин, и спрашивать у него пропуск на своей же машине незачем.
+		if (url.pathname.startsWith('/api/update/') && config.readOnly) {
+			sendJson(response, { error: 'Обновление базы отключено: сайт работает только на чтение' }, 403);
 			return;
 		}
 
@@ -1419,10 +1387,8 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
-		// Страница обновления не должна открываться по прямой ссылке у того, кому
-		// обновлять нельзя, — ни на хостинге, ни у чужого человека дома. Отвечаем
-		// именно 404, а не отказом: страницы, которой тебе нельзя, для тебя просто нет.
-		if (!canUpdate(user) && /^\/update(\.html)?$/.test(url.pathname)) {
+		// Страница обновления на хостинге не должна открываться и по прямой ссылке
+		if (config.readOnly && /^\/update(\.html)?$/.test(url.pathname)) {
 			response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Обновление базы отключено');
 			return;
 		}

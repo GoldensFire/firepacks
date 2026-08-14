@@ -23,11 +23,37 @@
 	--books: #f0a836;
 	--music: #e040e0;
 	--mixed: #1fdca4;
-	--radius: 10px;
+	--radius: 0.625rem;
 }
 
 * {
 	box-sizing: border-box;
+}
+
+/* Мерка, от которой считается вся вёрстка. Размеры в этом файле стоят не в точках
+   экрана, а в rem — долях этой мерки, — и потому весь сайт целиком меняется вместе
+   с ней: шрифт, отступы, обложки, ширина колонок. Меняются они разом и в одну
+   сторону, поэтому ничего никуда не разъезжается: это не «шрифт побольше в тех же
+   коробках», а тот же сайт, только крупнее.
+
+   Мерка растёт с шириной окна, и вот зачем. Точка экрана — не единица длины:
+   на ноутбуке в 1920 точек их сотня укладывается в два сантиметра, а на мониторе
+   2560 — в полтора. Вёрстка, посчитанная под первый, на втором оказывается мелкой
+   ровно настолько, насколько экран подробнее, — и текст в 14 точек читается там
+   как десять. Дальше 1600 точек прибавлять к тому же ещё и некуда: вся страница
+   в эту ширину и уложена (см. max-width у .layout), а остальное — пустые поля
+   по краям, которые тем шире, чем шире монитор.
+
+   До 1700 точек мерка ровно та, под которую сайт и рисовался, — там ничего
+   не меняется вовсе. Дальше она растёт вместе с окном и упирается в потолок
+   в полтора раза: на 2560 это выходит около 21 точки вместо 16, то есть текст
+   в 18 вместо 14, а поля по краям заодно перестают быть в ладонь шириной.
+
+   Считается всё это не от 16 точек, а от 1rem — того размера шрифта, который
+   человек выбрал в браузере. Кто поставил себе крупный шрифт, получит крупнее
+   везде, включая телефон: на узком экране мерка равна ровно его выбору. */
+html {
+	font-size: clamp(1rem, 0.58vw + 0.3875rem, 1.5rem);
 }
 
 /* Спрятанное должно быть спрятано. Браузер прячет [hidden] своим display: none,
@@ -62,7 +88,7 @@ body {
 	background: var(--bg);
 	color: var(--text);
 	font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-	font-size: 14px;
+	font-size: 0.875rem;
 	line-height: 1.45;
 	/* Телефон в альбомной ориентации сам раздувает шрифт «чтобы читалось»,
 	   и вёрстка, посчитанная под 14px, разъезжается */
@@ -100,16 +126,16 @@ a:hover {
 	   прокрутки под всей страницей. Перенос ничего не двигает там, где всё
 	   помещалось, и спасает там, где нет. */
 	flex-wrap: wrap;
-	gap: 10px 20px;
-	max-width: 1600px;
+	gap: 0.625rem 1.25rem;
+	max-width: 100rem;
 	margin: 0 auto;
-	padding: 12px 20px;
+	padding: 0.75rem 1.25rem;
 }
 
 .brand {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	gap: 0.625rem;
 	white-space: nowrap;
 	color: var(--text);
 }
@@ -129,8 +155,8 @@ a.brand:hover .brand__text {
    вторым, чужого цвета, контуром. */
 .brand__mark {
 	display: block;
-	width: 30px;
-	height: 30px;
+	width: 1.875rem;
+	height: 1.875rem;
 }
 
 .brand__mark img {
@@ -142,18 +168,18 @@ a.brand:hover .brand__text {
 
 .brand__text {
 	font-weight: 600;
-	font-size: 16px;
+	font-size: 1rem;
 }
 
 .search {
 	flex: 1;
-	min-width: 200px;
-	padding: 9px 14px;
+	min-width: 12.5rem;
+	padding: 0.5625rem 0.875rem;
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	background: var(--bg);
 	color: var(--text);
-	font-size: 14px;
+	font-size: 0.875rem;
 	font-family: inherit;
 }
 
@@ -164,9 +190,9 @@ a.brand:hover .brand__text {
 
 .counters {
 	display: flex;
-	gap: 16px;
+	gap: 1rem;
 	color: var(--text-muted);
-	font-size: 12px;
+	font-size: 0.75rem;
 	white-space: nowrap;
 }
 
@@ -179,11 +205,11 @@ a.brand:hover .brand__text {
 
 .layout {
 	display: grid;
-	grid-template-columns: 1fr 260px;
-	gap: 20px;
-	max-width: 1600px;
+	grid-template-columns: 1fr 16.25rem;
+	gap: 1.25rem;
+	max-width: 100rem;
 	margin: 0 auto;
-	padding: 20px;
+	padding: 1.25rem;
 	align-items: start;
 }
 
@@ -191,14 +217,14 @@ a.brand:hover .brand__text {
    прокручивается внутри себя: иначе низ с сортировкой было не достать. */
 .filters {
 	position: sticky;
-	top: 76px;
-	max-height: calc(100vh - 96px);
+	top: 4.75rem;
+	max-height: calc(100vh - 6rem);
 	overflow-y: auto;
 	overscroll-behavior: contain;
 	display: flex;
 	flex-direction: column;
-	gap: 16px;
-	padding: 16px;
+	gap: 1rem;
+	padding: 1rem;
 	background: var(--bg-panel);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -207,7 +233,7 @@ a.brand:hover .brand__text {
 }
 
 .filters::-webkit-scrollbar {
-	width: 8px;
+	width: 0.5rem;
 }
 
 .filters::-webkit-scrollbar-thumb {
@@ -222,12 +248,12 @@ a.brand:hover .brand__text {
 .filters__block {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 0.5rem;
 }
 
 .filters__title {
 	margin: 0;
-	font-size: 12px;
+	font-size: 0.75rem;
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: 0.06em;
@@ -237,7 +263,7 @@ a.brand:hover .brand__text {
 .levels {
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 0.375rem;
 }
 
 /* Сложность выбирают двумя способами сразу: галочка добавляет уровень
@@ -245,7 +271,7 @@ a.brand:hover .brand__text {
 .level-row {
 	display: flex;
 	align-items: stretch;
-	gap: 6px;
+	gap: 0.375rem;
 }
 
 .level-row .level-toggle {
@@ -269,10 +295,10 @@ a.brand:hover .brand__text {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 8px;
-	padding: 7px 10px;
+	gap: 0.5rem;
+	padding: 0.4375rem 0.625rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel-2);
 	color: var(--text-muted);
 	font: inherit;
@@ -285,8 +311,8 @@ a.brand:hover .brand__text {
 }
 
 .level-toggle .dot {
-	width: 9px;
-	height: 9px;
+	width: 0.5625rem;
+	height: 0.5625rem;
 	border-radius: 50%;
 	flex: none;
 }
@@ -297,7 +323,7 @@ a.brand:hover .brand__text {
 }
 
 .level-toggle .count {
-	font-size: 12px;
+	font-size: 0.75rem;
 	opacity: .7;
 }
 
@@ -320,7 +346,7 @@ a.brand:hover .brand__text {
 .check {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 0.5rem;
 	color: var(--text-muted);
 	cursor: pointer;
 	user-select: none;
@@ -332,8 +358,8 @@ a.brand:hover .brand__text {
 
 .check input {
 	accent-color: var(--accent);
-	width: 15px;
-	height: 15px;
+	width: 0.9375rem;
+	height: 0.9375rem;
 	cursor: pointer;
 }
 
@@ -356,18 +382,18 @@ a.brand:hover .brand__text {
 .checklist {
 	display: flex;
 	flex-direction: column;
-	max-height: 240px;
+	max-height: 15rem;
 	overflow-y: auto;
 	overscroll-behavior: contain;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel-2);
 	scrollbar-width: thin;
 	scrollbar-color: var(--border) transparent;
 }
 
 .checklist::-webkit-scrollbar {
-	width: 8px;
+	width: 0.5rem;
 }
 
 .checklist::-webkit-scrollbar-thumb {
@@ -378,8 +404,8 @@ a.brand:hover .brand__text {
 .checklist__row {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 5px 9px;
+	gap: 0.5rem;
+	padding: 0.3125rem 0.5625rem;
 	color: var(--text-muted);
 	cursor: pointer;
 	user-select: none;
@@ -392,8 +418,8 @@ a.brand:hover .brand__text {
 
 .checklist__row input {
 	accent-color: var(--accent);
-	width: 14px;
-	height: 14px;
+	width: 0.875rem;
+	height: 0.875rem;
 	flex: none;
 	cursor: pointer;
 }
@@ -407,21 +433,21 @@ a.brand:hover .brand__text {
 }
 
 .checklist .hint {
-	padding: 7px 9px;
+	padding: 0.4375rem 0.5625rem;
 }
 
 .hint {
 	margin: 0;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	line-height: 1.4;
 	color: var(--text-muted);
 }
 
 .select {
 	width: 100%;
-	padding: 8px 10px;
+	padding: 0.5rem 0.625rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel-2);
 	color: var(--text);
 	font: inherit;
@@ -439,10 +465,10 @@ a.brand:hover .brand__text {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	gap: 6px;
-	padding: 8px 14px;
+	gap: 0.375rem;
+	padding: 0.5rem 0.875rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel-2);
 	color: var(--text);
 	font: inherit;
@@ -500,7 +526,7 @@ a.brand:hover .brand__text {
    кнопок такая разница читается как перекос вёрстки. */
 .button--ban,
 .card__actions .hide .button--ban {
-	padding: 7px 10px;
+	padding: 0.4375rem 0.625rem;
 	color: var(--very-hard);
 	align-self: stretch;
 }
@@ -529,9 +555,9 @@ a.brand:hover .brand__text {
 	display: flex;
 	align-items: flex-end;
 	flex-wrap: wrap;
-	gap: 12px;
-	padding: 10px 12px;
-	margin-bottom: 8px;
+	gap: 0.75rem;
+	padding: 0.625rem 0.75rem;
+	margin-bottom: 0.5rem;
 	background: var(--bg-panel);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -540,11 +566,11 @@ a.brand:hover .brand__text {
 .toolbar__field {
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
+	gap: 0.25rem;
 }
 
 .toolbar__label {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	text-transform: uppercase;
 	letter-spacing: .04em;
 	color: var(--text-muted);
@@ -552,7 +578,7 @@ a.brand:hover .brand__text {
 
 .toolbar .select {
 	width: auto;
-	min-width: 210px;
+	min-width: 13.125rem;
 	margin: 0;
 }
 
@@ -562,30 +588,30 @@ a.brand:hover .brand__text {
 .filters-toggle {
 	display: none;
 	align-items: center;
-	gap: 8px;
+	gap: 0.5rem;
 }
 
 .filters-toggle__count {
 	display: inline-grid;
 	place-items: center;
-	min-width: 18px;
-	height: 18px;
-	padding: 0 5px;
+	min-width: 1.125rem;
+	height: 1.125rem;
+	padding: 0 0.3125rem;
 	border-radius: 999px;
 	background: var(--accent);
 	color: #fff;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	font-weight: 700;
 }
 
 /* Счётчик найденного прижат к правому краю панели */
 .toolbar .result-info {
 	margin-left: auto;
-	padding-bottom: 6px;
+	padding-bottom: 0.375rem;
 }
 
 #sortHint {
-	margin: 0 0 12px;
+	margin: 0 0 0.75rem;
 }
 
 .content__head {
@@ -593,16 +619,16 @@ a.brand:hover .brand__text {
 	align-items: center;
 	justify-content: space-between;
 	flex-wrap: wrap;
-	gap: 10px;
+	gap: 0.625rem;
 }
 
 .content__head:not(:empty) {
-	margin-bottom: 14px;
+	margin-bottom: 0.875rem;
 }
 
 .result-info {
 	color: var(--text-muted);
-	font-size: 13px;
+	font-size: 0.8125rem;
 }
 
 /* Уголок входа через Discord */
@@ -610,20 +636,20 @@ a.brand:hover .brand__text {
 .account {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 0.5rem;
 	margin-left: auto;
 	white-space: nowrap;
 }
 
 .account__avatar {
-	width: 24px;
-	height: 24px;
+	width: 1.5rem;
+	height: 1.5rem;
 	border-radius: 50%;
 	border: 1px solid var(--border);
 }
 
 .account__name {
-	font-size: 13px;
+	font-size: 0.8125rem;
 	font-weight: 600;
 }
 
@@ -642,7 +668,7 @@ a.brand:hover .brand__text {
 
 /* Ключей Discord нет — вместо кнопки стоит пояснение, почему нет и оценок */
 .account__note {
-	font-size: 12px;
+	font-size: 0.75rem;
 	color: var(--text-muted);
 	border-bottom: 1px dotted currentColor;
 	cursor: help;
@@ -653,16 +679,16 @@ a.brand:hover .brand__text {
    прокруткой. Так карточка просто занимает всю доступную ширину. */
 .grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
-	gap: 14px;
+	grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+	gap: 0.875rem;
 }
 
 .card {
 	position: relative;
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
-	padding: 14px;
+	gap: 0.625rem;
+	padding: 0.875rem;
 	background: var(--bg-panel);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -714,32 +740,32 @@ a.brand:hover .brand__text {
 
 .card__ban {
 	position: absolute;
-	left: 14px;
-	right: 14px;
+	left: 0.875rem;
+	right: 0.875rem;
 	top: 50%;
 	transform: translateY(-50%);
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	gap: 8px;
-	padding: 14px 12px;
+	gap: 0.5rem;
+	padding: 0.875rem 0.75rem;
 	background: var(--bg-panel-2);
 	border: 1px solid var(--very-hard);
 	border-radius: var(--radius);
-	box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+	box-shadow: 0 0.625rem 1.875rem rgba(0, 0, 0, .5);
 	text-align: center;
 }
 
 .card__ban-text {
 	color: var(--very-hard);
-	font-size: 13px;
+	font-size: 0.8125rem;
 	font-weight: 600;
 	overflow-wrap: anywhere;
 }
 
 .card__ban-note {
 	margin: 0;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	line-height: 1.4;
 	color: var(--text-muted);
 }
@@ -748,12 +774,12 @@ a.brand:hover .brand__text {
 	display: flex;
 	align-items: flex-start;
 	justify-content: space-between;
-	gap: 10px;
+	gap: 0.625rem;
 }
 
 .card__name {
 	margin: 0;
-	font-size: 15px;
+	font-size: 0.9375rem;
 	font-weight: 600;
 	line-height: 1.3;
 	overflow-wrap: anywhere;
@@ -781,16 +807,16 @@ a.brand:hover .brand__text {
 
 .card__authors {
 	margin: 2px 0 0;
-	font-size: 12px;
+	font-size: 0.75rem;
 	color: var(--text-muted);
 	overflow-wrap: anywhere;
 }
 
 .badge {
 	flex: none;
-	padding: 4px 9px;
+	padding: 0.25rem 0.5625rem;
 	border-radius: 999px;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	font-weight: 600;
 	white-space: nowrap;
 	border: 1px solid currentColor;
@@ -800,7 +826,7 @@ a.brand:hover .brand__text {
 .badge--topic {
 	display: inline-flex;
 	align-items: center;
-	gap: 5px;
+	gap: 0.3125rem;
 }
 
 .badge--easy { color: var(--easy); }
@@ -814,9 +840,9 @@ a.brand:hover .brand__text {
 .badge-stats {
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
+	gap: 0.25rem;
 	line-height: 1;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	color: var(--text-muted);
 	white-space: nowrap;
 }
@@ -831,17 +857,17 @@ a.brand:hover .brand__text {
 .badge-stats__value--take { color: var(--medium); }
 
 .badge-stats__label + .badge-stats__value {
-	margin-left: 4px;
+	margin-left: 0.25rem;
 }
 
 /* Обложка пака */
 
 .logo {
 	flex: none;
-	width: 72px;
-	height: 72px;
+	width: 4.5rem;
+	height: 4.5rem;
 	object-fit: cover;
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	border: 1px solid var(--border);
 	background: var(--bg-panel-2);
 }
@@ -850,7 +876,7 @@ a.brand:hover .brand__text {
 	display: grid;
 	place-items: center;
 	color: var(--text-muted);
-	font-size: 26px;
+	font-size: 1.625rem;
 	font-weight: 700;
 }
 
@@ -859,7 +885,7 @@ a.brand:hover .brand__text {
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 0.375rem;
 }
 
 .badges {
@@ -868,7 +894,7 @@ a.brand:hover .brand__text {
 	/* по центру: проценты рядом с ярлыком уровня должны стоять с ним вровень,
 	   а не подниматься к верхнему краю плашки */
 	align-items: center;
-	gap: 5px;
+	gap: 0.3125rem;
 	margin-top: auto;
 }
 
@@ -896,7 +922,7 @@ a.brand:hover .brand__text {
 	/* Ровно во всю высоту строки с именем: ни выше, ни ниже — иначе имя
 	   и знак стоят на разных уровнях, а строка растёт под больший из двух */
 	height: 1.45em;
-	margin-left: 4px;
+	margin-left: 0.25rem;
 	padding: 0;
 	border: 0;
 	background: none;
@@ -926,8 +952,8 @@ a.brand:hover .brand__text {
 }
 
 .topic-icon {
-	width: 15px;
-	height: 15px;
+	width: 0.9375rem;
+	height: 0.9375rem;
 	flex: none;
 }
 
@@ -938,9 +964,9 @@ a.brand:hover .brand__text {
 .badge--subject {
 	display: inline-flex;
 	align-items: center;
-	gap: 5px;
+	gap: 0.3125rem;
 	font: inherit;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	font-weight: 600;
 	background: none;
 	color: var(--accent);
@@ -948,8 +974,8 @@ a.brand:hover .brand__text {
 }
 
 .badge--subject .icon {
-	width: 15px;
-	height: 15px;
+	width: 0.9375rem;
+	height: 0.9375rem;
 	flex: none;
 }
 
@@ -1008,12 +1034,12 @@ a.brand:hover .brand__text {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 10px;
-	min-height: 22px;
+	gap: 0.625rem;
+	min-height: 1.375rem;
 }
 
 .card__date {
-	font-size: 12px;
+	font-size: 0.75rem;
 	color: var(--text-muted);
 	white-space: nowrap;
 }
@@ -1025,20 +1051,20 @@ a.brand:hover .brand__text {
 .card__questions {
 	display: inline-flex;
 	align-items: baseline;
-	gap: 5px;
+	gap: 0.3125rem;
 	margin-left: auto;
 	white-space: nowrap;
 }
 
 .card__questions-value {
-	font-size: 14px;
+	font-size: 0.875rem;
 	font-weight: 700;
 	line-height: 1.4;
 	font-variant-numeric: tabular-nums;
 }
 
 .card__questions-unit {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	font-weight: 600;
 	color: var(--text-muted);
 }
@@ -1049,25 +1075,25 @@ a.brand:hover .brand__text {
 .games {
 	display: inline-flex;
 	align-items: baseline;
-	gap: 5px;
-	padding: 2px 8px;
+	gap: 0.3125rem;
+	padding: 2px 0.5rem;
 	border-radius: 999px;
 	background: var(--bg-panel-2);
 	border: 1px solid var(--border);
 	/* левая полоса цветом ступени: видно с одного взгляда, не читая цифру */
-	border-left: 3px solid var(--border);
+	border-left: 0.1875rem solid var(--border);
 	white-space: nowrap;
 }
 
 .games__value {
-	font-size: 14px;
+	font-size: 0.875rem;
 	font-weight: 700;
 	line-height: 1.4;
 	font-variant-numeric: tabular-nums;
 }
 
 .games__unit {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	font-weight: 600;
 	color: var(--text-muted);
 }
@@ -1076,11 +1102,11 @@ a.brand:hover .brand__text {
    это второе число в той же плашке, и без разделителя «412 игр 38%» читается
    как одно длинное число. Набрана приглушённо — запуски здесь главные. */
 .games__done {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	font-weight: 600;
 	color: var(--text-muted);
 	font-variant-numeric: tabular-nums;
-	padding-left: 6px;
+	padding-left: 0.375rem;
 	border-left: 1px solid var(--border);
 }
 
@@ -1110,13 +1136,13 @@ a.brand:hover .brand__text {
 .rating {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 0.5rem;
 }
 
 .rating__stars {
 	position: relative;
 	display: inline-block;
-	font-size: 17px;
+	font-size: 1.0625rem;
 	line-height: 1;
 	letter-spacing: 2px;
 	/* эмодзи-звёзды в разных шрифтах разной ширины — заливка бы разъезжалась */
@@ -1163,19 +1189,19 @@ a.brand:hover .brand__text {
 }
 
 .rating__value {
-	font-size: 13px;
+	font-size: 0.8125rem;
 	font-weight: 700;
 	font-variant-numeric: tabular-nums;
 	color: var(--text-muted);
 }
 
 .rating__value--known {
-	font-size: 15px;
+	font-size: 0.9375rem;
 	color: var(--text);
 }
 
 .rating__note {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	color: var(--text-muted);
 }
 
@@ -1188,20 +1214,20 @@ a.brand:hover .brand__text {
 	flex-direction: column;
 	align-items: center;
 	gap: 2px;
-	padding: 6px 0 2px;
+	padding: 0.375rem 0 2px;
 }
 
 .rating--big .rating__stars {
-	font-size: 46px;
-	letter-spacing: 4px;
+	font-size: 2.875rem;
+	letter-spacing: 0.25rem;
 }
 
 .rating--big .rating__value {
-	font-size: 16px;
+	font-size: 1rem;
 }
 
 .rating--big .rating__value--known {
-	font-size: 20px;
+	font-size: 1.25rem;
 }
 
 /* Чёрный список: кнопка «Скрыть» с меню на выбор — пак или автор */
@@ -1217,27 +1243,27 @@ a.brand:hover .brand__text {
 .hide__menu {
 	position: absolute;
 	right: 0;
-	bottom: calc(100% + 4px);
+	bottom: calc(100% + 0.25rem);
 	z-index: 5;
 	display: flex;
 	flex-direction: column;
-	min-width: 220px;
-	max-width: 320px;
-	padding: 4px;
+	min-width: 13.75rem;
+	max-width: 20rem;
+	padding: 0.25rem;
 	background: var(--bg-panel-2);
 	border: 1px solid var(--border);
-	border-radius: 8px;
-	box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+	border-radius: 0.5rem;
+	box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, .45);
 }
 
 .hide__item {
-	padding: 7px 10px;
+	padding: 0.4375rem 0.625rem;
 	border: 0;
-	border-radius: 6px;
+	border-radius: 0.375rem;
 	background: none;
 	color: var(--text);
 	font: inherit;
-	font-size: 13px;
+	font-size: 0.8125rem;
 	text-align: left;
 	cursor: pointer;
 	white-space: nowrap;
@@ -1255,8 +1281,8 @@ a.brand:hover .brand__text {
 
 .hide__note {
 	margin: 0;
-	padding: 8px 10px 4px;
-	font-size: 11px;
+	padding: 0.5rem 0.625rem 0.25rem;
+	font-size: 0.6875rem;
 	line-height: 1.4;
 	color: var(--text-muted);
 	white-space: normal;
@@ -1277,7 +1303,7 @@ a.hide__item--login:hover {
 .chip-x {
 	flex: none;
 	margin-left: auto;
-	padding: 0 6px;
+	padding: 0 0.375rem;
 	border: 0;
 	background: none;
 	color: var(--text-muted);
@@ -1295,25 +1321,25 @@ a.hide__item--login:hover {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 5px;
+	gap: 0.3125rem;
 }
 
 .repeats__title {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	color: var(--text-muted);
 }
 
 .repeats__item {
 	display: inline-flex;
 	align-items: baseline;
-	gap: 5px;
-	padding: 2px 8px;
+	gap: 0.3125rem;
+	padding: 2px 0.5rem;
 	border-radius: 999px;
 	border: 1px solid var(--border);
 	background: var(--bg-panel-2);
 	color: var(--text-muted);
 	font: inherit;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	cursor: pointer;
 }
 
@@ -1345,7 +1371,7 @@ a.hide__item--login:hover {
 .shares {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 0.5rem;
 }
 
 /* Полоска со своей подписью — одно целое, и держатся они ближе друг к другу,
@@ -1353,7 +1379,7 @@ a.hide__item--login:hover {
 .shares__row {
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
+	gap: 0.25rem;
 }
 
 /* Состав словами: «50% Аниме, 30% Мультфильмы». Набран мелко и приглушённо —
@@ -1361,8 +1387,8 @@ a.hide__item--login:hover {
 .shares__legend {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 1px 10px;
-	font-size: 11px;
+	gap: 1px 0.625rem;
+	font-size: 0.6875rem;
 	line-height: 1.5;
 	color: var(--text-muted);
 }
@@ -1370,7 +1396,7 @@ a.hide__item--login:hover {
 .shares__legend-item {
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
+	gap: 0.25rem;
 }
 
 /* Точка того же цвета, что и кусок полоски: она и связывает слово с местом
@@ -1378,14 +1404,14 @@ a.hide__item--login:hover {
    не заводится — разойдись они, подпись перестала бы объяснять полоску. */
 .shares__dot {
 	flex: none;
-	width: 7px;
-	height: 7px;
+	width: 0.4375rem;
+	height: 0.4375rem;
 	border-radius: 50%;
 }
 
 .shares__bar {
 	display: flex;
-	height: 9px;
+	height: 0.5625rem;
 	border-radius: 999px;
 	overflow: hidden;
 	background: var(--bg-panel-2);
@@ -1414,7 +1440,7 @@ a.hide__item--login:hover {
    верхние полоски подписаны сами собой, а эта без вопроса читалась бы как
    ещё один непонятный ряд цветных кусков */
 .shares__caption {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	line-height: 1.5;
 	color: var(--text-muted);
 }
@@ -1447,21 +1473,21 @@ a.hide__item--login:hover {
 .card__summary {
 	margin: 0;
 	color: var(--text-muted);
-	font-size: 12px;
+	font-size: 0.75rem;
 }
 
 /* Метка нейросети: описание составил не автор пака, а модель */
 .ai-mark {
 	display: inline-block;
-	margin-right: 5px;
-	padding: 0 5px;
+	margin-right: 0.3125rem;
+	padding: 0 0.3125rem;
 	border: 1px solid currentColor;
-	border-radius: 4px;
+	border-radius: 0.25rem;
 	color: var(--accent);
-	font-size: 9px;
+	font-size: 0.5625rem;
 	font-weight: 700;
 	letter-spacing: 0.06em;
-	line-height: 15px;
+	line-height: 0.9375rem;
 	vertical-align: 1px;
 }
 
@@ -1470,22 +1496,22 @@ a.hide__item--login:hover {
 .active-filters {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 6px;
+	gap: 0.375rem;
 }
 
 .filter-chip {
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	padding: 4px 10px;
+	gap: 0.375rem;
+	padding: 0.25rem 0.625rem;
 	border: 1px solid var(--accent);
 	border-radius: 999px;
 	background: var(--bg-panel);
 	color: var(--text);
 	font: inherit;
-	font-size: 12px;
+	font-size: 0.75rem;
 	cursor: pointer;
-	max-width: 320px;
+	max-width: 20rem;
 }
 
 .filter-chip:hover {
@@ -1499,16 +1525,16 @@ a.hide__item--login:hover {
 .tags {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 5px;
+	gap: 0.3125rem;
 }
 
 .tag {
-	padding: 2px 8px;
+	padding: 2px 0.5rem;
 	border-radius: 999px;
 	background: var(--bg-panel-2);
 	border: 1px solid var(--border);
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 0.6875rem;
 	cursor: pointer;
 }
 
@@ -1520,8 +1546,8 @@ a.hide__item--login:hover {
 .meta {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 10px;
-	font-size: 12px;
+	gap: 0.625rem;
+	font-size: 0.75rem;
 	color: var(--text-muted);
 }
 
@@ -1532,14 +1558,14 @@ a.hide__item--login:hover {
 .card__actions {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 8px;
+	gap: 0.5rem;
 	margin-top: auto;
-	padding-top: 4px;
+	padding-top: 0.25rem;
 }
 
 .card__actions .button {
-	padding: 7px 12px;
-	font-size: 13px;
+	padding: 0.4375rem 0.75rem;
+	font-size: 0.8125rem;
 }
 
 /* Отметка «сыграно» — своей строкой над «Играть» и «Скачать», во всю ширину.
@@ -1566,7 +1592,7 @@ a.hide__item--login:hover {
 /* «Поделиться»: один значок без подписи, как и у чёрного списка рядом. Подпись
    ему не нужна — кнопка не соперничает с «Играть», а стоит при ней. */
 .button--share {
-	padding: 7px 10px;
+	padding: 0.4375rem 0.625rem;
 	align-self: stretch;
 }
 
@@ -1587,21 +1613,21 @@ a.hide__item--login:hover {
 .toast {
 	position: fixed;
 	left: 50%;
-	bottom: 24px;
+	bottom: 1.5rem;
 	z-index: 50;
-	max-width: min(520px, calc(100vw - 32px));
-	padding: 10px 16px;
+	max-width: min(32.5rem, calc(100vw - 2rem));
+	padding: 0.625rem 1rem;
 	border: 1px solid var(--border);
 	border-radius: 999px;
 	background: var(--bg-panel-2);
-	box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+	box-shadow: 0 0.625rem 1.875rem rgba(0, 0, 0, .5);
 	color: var(--text);
-	font-size: 13px;
+	font-size: 0.8125rem;
 	text-align: center;
 	overflow-wrap: anywhere;
 	/* до появления подпись не должна ни мигать при загрузке, ни ловить мышь */
 	opacity: 0;
-	transform: translate(-50%, 12px);
+	transform: translate(-50%, 0.75rem);
 	pointer-events: none;
 	transition: opacity .18s, transform .18s;
 }
@@ -1616,9 +1642,9 @@ a.hide__item--login:hover {
    тяжелее, сколько бы места ни было. */
 
 .pack-page {
-	max-width: 820px;
+	max-width: 51.25rem;
 	margin: 0 auto;
-	padding: 18px 16px 40px;
+	padding: 1.125rem 1rem 2.5rem;
 }
 
 .pack-page__card {
@@ -1626,22 +1652,22 @@ a.hide__item--login:hover {
 }
 
 .card--page {
-	padding: 18px;
+	padding: 1.125rem;
 }
 
 .card--page .card__name {
-	font-size: 24px;
+	font-size: 1.5rem;
 	line-height: 1.25;
 }
 
 .card--page .logo {
-	width: 108px;
-	height: 108px;
+	width: 6.75rem;
+	height: 6.75rem;
 }
 
 .card--page .card__authors,
 .card--page .card__summary {
-	font-size: 13px;
+	font-size: 0.8125rem;
 }
 
 /* Состав раундов на своей странице раскрыт сразу, и «Подробнее» над ним
@@ -1652,13 +1678,13 @@ a.hide__item--login:hover {
 
 .details {
 	border-top: 1px solid var(--border);
-	padding-top: 8px;
+	padding-top: 0.5rem;
 }
 
 .details summary {
 	cursor: pointer;
 	color: var(--text-muted);
-	font-size: 12px;
+	font-size: 0.75rem;
 	list-style: none;
 }
 
@@ -1679,16 +1705,16 @@ a.hide__item--login:hover {
 }
 
 .details__body {
-	margin-top: 8px;
+	margin-top: 0.5rem;
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
-	font-size: 12px;
+	gap: 0.5rem;
+	font-size: 0.75rem;
 	color: var(--text-muted);
 }
 
 .round {
-	margin-bottom: 5px;
+	margin-bottom: 0.3125rem;
 }
 
 .round b {
@@ -1706,13 +1732,13 @@ a.hide__item--login:hover {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
-	gap: 4px;
-	padding: 8px 10px;
+	gap: 0.25rem;
+	padding: 0.5rem 0.625rem;
 	background: var(--bg);
 	border: 1px solid var(--border);
-	border-left: 3px solid var(--border);
-	border-radius: 8px;
-	font-size: 12px;
+	border-left: 0.1875rem solid var(--border);
+	border-radius: 0.5rem;
+	font-size: 0.75rem;
 	color: var(--text-muted);
 }
 
@@ -1730,7 +1756,7 @@ a.hide__item--login:hover {
    после четырёх экранов текста читают уже не карточку, а само обсуждение */
 .description--open .description__text {
 	display: block;
-	max-height: 320px;
+	max-height: 20rem;
 	overflow: auto;
 	overscroll-behavior: contain;
 }
@@ -1748,7 +1774,7 @@ a.hide__item--login:hover {
 	background: none;
 	color: var(--accent);
 	font: inherit;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	cursor: pointer;
 }
 
@@ -1759,7 +1785,7 @@ a.hide__item--login:hover {
 .stat-line {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 12px;
+	gap: 0.75rem;
 }
 
 /* Пагинация */
@@ -1768,15 +1794,15 @@ a.hide__item--login:hover {
 	display: flex;
 	flex-wrap: wrap;
 	justify-content: center;
-	gap: 6px;
-	margin: 22px 0 10px;
+	gap: 0.375rem;
+	margin: 1.375rem 0 0.625rem;
 }
 
 .pager button {
-	min-width: 36px;
-	padding: 7px 10px;
+	min-width: 2.25rem;
+	padding: 0.4375rem 0.625rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel);
 	color: var(--text-muted);
 	font: inherit;
@@ -1807,21 +1833,21 @@ a.hide__item--login:hover {
 .pager__jump {
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	margin-left: 8px;
+	gap: 0.375rem;
+	margin-left: 0.5rem;
 }
 
 .pager__jump-label {
-	font-size: 13px;
+	font-size: 0.8125rem;
 	color: var(--text-muted);
 	white-space: nowrap;
 }
 
 .pager__jump-input {
-	width: 68px;
-	padding: 7px 8px;
+	width: 4.25rem;
+	padding: 0.4375rem 0.5rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel);
 	color: var(--text);
 	font: inherit;
@@ -1836,12 +1862,12 @@ a.hide__item--login:hover {
 
 .pager__jump-go {
 	/* те же размеры, что у кнопок номеров: строка не должна разъезжаться */
-	padding: 7px 12px;
+	padding: 0.4375rem 0.75rem;
 }
 
 .empty {
 	grid-column: 1 / -1;
-	padding: 60px 20px;
+	padding: 3.75rem 1.25rem;
 	text-align: center;
 	color: var(--text-muted);
 }
@@ -1851,10 +1877,10 @@ a.hide__item--login:hover {
 .profile {
 	display: flex;
 	flex-direction: column;
-	gap: 20px;
-	max-width: 1600px;
+	gap: 1.25rem;
+	max-width: 100rem;
 	margin: 0 auto;
-	padding: 20px;
+	padding: 1.25rem;
 }
 
 .profile__head {
@@ -1862,8 +1888,8 @@ a.hide__item--login:hover {
 	align-items: center;
 	justify-content: space-between;
 	flex-wrap: wrap;
-	gap: 20px;
-	padding: 18px 20px;
+	gap: 1.25rem;
+	padding: 1.125rem 1.25rem;
 	background: var(--bg-panel);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -1872,7 +1898,7 @@ a.hide__item--login:hover {
 .profile__who {
 	display: flex;
 	align-items: center;
-	gap: 14px;
+	gap: 0.875rem;
 	min-width: 0;
 }
 
@@ -1880,12 +1906,12 @@ a.hide__item--login:hover {
 	display: grid;
 	place-items: center;
 	flex: none;
-	width: 56px;
-	height: 56px;
+	width: 3.5rem;
+	height: 3.5rem;
 	border-radius: 50%;
 	background: var(--accent);
 	color: #fff;
-	font-size: 24px;
+	font-size: 1.5rem;
 	font-weight: 700;
 }
 
@@ -1902,12 +1928,12 @@ a.hide__item--login:hover {
 }
 
 .profile__account {
-	margin-top: 10px;
+	margin-top: 0.625rem;
 }
 
 .profile__name {
 	margin: 0;
-	font-size: 20px;
+	font-size: 1.25rem;
 	font-weight: 600;
 	overflow-wrap: anywhere;
 }
@@ -1924,7 +1950,7 @@ a.hide__item--login:hover {
 .profile__numbers {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 26px;
+	gap: 1.625rem;
 }
 
 .profile__number {
@@ -1933,39 +1959,39 @@ a.hide__item--login:hover {
 }
 
 .profile__number-value {
-	font-size: 26px;
+	font-size: 1.625rem;
 	font-weight: 700;
 	line-height: 1.1;
 	font-variant-numeric: tabular-nums;
 }
 
 .profile__number-label {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	color: var(--text-muted);
 }
 
 .profile__block {
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
+	gap: 0.625rem;
 }
 
 .profile__chips {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 7px;
+	gap: 0.4375rem;
 }
 
 .profile__chip {
 	display: inline-flex;
 	align-items: center;
-	gap: 8px;
-	padding: 6px 12px;
+	gap: 0.5rem;
+	padding: 0.375rem 0.75rem;
 	border: 1px solid var(--border);
 	border-radius: 999px;
 	background: var(--bg-panel);
 	color: var(--text-muted);
-	font-size: 12px;
+	font-size: 0.75rem;
 }
 
 .profile__chip:hover {
@@ -1982,7 +2008,7 @@ a.hide__item--login:hover {
 .profile__chip.level--veryHard { color: var(--very-hard); }
 
 .profile__chip-count {
-	padding-left: 8px;
+	padding-left: 0.5rem;
 	border-left: 1px solid var(--border);
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
@@ -1993,7 +2019,7 @@ a.hide__item--login:hover {
 .topbar__link {
 	margin-left: auto;
 	color: var(--text-muted);
-	font-size: 13px;
+	font-size: 0.8125rem;
 	white-space: nowrap;
 }
 
@@ -2001,7 +2027,7 @@ a.hide__item--login:hover {
    у каждой свободное место делилось между ними, и ссылки расползались по всей
    ширине шапки вместо того, чтобы стоять рядом */
 .topbar__link + .topbar__link {
-	margin-left: 14px;
+	margin-left: 0.875rem;
 }
 
 .topbar__link:hover {
@@ -2010,41 +2036,41 @@ a.hide__item--login:hover {
 
 .update {
 	display: grid;
-	grid-template-columns: 380px 1fr;
-	gap: 20px;
-	max-width: 1600px;
+	grid-template-columns: 23.75rem 1fr;
+	gap: 1.25rem;
+	max-width: 100rem;
 	margin: 0 auto;
-	padding: 20px;
+	padding: 1.25rem;
 	align-items: start;
 }
 
 .update__panel {
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
-	padding: 16px;
+	gap: 0.625rem;
+	padding: 1rem;
 	background: var(--bg-panel);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 }
 
 .update__panel .filters__title:not(:first-child) {
-	margin-top: 10px;
+	margin-top: 0.625rem;
 }
 
 .steps {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 0.5rem;
 }
 
 .step {
 	display: flex;
-	gap: 10px;
-	padding: 9px 11px;
+	gap: 0.625rem;
+	padding: 0.5625rem 0.6875rem;
 	background: var(--bg-panel-2);
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	cursor: pointer;
 }
 
@@ -2054,8 +2080,8 @@ a.hide__item--login:hover {
 
 .step input {
 	accent-color: var(--accent);
-	width: 15px;
-	height: 15px;
+	width: 0.9375rem;
+	height: 0.9375rem;
 	margin-top: 2px;
 	flex: none;
 	cursor: pointer;
@@ -2073,7 +2099,7 @@ a.hide__item--login:hover {
 }
 
 .step__hint {
-	font-size: 11px;
+	font-size: 0.6875rem;
 	line-height: 1.4;
 	color: var(--text-muted);
 }
@@ -2082,15 +2108,15 @@ a.hide__item--login:hover {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 10px;
+	gap: 0.625rem;
 	color: var(--text-muted);
 }
 
 .field input {
-	width: 130px;
-	padding: 7px 10px;
+	width: 8.125rem;
+	padding: 0.4375rem 0.625rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel-2);
 	color: var(--text);
 	font: inherit;
@@ -2103,8 +2129,8 @@ a.hide__item--login:hover {
 
 .update__actions {
 	display: flex;
-	gap: 8px;
-	margin-top: 6px;
+	gap: 0.5rem;
+	margin-top: 0.375rem;
 }
 
 .update__actions .button {
@@ -2120,18 +2146,18 @@ a.hide__item--login:hover {
 .update__main {
 	display: flex;
 	flex-direction: column;
-	gap: 14px;
+	gap: 0.875rem;
 	min-width: 0;
 }
 
 .update__status {
 	display: flex;
 	align-items: baseline;
-	gap: 10px;
+	gap: 0.625rem;
 }
 
 .update__state {
-	font-size: 16px;
+	font-size: 1rem;
 	font-weight: 600;
 }
 
@@ -2141,22 +2167,22 @@ a.hide__item--login:hover {
 
 .update__time {
 	color: var(--text-muted);
-	font-size: 12px;
+	font-size: 0.75rem;
 }
 
 .progress {
 	display: flex;
 	flex-direction: column;
-	gap: 7px;
+	gap: 0.4375rem;
 }
 
 .progress__row {
 	display: grid;
-	grid-template-columns: 190px 1fr 130px;
+	grid-template-columns: 11.875rem 1fr 8.125rem;
 	align-items: center;
-	gap: 12px;
+	gap: 0.75rem;
 	color: var(--text-muted);
-	font-size: 12px;
+	font-size: 0.75rem;
 }
 
 .progress__row--active {
@@ -2164,7 +2190,7 @@ a.hide__item--login:hover {
 }
 
 .progress__bar {
-	height: 6px;
+	height: 0.375rem;
 	border-radius: 999px;
 	background: var(--bg-panel-2);
 	overflow: hidden;
@@ -2185,7 +2211,7 @@ a.hide__item--login:hover {
    не помещаются, а рядом с числом «~14 мин» читается как часть этого числа. */
 .progress__eta {
 	display: block;
-	font-size: 11px;
+	font-size: 0.6875rem;
 	color: var(--accent);
 }
 
@@ -2193,10 +2219,10 @@ a.hide__item--login:hover {
    с числом, иначе «Gemini 3.5 Flash-Lite — осталось 963 из ≈1000» не видно вовсе. */
 .field select {
 	width: 100%;
-	max-width: 260px;
-	padding: 7px 10px;
+	max-width: 16.25rem;
+	padding: 0.4375rem 0.625rem;
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 0.5rem;
 	background: var(--bg-panel-2);
 	color: var(--text);
 	font: inherit;
@@ -2213,16 +2239,16 @@ a.hide__item--login:hover {
 
 .log {
 	margin: 0;
-	padding: 14px;
-	height: calc(100vh - 260px);
-	min-height: 300px;
+	padding: 0.875rem;
+	height: calc(100vh - 16.25rem);
+	min-height: 18.75rem;
 	overflow: auto;
 	background: #0b0d12;
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	color: var(--text-muted);
 	font-family: 'Cascadia Mono', Consolas, monospace;
-	font-size: 12px;
+	font-size: 0.75rem;
 	line-height: 1.5;
 	white-space: pre-wrap;
 	word-break: break-word;
@@ -2257,7 +2283,7 @@ a.hide__item--login:hover {
 .icon-text {
 	display: inline-flex;
 	align-items: center;
-	gap: 5px;
+	gap: 0.3125rem;
 }
 
 /* Длинное имя в чёрном списке по-прежнему обрезается многоточием: обрезка
@@ -2270,7 +2296,7 @@ a.hide__item--login:hover {
 
 /* Число паков автора рядом с его именем: «FR1DGE (12)» */
 .author-link__count {
-	margin-left: 4px;
+	margin-left: 0.25rem;
 	font-variant-numeric: tabular-nums;
 	opacity: .75;
 }
@@ -2300,9 +2326,9 @@ a.hide__item--login:hover {
 .authors__heading {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 0.5rem;
 	margin: 0;
-	font-size: 18px;
+	font-size: 1.125rem;
 }
 
 .authors {
@@ -2315,14 +2341,14 @@ a.hide__item--login:hover {
 
 .authors__row {
 	display: grid;
-	grid-template-columns: 48px 1fr 120px 140px 130px;
+	grid-template-columns: 3rem 1fr 7.5rem 8.75rem 8.125rem;
 	align-items: center;
-	gap: 10px;
-	padding: 9px 14px;
+	gap: 0.625rem;
+	padding: 0.5625rem 0.875rem;
 	background: var(--bg-panel);
 	border-top: 1px solid var(--border);
 	color: var(--text);
-	font-size: 13px;
+	font-size: 0.8125rem;
 }
 
 .authors__row:first-child {
@@ -2337,7 +2363,7 @@ a.authors__row:hover {
 .authors__row--head {
 	background: var(--bg-panel-2);
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 0.6875rem;
 	text-transform: uppercase;
 	letter-spacing: .04em;
 }
@@ -2392,7 +2418,7 @@ a.authors__row:hover {
 	   и приходят, а зажатый между ссылками он ужимался до пары сантиметров. */
 	.topbar__inner {
 		flex-wrap: wrap;
-		gap: 10px 12px;
+		gap: 0.625rem 0.75rem;
 	}
 
 	.brand {
@@ -2419,7 +2445,7 @@ a.authors__row:hover {
 @media (max-width: 900px) {
 	.layout {
 		grid-template-columns: 1fr;
-		gap: 14px;
+		gap: 0.875rem;
 	}
 
 	/* В одну колонку фильтры встают над выдачей — под ней их бы никто не нашёл, —
@@ -2446,7 +2472,7 @@ a.authors__row:hover {
 	}
 
 	.progress__row {
-		grid-template-columns: 130px 1fr 70px;
+		grid-template-columns: 8.125rem 1fr 4.375rem;
 	}
 
 	/* Журнал считался от высоты экрана в расчёте на колонку рядом с настройками;
@@ -2461,22 +2487,22 @@ a.authors__row:hover {
 	.layout,
 	.profile,
 	.update {
-		padding: 12px;
-		gap: 12px;
+		padding: 0.75rem;
+		gap: 0.75rem;
 	}
 
 	.topbar__inner {
-		padding: 8px 12px;
-		gap: 8px 10px;
+		padding: 0.5rem 0.75rem;
+		gap: 0.5rem 0.625rem;
 	}
 
 	.brand__mark {
-		width: 26px;
-		height: 26px;
+		width: 1.625rem;
+		height: 1.625rem;
 	}
 
 	.brand__text {
-		font-size: 14px;
+		font-size: 0.875rem;
 	}
 
 	/* Шапка прилипшая, и каждая её строка отнимает экран у выдачи насовсем.
@@ -2489,8 +2515,8 @@ a.authors__row:hover {
 	/* Поиск и уголок входа делят вторую строку: порознь шапка вырастала до трёх
 	   строк, то есть до пятой части экрана телефона — и это насовсем, она прилипшая */
 	.search {
-		flex: 1 1 150px;
-		flex-basis: 150px;
+		flex: 1 1 9.375rem;
+		flex-basis: 9.375rem;
 	}
 
 	.account {
@@ -2502,12 +2528,12 @@ a.authors__row:hover {
 	.search,
 	.select,
 	.field input {
-		font-size: 16px;
+		font-size: 1rem;
 	}
 
 	/* Сортировка и порядок встают в столбец: 210px на список тут неоткуда взять */
 	.toolbar {
-		gap: 8px;
+		gap: 0.5rem;
 	}
 
 	.toolbar__field {
@@ -2530,14 +2556,14 @@ a.authors__row:hover {
 	}
 
 	.card {
-		padding: 12px;
+		padding: 0.75rem;
 	}
 
 	/* Кнопки карточки делят строку поровну, а не жмутся к левому краю:
 	   пальцем целятся хуже, чем мышью, и узкая кнопка тут дороже пустоты */
 	.card__actions .button {
 		flex: 1 1 auto;
-		padding: 9px 12px;
+		padding: 0.5625rem 0.75rem;
 	}
 
 	/* Знак запрета остаётся знаком запрета и на телефоне: растягивать его во всю
@@ -2549,22 +2575,22 @@ a.authors__row:hover {
 	}
 
 	.card__actions .button--share {
-		padding: 9px 12px;
+		padding: 0.5625rem 0.75rem;
 	}
 
 	.card__actions .hide .button--ban {
-		padding: 9px 12px;
+		padding: 0.5625rem 0.75rem;
 	}
 
 	/* Меню шире экрана раскрыться не может: справа оно упирается в край карточки */
 	.hide__menu {
 		min-width: 0;
-		max-width: min(320px, calc(100vw - 40px));
+		max-width: min(20rem, calc(100vw - 2.5rem));
 	}
 
 	.logo {
-		width: 60px;
-		height: 60px;
+		width: 3.75rem;
+		height: 3.75rem;
 	}
 
 	.filter-chip {
@@ -2572,32 +2598,32 @@ a.authors__row:hover {
 	}
 
 	.profile__head {
-		padding: 14px;
-		gap: 14px;
+		padding: 0.875rem;
+		gap: 0.875rem;
 	}
 
 	.profile__numbers {
-		gap: 18px;
+		gap: 1.125rem;
 	}
 
 	.profile__number-value {
-		font-size: 22px;
+		font-size: 1.375rem;
 	}
 
 	.profile__avatar {
-		width: 46px;
-		height: 46px;
-		font-size: 20px;
+		width: 2.875rem;
+		height: 2.875rem;
+		font-size: 1.25rem;
 	}
 
 	.profile__name {
-		font-size: 18px;
+		font-size: 1.125rem;
 	}
 
 	.progress__row {
-		grid-template-columns: 96px 1fr 54px;
-		gap: 8px;
-		font-size: 11px;
+		grid-template-columns: 6rem 1fr 3.375rem;
+		gap: 0.5rem;
+		font-size: 0.6875rem;
 	}
 
 	.update__actions {
@@ -2606,18 +2632,18 @@ a.authors__row:hover {
 
 	.log {
 		max-height: 50vh;
-		padding: 10px;
+		padding: 0.625rem;
 	}
 
 	.pager button {
-		min-width: 34px;
-		padding: 8px 9px;
+		min-width: 2.125rem;
+		padding: 0.5rem 0.5625rem;
 	}
 
 	/* Топ авторов: пять столбцов в ширину телефона не встают. Числа уходят
 	   под имя, а шапка таблицы становится не нужна — подписи и так при числах */
 	.authors__row {
-		grid-template-columns: 34px 1fr;
+		grid-template-columns: 2.125rem 1fr;
 		row-gap: 2px;
 	}
 

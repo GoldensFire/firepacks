@@ -172,8 +172,12 @@
 			<section class="filters__block">
 				<h2 class="filters__title">Отметки</h2>
 
+				<!-- Стоит отмеченной с самого начала: библиотеку открывают, чтобы выбрать
+				     пак на вечер, а сыгранный на этот вопрос уже ответил. Без входа
+				     галочка гаснет и снимается — отбирает по отметкам база, а до входа
+				     они лежат в самом браузере (см. renderPlayedFilters в web/app.js). -->
 				<label class="check">
-					<input type="checkbox" id="hidePlayed">
+					<input type="checkbox" id="hidePlayed" checked>
 					<span>Скрыть сыгранные</span>
 				</label>
 

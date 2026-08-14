@@ -241,7 +241,10 @@ function renderAuthors() {
 
 	for (const author of authors) {
 		const chip = element('a', 'profile__chip');
-		chip.href = `/?author=${encodeURIComponent(author.name)}`;
+		// hidePlayed=0 — потому что вся эта страница про сыгранное, а библиотека
+		// сыгранное по умолчанию прячет: без приписки под числом «сыграно 7 паков
+		// этого автора» открывалась бы выдача, где именно этих семи и нет
+		chip.href = `/?author=${encodeURIComponent(author.name)}&hidePlayed=0`;
 		chip.append(
 			element('span', null, author.name),
 			element('span', 'profile__chip-count', String(author.count)),
@@ -418,9 +421,11 @@ function renderPlanned() {
 	info.append(document.createTextNode(`Всего ${packs.length}, сначала отложенные недавно · `));
 
 	// Ссылка в библиотеку с уже выставленным отбором: здесь список целиком,
-	// а там по нему можно искать теми же фильтрами, что и по всей базе
+	// а там по нему можно искать теми же фильтрами, что и по всей базе.
+	// hidePlayed=0 — чтобы список и там остался целым: отложить можно и сыгранный
+	// пак, а библиотека сыгранное по умолчанию прячет
 	const inLibrary = element('a', null, 'показать в библиотеке');
-	inLibrary.href = '/?onlyPlanned=1';
+	inLibrary.href = '/?onlyPlanned=1&hidePlayed=0';
 	info.append(inLibrary);
 }
 
@@ -463,13 +468,13 @@ async function start() {
 
 	renderBreakdown('levels', LEVEL_ORDER, profile.levels,
 		key => ({ name: facets.levelNames[key].name, className: `level--${facets.levelNames[key].key}` }),
-		key => `/?levels=${key}`);
+		key => `/?levels=${key}&hidePlayed=0`);
 
 	// Здесь стоит вопрос «сколько паков какого типа сыграно», и отвечает на него
 	// packName — «Аниме-пак», а не «Аниме» (то же правило, что в web/app.js)
 	renderBreakdown('topics', TOPIC_ORDER, profile.topics,
 		key => ({ name: topicInfo(key).packName, iconNode: topicIcon(key), className: `topic--${key}` }),
-		key => `/?topic=${encodeURIComponent(key)}`);
+		key => `/?topic=${encodeURIComponent(key)}&hidePlayed=0`);
 
 	renderAuthors();
 	renderBlacklist();

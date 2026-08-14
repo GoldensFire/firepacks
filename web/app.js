@@ -4,7 +4,14 @@ const state = {
 	search: '',
 	levels: new Set(),
 	unrated: true,
-	hidePlayed: false,
+	// Сыгранное спрятано с самого начала: библиотеку открывают, чтобы выбрать,
+	// во что играть сегодня, а сыгранный пак на этот вопрос уже ответил. Найти
+	// его можно соседней галочкой — «только сыгранные», — и весь список сыгранного
+	// целиком лежит в профиле.
+	//
+	// Без входа отметки живут в самом браузере, база о них не знает и отобрать
+	// по ним не может: там эта галочка гаснет и снимается (см. renderPlayedFilters).
+	hidePlayed: true,
 	onlyPlayed: false,
 	// Отобранное на будущий вечер. Полный список — в профиле, а здесь по нему
 	// можно искать теми же фильтрами, что и по всей библиотеке
@@ -728,6 +735,12 @@ function renderActiveFilters() {
  * Сколько фильтров сейчас сужают выдачу. Число висит на кнопке «Фильтры»:
  * на узком экране колонка свёрнута, и без него было бы не понять, почему паков
  * вдруг стало вдвое меньше.
+ *
+ * Считается при этом не всё выставленное, а всё отличающееся от того, как
+ * библиотека открывается сама: галочки «показывать паки без оценки» и «скрыть
+ * сыгранные» стоят с самого начала, и числом «2» на кнопке при первом же открытии
+ * страницы это сообщать незачем. Зато снятая галочка — как раз отличие, и его
+ * видно.
  */
 function countActiveFilters() {
 	return state.levels.size
@@ -737,7 +750,7 @@ function countActiveFilters() {
 		+ (state.franchise ? 1 : 0)
 		+ (state.subject ? 1 : 0)
 		+ (state.author ? 1 : 0)
-		+ (state.hidePlayed ? 1 : 0)
+		+ (state.hidePlayed || state.onlyPlayed || !serverMarks() ? 0 : 1)
 		+ (state.onlyPlayed ? 1 : 0)
 		+ (state.onlyPlanned ? 1 : 0)
 		+ (state.unrated || state.levels.size > 0 ? 0 : 1);
@@ -1030,7 +1043,9 @@ function resetFilters() {
 	state.search = '';
 	state.levels.clear();
 	state.unrated = true;
-	state.hidePlayed = false;
+	// «Сбросить фильтры» возвращает к тому, как библиотека открывается, — а
+	// открывается она без сыгранного
+	state.hidePlayed = true;
 	state.onlyPlayed = false;
 	state.onlyPlanned = false;
 	state.tags.clear();
@@ -1044,7 +1059,7 @@ function resetFilters() {
 	state.page = 1;
 
 	$('search').value = '';
-	$('hidePlayed').checked = false;
+	$('hidePlayed').checked = true;
 	$('onlyPlayed').checked = false;
 	$('onlyPlanned').checked = false;
 	$('tagSearch').value = '';
@@ -1101,6 +1116,12 @@ function readUrlState() {
 	state.onlyPlanned = query.get('onlyPlanned') === '1';
 	state.onlyPlayed = query.get('onlyPlayed') === '1';
 
+	// Сыгранное спрятано само собой, и снять это можно только адресом: /?hidePlayed=0
+	// стоит в ссылках профиля, которые ведут в библиотеку как раз к сыгранному.
+	// «Только сыгранные» снимает его и без всякой приписки: вместе эти два отбора
+	// не оставляют ни одного пака.
+	state.hidePlayed = !state.onlyPlayed && query.get('hidePlayed') !== '0';
+
 	if (query.get('sort')) {
 		state.sort = query.get('sort');
 	}
@@ -1109,6 +1130,7 @@ function readUrlState() {
 	$('sort').value = state.sort;
 	$('onlyPlanned').checked = state.onlyPlanned;
 	$('onlyPlayed').checked = state.onlyPlayed;
+	$('hidePlayed').checked = state.hidePlayed;
 }
 
 /**

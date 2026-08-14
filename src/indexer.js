@@ -67,7 +67,7 @@ import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi
 import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
-import { hasGemini, classifyThemes, describePack, analyzePack, listModels, useModel, activeModel } from './gemini.js';
+import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useModel, activeModel } from './gemini.js';
 import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
 import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds, computeGenres } from './topics.js';
 
@@ -904,8 +904,12 @@ async function runPool(items, jobs, worker, stop = () => false) {
  * `seen` нужен не для порядка, а по существу: статистика перезапрашивает всех
  * разобранных паков, и без памяти о том, кого уже спросили в этот заход, второй
  * запрос к базе вернул бы те же пять тысяч по второму кругу.
+ *
+ * `group` — необязательный делитель очереди на пачки: с ним работник берёт
+ * не строку, а список строк. Нужен шагу «Всё о паке», где несколько паков
+ * уезжают к модели одним запросом (см. groupForAnalysis).
  */
-async function drain({ step, jobs, take, work, stop = () => false }) {
+async function drain({ step, jobs, take, work, group = null, stop = () => false }) {
 	const bar = track(step);
 	const seen = new Set();
 
@@ -948,9 +952,15 @@ async function drain({ step, jobs, take, work, stop = () => false }) {
 		taken += batch.length;
 		bar.expand(batch.length);
 
-		await runPool(batch, jobs, async row => {
-			await work(row, bar);
-			bar.tick();
+		// Работу можно раздавать не по строке, а пачками: шаг «Всё о паке»
+		// спрашивает у Gemini сразу несколько паков одним запросом, и работник
+		// там берёт не пак, а пачку паков (см. group в refreshAnalysis)
+		// Без group работник берёт строку, как и раньше; с ним — сразу пачку строк
+		const units = group ? group(batch) : batch;
+
+		await runPool(units, jobs, async unit => {
+			await work(unit, bar);
+			bar.tick(Array.isArray(unit) ? unit.length : 1);
 		}, stop);
 	}
 }
@@ -1619,12 +1629,64 @@ async function refreshSummaries() {
 }
 
 /**
- * Проценты категорий и краткое описание — за один запрос на пак.
+ * Сколько тем в паке — по сохранённым раундам, не разбирая их в темы целиком.
+ * Нужно только затем, чтобы набрать пачку по размеру (см. groupForAnalysis).
+ */
+function themeCount(row) {
+	return normalizeRounds(row.rounds).reduce((sum, round) => sum + round.themes.length, 0);
+}
+
+/**
+ * Делит очередь на пачки, которые уедут к модели одним запросом.
+ *
+ * Пачка набирается по двум числам сразу: сколько паков (analyzePackBatch)
+ * и сколько всего тем (analyzeThemeBatch). Первое — про суточный лимит, который
+ * считает запросы; второе — про предел длины ответа, который считает как раз
+ * темы. Что кончится раньше, то и закрывает пачку. Пак, который один перебирает
+ * предел по темам, едет один: разрезать пак между запросами нельзя — описание
+ * и аудиторию модель называет по всему списку сразу.
+ */
+function groupForAnalysis(rows) {
+	const maxPacks = Math.max(1, config.analyzePackBatch);
+	const maxThemes = Math.max(1, config.analyzeThemeBatch);
+	const groups = [];
+	let current = [];
+	let themes = 0;
+
+	for (const row of rows) {
+		const count = themeCount(row);
+
+		if (current.length > 0 && (current.length >= maxPacks || themes + count > maxThemes)) {
+			groups.push(current);
+			current = [];
+			themes = 0;
+		}
+
+		current.push(row);
+		themes += count;
+	}
+
+	if (current.length > 0) {
+		groups.push(current);
+	}
+
+	return groups;
+}
+
+/**
+ * Проценты категорий и краткое описание — одним запросом на несколько паков.
  *
  * Этим шагом заменяются оба предыдущих, когда выбраны они вместе (см. selectedSteps).
  * Смысл замены — суточный лимит: он считает запросы, а не темы, и пак, стоивший
  * два запроса, стоит теперь один. Список тем при этом уезжает наверх один раз
  * вместо двух — то есть за ту же ночь бесплатный ключ проходит вдвое больше паков.
+ *
+ * Дальше та же мысль доведена до конца: раз считаются запросы, в одном запросе
+ * едет сразу несколько паков (см. analyzePackBatch в config.js и analyzePacks
+ * в gemini.js). Пятеро в запросе — это и впятеро больше паков за сутки,
+ * и впятеро быстрее по минутам: минутный предел тоже считает запросы, и очередь
+ * (см. takeTurn) расставляет их по четыре секунды друг от друга, сколько
+ * работников ни поставь.
  *
  * Очередь общая: сюда берётся пак, которому не хватает хоть чего-то одного —
  * хоть разметки, хоть описания, — и получает он сразу оба. Спрашивать про
@@ -1658,7 +1720,8 @@ async function refreshAnalysis() {
 	];
 
 	say('analyze', `через ${activeModel()}${queueNote()}: паков без разметки или описания ${pending.all(...params).length}`
-		+ `${upgrade ? ' (считая размеченные моделью послабее)' : ''}. Спрашиваю всё об одном паке одним запросом. `
+		+ `${upgrade ? ' (считая размеченные моделью послабее)' : ''}. `
+		+ `Спрашиваю всё о ${config.analyzePackBatch} паках одним запросом. `
 		+ usageLine(activeModel()));
 
 	const tally = { labelled: 0, mixed: 0, repeats: 0 };
@@ -1671,54 +1734,64 @@ async function refreshAnalysis() {
 		jobs: Math.max(1, config.geminiJobs),
 		stop: () => geminiQuotaSpent,
 		take: () => pending.all(...params),
-		work: async (row, bar) => {
-			const themes = listThemes(row.id, normalizeRounds(row.rounds));
-			const label = bar.label();
+		group: groupForAnalysis,
+		work: async (rows, bar) => {
+			const packs = rows.map(row => ({
+				row,
+				themes: listThemes(row.id, normalizeRounds(row.rounds)),
+				label: bar.label(),
+			}));
 
 			try {
 				const model = activeModel();
-				const answer = await analyzePack({
-					name: row.name ?? '',
-					tags: jsonOrDefault(row.tags, []),
-					themes,
+				const answers = await analyzePacks(packs.map(pack => ({
+					name: pack.row.name ?? '',
+					tags: jsonOrDefault(pack.row.tags, []),
+					themes: pack.themes,
+				})));
+
+				packs.forEach(({ row, themes, label }, index) => {
+					const answer = answers[index];
+
+					// Пак без разобранных тем описание всё равно получает — по названию
+					// и тегам, — а вот доли считать не из чего
+					if (themes.length > 0) {
+						saveTopics('analyze', label, row, themes, answer.marks, model, tally);
+					}
+
+					saveSummary(row, model, answer.summary, answer.audience);
+
+					if (answer.summary) {
+						described++;
+					} else {
+						silent++;
+					}
+
+					say('analyze', `${themes.length > 0 ? '     ' : `${label} «${row.name}»:`} `
+						+ `описание: ${answer.summary || 'сказать нечего'}`);
+
+					// Кому этот пак: возраст и пол — оценка модели по содержимому,
+					// а не статистика игроков (см. AUDIENCE_RULES в gemini.js)
+					say('analyze', `      ${audienceLine(answer.audience)}`);
+
+					// Что модель искала в поиске. Строка нужна не для красоты: по ней
+					// видно, гуглит ли она то, о чём пак, — или само шуточное название
+					// темы, из которого не следует ничего (см. SOURCES в gemini.js)
+					if (answer.queries?.length > 0) {
+						say('analyze', `      искала: ${answer.queries.slice(0, 6).join(' | ')}`);
+					}
+
+					// Одним запросом не вышло — пак разобран по-старому, двумя.
+					// Считаем такие: если их много, стоит уменьшить паки, а не гадать
+					if (answer.split) {
+						split++;
+						say('analyze', `      одним запросом не вышло (${answer.reason}), спросил двумя`);
+					}
 				});
-
-				// Пак без разобранных тем описание всё равно получает — по названию
-				// и тегам, — а вот доли считать не из чего
-				if (themes.length > 0) {
-					saveTopics('analyze', label, row, themes, answer.marks, model, tally);
-				}
-
-				saveSummary(row, model, answer.summary, answer.audience);
-
-				if (answer.summary) {
-					described++;
-				} else {
-					silent++;
-				}
-
-				say('analyze', `${themes.length > 0 ? '     ' : `${label} «${row.name}»:`} `
-					+ `описание: ${answer.summary || 'сказать нечего'}`);
-
-				// Кому этот пак: возраст и пол — оценка модели по содержимому,
-				// а не статистика игроков (см. AUDIENCE_RULES в gemini.js)
-				say('analyze', `      ${audienceLine(answer.audience)}`);
-
-				// Что модель искала в поиске. Строка нужна не для красоты: по ней
-				// видно, гуглит ли она то, о чём пак, — или само шуточное название
-				// темы, из которого не следует ничего (см. SOURCES в gemini.js)
-				if (answer.queries?.length > 0) {
-					say('analyze', `      искала: ${answer.queries.slice(0, 6).join(' | ')}`);
-				}
-
-				// Одним запросом не вышло — пак разобран по-старому, двумя.
-				// Считаем такие: если их много, стоит уменьшить паки, а не гадать
-				if (answer.split) {
-					split++;
-					say('analyze', `      одним запросом не вышло (${answer.reason}), спросил двумя`);
-				}
 			} catch (error) {
-				say('analyze', `${label} «${row.name}»: ${error.message}`);
+				// Ошибка тут одна на всю пачку: паки в ней разбираются одним
+				// запросом, и отказ означает, что не разобран ни один
+				say('analyze', `${packs.map(pack => `${pack.label} «${pack.row.name}»`).join(', ')}: ${error.message}`);
 
 				if (isFatalGeminiError(error)) {
 					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;

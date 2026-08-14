@@ -11,17 +11,23 @@
 	--hard: #f0883e;
 	--very-hard: #f85149;
 	/* Цвета типов паков. Взяты с разметки ролей, где эти же типы уже названы
-	   и раскрашены: аниме — малиновый, музыка — фуксия, игры — бирюзовый,
+	   и раскрашены: аниме — малиновый, музыка — розовая, игры — бирюзовый,
 	   кино — зелёный, мультики — фиолетовый, солянка — мятный. Смысл в том,
 	   чтобы цвет типа был один и тот же и там, и на сайте: тогда его узнают,
 	   не читая подписи. Солянка получила свой цвет вместо серого — серый
-	   остался только у паков, которым тип ещё не считали. */
+	   остался только у паков, которым тип ещё не считали.
+
+	   Манга держится рядом с аниме, но теплее: тематики соседние, и цвет должен
+	   говорить и о родстве, и о различии. Комиксы, наоборот, ушли в синий —
+	   спутать их с мангой нельзя, в этом весь смысл их разделения. */
 	--anime: #ec1e5f;
+	--manga: #ff6b35;
 	--games: #12cfe0;
 	--movies: #3ddc6e;
 	--cartoons: #8b3ff5;
 	--books: #f0a836;
-	--music: #e040e0;
+	--comics: #3d6fff;
+	--music: #ff4fa3;
 	--mixed: #1fdca4;
 	--radius: 0.625rem;
 }
@@ -986,27 +992,33 @@ a.brand:hover .brand__text {
 }
 
 .topic--anime { color: var(--anime); }
+.topic--manga { color: var(--manga); }
 .topic--games { color: var(--games); }
 .topic--movies { color: var(--movies); }
 .topic--cartoons { color: var(--cartoons); }
 .topic--books { color: var(--books); }
+.topic--comics { color: var(--comics); }
 .topic--music { color: var(--music); }
 .topic--mixed { color: var(--mixed); }
 .topic--unknown { color: var(--text-muted); }
 
 .level-toggle[aria-pressed="true"].topic--anime { border-color: var(--anime); }
+.level-toggle[aria-pressed="true"].topic--manga { border-color: var(--manga); }
 .level-toggle[aria-pressed="true"].topic--games { border-color: var(--games); }
 .level-toggle[aria-pressed="true"].topic--movies { border-color: var(--movies); }
 .level-toggle[aria-pressed="true"].topic--cartoons { border-color: var(--cartoons); }
 .level-toggle[aria-pressed="true"].topic--books { border-color: var(--books); }
+.level-toggle[aria-pressed="true"].topic--comics { border-color: var(--comics); }
 .level-toggle[aria-pressed="true"].topic--music { border-color: var(--music); }
 .level-toggle[aria-pressed="true"].topic--mixed { border-color: var(--mixed); }
 
 .level-toggle.topic--anime,
+.level-toggle.topic--manga,
 .level-toggle.topic--games,
 .level-toggle.topic--movies,
 .level-toggle.topic--cartoons,
 .level-toggle.topic--books,
+.level-toggle.topic--comics,
 .level-toggle.topic--music,
 .level-toggle.topic--mixed,
 .level-toggle.topic--unknown {
@@ -1017,10 +1029,12 @@ a.brand:hover .brand__text {
    по чему её узнают в списке с одного взгляда. Прежние эмодзи были цветными сами
    по себе, и приглушённый чертёж на их месте стёр бы это различие */
 .level-toggle.topic--anime .topic-icon { stroke: var(--anime); }
+.level-toggle.topic--manga .topic-icon { stroke: var(--manga); }
 .level-toggle.topic--games .topic-icon { stroke: var(--games); }
 .level-toggle.topic--movies .topic-icon { stroke: var(--movies); }
 .level-toggle.topic--cartoons .topic-icon { stroke: var(--cartoons); }
 .level-toggle.topic--books .topic-icon { stroke: var(--books); }
+.level-toggle.topic--comics .topic-icon { stroke: var(--comics); }
 .level-toggle.topic--music .topic-icon { stroke: var(--music); }
 .level-toggle.topic--mixed .topic-icon { stroke: var(--mixed); }
 
@@ -1432,11 +1446,37 @@ a.hide__item--login:hover {
 }
 
 .shares__part--anime { background: var(--anime); }
+.shares__part--manga { background: var(--manga); }
 .shares__part--games { background: var(--games); }
 .shares__part--movies { background: var(--movies); }
 .shares__part--cartoons { background: var(--cartoons); }
 .shares__part--books { background: var(--books); }
+.shares__part--comics { background: var(--comics); }
 .shares__part--other { background: #333a49; }
+
+/* «Прочее» музпака — это и есть музыка (см. otherPart в web/card.js), и цвет
+   у этого куска музыкальный: подпись «Музыка» на сером ничьём куске читалась
+   как оговорка */
+.shares__part--music { background: var(--music); }
+
+/* «Прочее», у которого есть имя. Серый кусок ничей нарочно — «прочее» и значит
+   «всё остальное», — но когда это остальное на деле оказалось спортом или
+   историей, у него есть и название, и цвет: полоска футбольного пака должна
+   говорить «Футбол», а не «Прочее: спорт» серым по серому (см. otherPart
+   в web/card.js). Цвета выбраны по смыслу вида, а не по месту в списке:
+   спорт зелёный, история землистая, наука синяя */
+.shares__part--kind-sport { background: #3fb95a; }
+.shares__part--kind-history { background: #a9762f; }
+.shares__part--kind-science { background: #3f8fd8; }
+.shares__part--kind-geography { background: #2fa9a2; }
+.shares__part--kind-streamers { background: #9146ff; }
+.shares__part--kind-bloggers { background: #d0619b; }
+.shares__part--kind-memes { background: #d8563f; }
+.shares__part--kind-celebrities { background: #d4508a; }
+.shares__part--kind-tech { background: #6f7fd8; }
+.shares__part--kind-art { background: #c07ad0; }
+.shares__part--kind-food { background: #e08b3a; }
+.shares__part--kind-life { background: #7f8a9c; }
 
 /* Вопрос над полоской жанров: «Какой жанр музыки?». Есть только у неё — две
    верхние полоски подписаны сами собой, а эта без вопроса читалась бы как
@@ -1466,7 +1506,11 @@ a.hide__item--login:hover {
    вплотную, и одинаковый оттенок в них читался бы как одно и то же */
 .shares__part--text { background: #4d566b; }
 .shares__part--image { background: #7d6cc4; }
-.shares__part--audio { background: var(--music); }
+/* Звук больше не берёт цвет музыки, хотя раньше брал. Полоски стоят вплотную,
+   и одинаковый цвет читался как одно и то же — а это разные вещи: наверху
+   «по музыке это отгадывают», здесь «в вопросах лежат звуковые файлы».
+   Розовый остался у музыки, звук получил свой бирюзовый */
+.shares__part--audio { background: #34b8c4; }
 .shares__part--video { background: #c9648c; }
 .shares__part--html { background: #b0894a; }
 

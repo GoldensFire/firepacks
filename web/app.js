@@ -56,7 +56,7 @@ const LEVEL_ORDER = [4, 3, 2, 1];
  * он должен с того, во что упирается большинство паков. Дальше — тематические,
  * от самых частых, и «без разметки» в самом конце: это не тип, а его отсутствие.
  */
-const TOPIC_ORDER = ['mixed', 'anime', 'games', 'movies', 'cartoons', 'books', 'music', 'unknown'];
+const TOPIC_ORDER = ['mixed', 'anime', 'manga', 'games', 'movies', 'cartoons', 'books', 'comics', 'music', 'unknown'];
 
 /** Сортировки по популярности за период: подпись и длина окна в днях. */
 const PERIOD_NAMES = {

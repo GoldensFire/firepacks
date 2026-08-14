@@ -25,7 +25,7 @@ let facets = null;
 let user = null;
 
 /** Категории, которые делят вопросы между собой: их доли складываются в сотню. */
-const SHARE_ORDER = ['anime', 'games', 'movies', 'cartoons', 'books', 'other'];
+const SHARE_ORDER = ['anime', 'manga', 'games', 'movies', 'cartoons', 'books', 'comics', 'other'];
 
 /**
  * Музыка среди тематик стоит особняком: она не спорит с остальными, а идёт поверх
@@ -82,6 +82,68 @@ function otherKindsLine(pack) {
 	return (pack.otherKinds ?? [])
 		.map(kind => facets.otherKindNames?.[kind.key] ?? kind.key)
 		.join(', ');
+}
+
+/** С большой буквы: имена видов «прочего» хранятся строчными («спорт»). */
+const capitalize = text => (text ? text[0].toUpperCase() + text.slice(1) : text);
+
+/**
+ * С какой доли самого «прочего» его вид считается тем, чем это «прочее»
+ * и является. Три пятых — это уже не «в том числе спорт», а «это и есть спорт».
+ */
+const DOMINANT_KIND = 0.6;
+
+/**
+ * Кусок «прочего» в полоске тематик: как он называется и какого он цвета.
+ *
+ * «Прочее» — категория честная, но пустая: пять тематик отвечают на вопрос
+ * «откуда вопрос», и всё, что не аниме, не игры, не кино, не мультики, не книги
+ * и не комиксы, сваливается в общую кучу. У футбольного пака эта куча — почти
+ * весь пак, и подпись «Прочее: спорт» серым по серому не говорит ничего.
+ *
+ * Поэтому кусок называется тем, чем он оказался, и красится в свой цвет
+ * (см. shares__part--kind-* в style.css): у футбольного пака полоска зелёная
+ * и подписана «Футбол». Имя берётся у предмета пака, когда предмет и есть это
+ * «прочее» (совпал по размеру), и у вида — когда предмет шире или его нет вовсе:
+ * «Спорт» вместо «Футбола» точнее, чем «Футбол» вместо «Спорта».
+ *
+ * Когда же прочее и вправду разное, всё остаётся как было: серый кусок
+ * и подпись «Прочее: стримеры, история» — перечисление тут и есть ответ.
+ */
+function otherPart(pack) {
+	const value = pack.topicShares?.other ?? 0;
+	const plain = { key: 'other', name: topicInfo('other').name, value };
+
+	// У музпака «прочее» — это и есть музыка: песня, которая не из фильма
+	// и не из аниме, попадает именно сюда, и у пака, который весь про музыку,
+	// полоска говорила «55% Прочее», то есть не говорила ничего. Ярлык пака
+	// к этому времени уже посчитан моделью (см. toPrimary в src/topics.js)
+	if (pack.primaryTopic === MUSIC_TOPIC) {
+		return { key: MUSIC_TOPIC, name: topicInfo(MUSIC_TOPIC).name, value };
+	}
+
+	const kinds = pack.otherKinds ?? [];
+	const top = kinds[0];
+
+	if (!top) {
+		return plain;
+	}
+
+	if (top.share < value * DOMINANT_KIND) {
+		return { ...plain, name: `${plain.name}: ${otherKindsLine(pack)}` };
+	}
+
+	// Предмет пака годится в имя куска, только если он этому куску по размеру:
+	// у аниме-пака про «Наруто» с одной футбольной темой предмет — «Наруто»,
+	// и подписывать им десять процентов спорта было бы прямым враньём
+	const subject = (pack.franchises ?? [])[0];
+	const fits = subject && subject.share >= top.share * 0.8 && subject.share <= value * 1.25;
+
+	return {
+		key: `kind-${top.key}`,
+		name: fits ? subject.name : capitalize(facets.otherKindNames?.[top.key] ?? top.key),
+		value,
+	};
 }
 
 /**
@@ -684,28 +746,12 @@ function createShares(pack) {
 	const shares = pack.topicShares ?? {};
 	const content = pack.contentStat ?? {};
 
-	// У музпака «прочее» — это и есть музыка. Пять тематик отвечают на вопрос
-	// «откуда вопрос»: аниме, игры, кино, мультфильмы — а всё остальное сваливается
-	// в «прочее». Песня, которая не из фильма и не из аниме, попадает туда же,
-	// и у пака, который весь про музыку, полоска говорила «55% Прочее» — то есть
-	// не говорила ничего. Ярлык пака к этому времени уже посчитан моделью
-	// (primaryTopic = music, см. toPrimary), и назвать этот кусок можно честно.
-	// А у остальных «прочее» называется тем, чем оно оказалось: «Прочее: стримеры,
-	// история». Кусок этот у половины паков самый крупный, и подпись «Прочее»
-	// на трети полоски отвечает на вопрос «о чём пак» ровно ничем.
-	const kinds = otherKindsLine(pack);
-	const otherName = pack.primaryTopic === MUSIC_TOPIC
-		? topicInfo(MUSIC_TOPIC).name
-		: kinds
-			? `${topicInfo('other').name}: ${kinds}`
-			: topicInfo('other').name;
-
+	// Кусок «прочего» называется и красится по тому, чем это «прочее» оказалось:
+	// у футбольного пака он зелёный и подписан «Футбол» (см. otherPart)
 	const topics = createShareRow(
-		SHARE_ORDER.map(key => ({
-			key,
-			name: key === 'other' ? otherName : topicInfo(key).name,
-			value: shares[key] ?? 0,
-		})),
+		SHARE_ORDER.map(key => (key === 'other'
+			? otherPart(pack)
+			: { key, name: topicInfo(key).name, value: shares[key] ?? 0 })),
 		'shares__bar--topics',
 		'вопросов пака',
 		'О чём вопросы пака',

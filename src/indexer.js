@@ -21,12 +21,26 @@
 //   node src/indexer.js --pages=5       ограничить число страниц обсуждения
 //   node src/indexer.js --limit=20      ограничить число обрабатываемых паков
 //   node src/indexer.js --jobs=8        сколько паков разбирать одновременно
-//   node src/indexer.js --authors=А,Б   спрашивать Gemini только про паки этих авторов
+//   node src/indexer.js --packs=12,34   работать только с этими паками (номера из адреса /pack/N)
+//   node src/indexer.js --authors=А,Б   работать только с паками этих авторов
+//   node src/indexer.js --force         не пропускать уже сделанное: всё заново
 //   node src/indexer.js --retry         попробовать заново паки с ошибками
 //   node src/indexer.js --serial        по-старому: шаги друг за другом, а не разом
 //
 // Шаги можно сочетать: --stats-only --topics-only сделает и то, и другое.
 // Тем же пользуется страница обновления базы — см. web/update.html.
+//
+// ————— Точечное обновление —————
+//
+// `--packs=` и `--authors=` сужают все шаги, кроме обхода ВК, до перечисленных
+// паков: «обнови вот этот пак» и «пройди заново по пакам вот этого автора».
+// Обход обсуждений при этом не идёт вовсе — искать новое в теме ради одного пака
+// незачем, а других способов сузить его нет: обсуждение не спрашивают по автору.
+//
+// Вместе с ними обычно нужен `--force`: шаги по своему устройству берут только
+// то, чего в базе ещё нет, а точечное обновление затевают как раз ради того,
+// чтобы переделать уже сделанное. Один ключ вместо четырёх галочек — та же
+// «переделать заново», но сразу везде.
 //
 // ————— Почему шаги идут разом —————
 //
@@ -53,7 +67,7 @@ import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi
 import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
-import { hasGemini, classifyThemes, describePack, listModels, useModel, activeModel } from './gemini.js';
+import { hasGemini, classifyThemes, describePack, analyzePack, listModels, useModel, activeModel } from './gemini.js';
 import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
 import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds, computeGenres } from './topics.js';
 
@@ -65,10 +79,18 @@ const value = (name, fallback) => {
 	return found ? Number(found) : fallback;
 };
 
-const reparse = has('--reparse');
-const retopics = has('--retopics');
-const resummary = has('--resummary');
-const retryFailed = has('--retry');
+/**
+ * «Переделать всё заново» одним ключом. Каждая из четырёх галочек существует
+ * и по отдельности — обычный ночной обход ими и пользуется поодиночке, — а этот
+ * ключ для другого случая: когда паки названы поимённо и переспрашивается всё,
+ * что про них известно (см. --packs выше).
+ */
+const force = has('--force');
+
+const reparse = has('--reparse') || force;
+const retopics = has('--retopics') || force;
+const resummary = has('--resummary') || force;
+const retryFailed = has('--retry') || force;
 const upgrade = has('--upgrade');
 const serial = has('--serial');
 const maxPages = value('pages', Infinity);
@@ -95,7 +117,17 @@ if (text('model')) {
 }
 
 /**
- * Авторы, чьи паки Gemini разбирает первыми.
+ * Паки, названные поимённо: `--packs=128,340`. Номер — тот же, что в адресе
+ * страницы пака (/pack/128-...), поэтому ссылку можно просто вставить целиком:
+ * всё, что не число, отсеивается.
+ */
+const onlyPacks = text('packs')
+	.split(/[^0-9]+/)
+	.map(part => Number.parseInt(part, 10))
+	.filter(id => Number.isFinite(id) && id > 0);
+
+/**
+ * Авторы, чьи паки разбираются.
  *
  * Их два списка, и делают они разное. `--authors=Имя,Имя` — разовый: очередь
  * состоит только из паков этих авторов, всё остальное шаг не трогает вовсе.
@@ -109,43 +141,86 @@ if (text('model')) {
 const onlyAuthors = text('authors').split(',').map(name => buildAuthorKey(name)).filter(Boolean);
 const priorityAuthors = (config.priorityAuthors ?? []).map(name => buildAuthorKey(name)).filter(Boolean);
 
+/** Названы ли паки поимённо. От этого зависит, что вообще делать в этот запуск. */
+const targeted = onlyPacks.length > 0 || onlyAuthors.length > 0;
+
 /**
- * Кусок WHERE и кусок ORDER BY для шагов, которые спрашивают Gemini.
+ * Кусок WHERE, сужающий шаг до названных паков. Общий для всех шагов, работающих
+ * с паками: и разбора, и статистики, и модели — иначе «обнови вот этот пак»
+ * означало бы обновить у него одну только разметку.
  *
- * Порядок внутри самих избранных остаётся прежним — по номеру строки: он тут
- * ни на что не влияет, но без него две строки одного автора могли бы меняться
- * местами между запусками, и прерванный на середине шаг начинал бы не с того
- * места, на котором остановился.
+ * @param {string} alias как назван packages в этом запросе
  */
-function authorQueueSql() {
+function targetSql(alias = 'p') {
+	const parts = [];
 	const params = [];
-	let where = '';
-	let order = 'p.id';
+
+	if (onlyPacks.length > 0) {
+		parts.push(`${alias}.id IN (${onlyPacks.map(() => '?').join(',')})`);
+		params.push(...onlyPacks);
+	}
 
 	if (onlyAuthors.length > 0) {
-		where = ` AND EXISTS (SELECT 1 FROM pack_authors a WHERE a.package_id = p.id
-			AND a.author_key IN (${onlyAuthors.map(() => '?').join(',')}))`;
+		parts.push(`EXISTS (SELECT 1 FROM pack_authors a WHERE a.package_id = ${alias}.id
+			AND a.author_key IN (${onlyAuthors.map(() => '?').join(',')}))`);
 		params.push(...onlyAuthors);
 	}
 
-	if (priorityAuthors.length > 0) {
-		order = `(SELECT 1 FROM pack_authors a WHERE a.package_id = p.id
-			AND a.author_key IN (${priorityAuthors.map(() => '?').join(',')})) IS NULL, p.id`;
-		params.push(...priorityAuthors);
-	}
-
-	return { where, order, params };
+	// Названы и паки, и авторы — берём и тех, и других, а не общее у них.
+	// Пересечение здесь почти всегда пусто: номера выписывают из одного места,
+	// имена вспоминают из другого, и «обнови вот эти три пака и заодно всё
+	// вот этого автора» — единственное, чем такая пара бывает на самом деле
+	return { where: parts.length > 0 ? ` AND (${parts.join(' OR ')})` : '', params };
 }
 
-/** Что написать в шапке шага про отбор по авторам. */
-function authorQueueNote() {
+/**
+ * Кусок ORDER BY: сначала самые свежие паки.
+ *
+ * Свежесть — это дата сообщения в обсуждении (vk_ts), а не номер строки: номера
+ * раздаются в порядке обхода обсуждений, и первым в базу попадает не самый новый
+ * пак, а первый попавшийся. Паки без даты идут в самом конце: узнать про них
+ * нечего, и ждать своей очереди они могут сколько угодно.
+ *
+ * Почему именно так. Работа упирается в суточный лимит и в неё же не влезает:
+ * очередь до конца не проходится никогда, и вопрос лишь в том, что останется
+ * недоделанным. Пусть это будет позавчерашнее, а не сегодняшнее — новый пак,
+ * выложенный вечером, нужен на сайте наутро, а не через неделю.
+ *
+ * Номер строки стоит вторым ключом и нужен только для устойчивости: без него две
+ * строки одной даты могли бы меняться местами между запусками, и прерванный
+ * на середине шаг начинал бы не с того места, на котором остановился.
+ */
+const NEWEST_FIRST = 'p.vk_ts IS NULL, p.vk_ts DESC, p.id DESC';
+
+/**
+ * То же самое, но постоянно избранные авторы идут впереди всех (см. priorityAuthors).
+ * Внутри избранных порядок такой же: сначала свежее.
+ */
+function priorityOrderSql() {
+	if (priorityAuthors.length === 0) {
+		return { order: NEWEST_FIRST, params: [] };
+	}
+
+	return {
+		order: `(SELECT 1 FROM pack_authors a WHERE a.package_id = p.id
+			AND a.author_key IN (${priorityAuthors.map(() => '?').join(',')})) IS NULL, ${NEWEST_FIRST}`,
+		params: [...priorityAuthors],
+	};
+}
+
+/** Что написать в шапке шага про отбор паков. */
+function queueNote(withPriority = true) {
 	const parts = [];
+
+	if (onlyPacks.length > 0) {
+		parts.push(`только паки ${onlyPacks.join(', ')}`);
+	}
 
 	if (onlyAuthors.length > 0) {
 		parts.push(`только авторы: ${text('authors')}`);
 	}
 
-	if (priorityAuthors.length > 0) {
+	if (withPriority && priorityAuthors.length > 0) {
 		parts.push(`сначала ${config.priorityAuthors.join(', ')}`);
 	}
 
@@ -344,6 +419,7 @@ const TAGS = {
 	statsnew: 'статистика новых',
 	topics: 'тематики',
 	summary: 'описания',
+	analyze: 'разметка',
 	logos: 'логотипы',
 	specials: 'спецвопросы',
 	recalc: 'пересчёт',
@@ -432,7 +508,36 @@ const updateTopics = db.prepare(`
 		topics_at = ?, topics_model = ?, topics_version = ${TOPICS_VERSION} WHERE id = ?
 `);
 
-const updateSummary = db.prepare('UPDATE packages SET summary = ?, summary_at = ?, summary_model = ? WHERE id = ?');
+const updateSummary = db.prepare(`
+	UPDATE packages SET summary = ?, summary_at = ?, summary_model = ?,
+		audience_from = ?, audience_to = ?, audience_male = ?, audience_at = ? WHERE id = ?
+`);
+
+/**
+ * Записывает ответ модели про весь пак: описание и оценку аудитории.
+ *
+ * Обе вещи приезжают одним ответом (см. describePack и analyzePack), и пишутся
+ * тоже разом. Отметка audience_at ставится и тогда, когда аудитории в ответе
+ * не оказалось: спросили — значит, спросили, и переспрашивать каждую ночь
+ * незачем.
+ */
+function saveSummary(row, model, summary, audience) {
+	updateSummary.run(
+		summary || null,
+		Date.now(),
+		model,
+		audience?.from ?? null,
+		audience?.to ?? null,
+		audience?.male ?? null,
+		Date.now(),
+		row.id,
+	);
+}
+
+/** Аудитория строкой для лога: «18–25 лет, М 70% / Ж 30%». */
+const audienceLine = audience => (audience
+	? `${audience.from}–${audience.to} лет, М ${audience.male}% / Ж ${100 - audience.male}%`
+	: 'аудитория не названа');
 const updateSpecials = db.prepare('UPDATE packages SET special_count = ?, special_stat = ? WHERE id = ?');
 
 const upsertStats = db.prepare(`
@@ -910,16 +1015,21 @@ async function parsePackages() {
 	}
 
 	const placeholders = statuses.map(() => '?').join(',');
+	const target = targetSql();
 
 	// Пометка recheck — это перезалитые файлы: пак давно разобран и стоит «ok»,
 	// но в сообщении обсуждения лежит уже другой архив (см. syncComment).
+	// Разбор идёт с самых свежих (см. NEWEST_FIRST): очередь длинная, ночь конечная,
+	// и недоделанным должно остаться позавчерашнее, а не сегодняшнее
 	const pending = db.prepare(`
-		SELECT id, url, file_name, source_key, status FROM packages
-		WHERE status IN (${placeholders}) OR recheck = 1
-		ORDER BY id
+		SELECT p.id, p.url, p.file_name, p.source_key, p.status FROM packages p
+		WHERE (p.status IN (${placeholders}) OR p.recheck = 1)${target.where}
+		ORDER BY ${NEWEST_FIRST}
 	`);
 
-	say('parse', `в очереди ${pending.all(...statuses).length}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+	const params = [...statuses, ...target.params];
+
+	say('parse', `в очереди ${pending.all(...params).length}${queueNote(false)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let failed = 0;
@@ -929,7 +1039,7 @@ async function parsePackages() {
 	await drain({
 		step: 'parse',
 		jobs,
-		take: () => pending.all(...statuses),
+		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			const label = bar.label();
 
@@ -1016,13 +1126,21 @@ async function parsePackages() {
 
 /** Догружает логотипы для паков, разобранных до появления этой возможности. */
 async function fetchLogos() {
+	const target = targetSql();
+
+	// Точечное обновление логотип перекачивает всегда: «докачать недостающие» —
+	// это про ночной обход, а названный поимённо пак просят обновить целиком
+	const missing = force ? '' : ` AND (p.logo_state IS NULL OR p.logo_state = 'error')`;
+
 	const pending = db.prepare(`
-		SELECT id, url, file_name, source_key, name FROM packages
-		WHERE status = 'ok' AND (logo_state IS NULL OR logo_state = 'error')
-		ORDER BY id
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		WHERE p.status = 'ok'${missing}${target.where}
+		ORDER BY p.id
 	`);
 
-	say('logos', `без логотипа ${pending.all().length}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+	const params = target.params;
+
+	say('logos', `без логотипа ${pending.all(...params).length}${queueNote(false)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let none = 0;
@@ -1031,7 +1149,7 @@ async function fetchLogos() {
 	await drain({
 		step: 'logos',
 		jobs,
-		take: () => pending.all(),
+		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
 				const logo = await retryNetwork(() => withFreshUrl(row, async url => {
@@ -1076,13 +1194,19 @@ async function fetchLogos() {
  * это пара range-запросов на пак.
  */
 async function fetchSpecials() {
+	const target = targetSql();
+	const missing = force ? '' : ' AND p.special_count IS NULL';
+
 	const pending = db.prepare(`
-		SELECT id, url, file_name, source_key, name FROM packages
-		WHERE status = 'ok' AND special_count IS NULL
-		ORDER BY id
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		WHERE p.status = 'ok'${missing}${target.where}
+		ORDER BY p.id
 	`);
 
-	say('specials', `не посчитаны у ${pending.all().length} паков${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+	const params = target.params;
+
+	say('specials', `не посчитаны у ${pending.all(...params).length} паков${queueNote(false)}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let failed = 0;
@@ -1091,7 +1215,7 @@ async function fetchSpecials() {
 	await drain({
 		step: 'specials',
 		jobs,
-		take: () => pending.all(),
+		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
 				const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
@@ -1150,15 +1274,20 @@ async function refreshStats(scope = 'all') {
 		? 'AND NOT EXISTS (SELECT 1 FROM stats s WHERE s.package_id = p.id)'
 		: '';
 
+	const target = targetSql();
+
 	const pending = db.prepare(`
 		SELECT p.id, p.name, p.authors
 		FROM packages p
-		WHERE p.status = 'ok' AND p.name IS NOT NULL ${fresh}
+		WHERE p.status = 'ok' AND p.name IS NOT NULL ${fresh}${target.where}
 		ORDER BY p.id
 	`);
 
+	const params = target.params;
 	const statsJobs = Math.max(1, config.statsJobs);
-	say(step, `запрашиваю ${pending.all().length} паков${scope === 'new' ? ' без статистики' : ''}, по ${statsJobs} разом`);
+
+	say(step, `запрашиваю ${pending.all(...params).length} паков${scope === 'new' ? ' без статистики' : ''}`
+		+ `${queueNote(false)}, по ${statsJobs} разом`);
 
 	let found = 0;
 	let rated = 0;
@@ -1166,7 +1295,7 @@ async function refreshStats(scope = 'all') {
 	await drain({
 		step,
 		jobs: statsJobs,
-		take: () => pending.all(),
+		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			const authors = JSON.parse(row.authors);
 
@@ -1267,6 +1396,83 @@ function geminiReady(step) {
 	return true;
 }
 
+/**
+ * Считает по разметке тем всё, что хранится у пака, записывает это и рассказывает
+ * в лог, что получилось.
+ *
+ * Отдельной работой, потому что разметка приходит двумя путями: своим шагом
+ * (refreshTopics) и вместе с описанием одним запросом на всё (refreshAnalysis).
+ * Считаться и записываться она обязана одинаково — что бы её ни принесло.
+ *
+ * @param {string} step от чьего имени писать в лог
+ * @param {{labelled: number, mixed: number, repeats: number}} tally общий счёт шага
+ */
+function saveTopics(step, label, row, themes, marks, model, tally) {
+	const { shares, questions } = computeShares(themes, marks);
+	const { topic, share } = toPrimary(shares, questions);
+	const franchises = computeFranchises(themes, marks);
+	const top = franchises[0] ?? null;
+	const kinds = computeOtherKinds(themes, marks);
+	// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
+	// у солянки жанр называть не от чего, и список выйдет пустым
+	const genres = computeGenres(themes, marks, topic);
+
+	updateTopics.run(
+		JSON.stringify(shares ?? {}),
+		topic,
+		share,
+		JSON.stringify(franchises),
+		top?.name ?? null,
+		top?.share ?? null,
+		JSON.stringify(kinds),
+		JSON.stringify(genres),
+		genres.length > 0 ? topic : null,
+		Date.now(),
+		model,
+		row.id,
+	);
+
+	if (topic && topic !== 'mixed') {
+		tally.labelled++;
+	} else if (topic === 'mixed') {
+		tally.mixed++;
+	}
+
+	if (franchises.length > 0) {
+		tally.repeats++;
+	}
+
+	const percents = Object.entries(shares ?? {})
+		.filter(([key, v]) => key !== 'other' && v > 0)
+		.sort((a, b) => b[1] - a[1])
+		.map(([key, v]) => `${key} ${Math.round(v * 100)}%`)
+		.join(', ');
+
+	// Повторы — вторая строка: в одну с процентами они не влезают
+	const repeated = franchises
+		.map(f => `${f.name} ×${f.themes}`)
+		.join(', ');
+
+	say(step, `${label} «${row.name}»: ${percents || 'ничего тематического'} -> ${topic ?? 'мало вопросов'}`);
+
+	if (repeated) {
+		say(step, `      повторы: ${repeated}`);
+	}
+
+	// Чем оказалось «прочее»: без этой строки в логе видно только
+	// «прочего 40%», а сорок процентов чего — непонятно
+	if (kinds.length > 0) {
+		say(step, `      прочее: ${kinds.map(kind => `${OTHER_KINDS[kind.key]} ${Math.round(kind.share * 100)}%`).join(', ')}`);
+	}
+
+	// Чем этот музпак отличается от соседнего: рэп внутри или опенинги
+	if (genres.length > 0) {
+		const names = GENRES[topic].list;
+		say(step, `      ${GENRES[topic].question.toLowerCase()} `
+			+ genres.map(genre => `${names[genre.key]} ${Math.round(genre.share * 100)}%`).join(', '));
+	}
+}
+
 /** Раскладывает темы паков по тематикам и считает доли. */
 async function refreshTopics() {
 	if (!geminiReady('topics')) {
@@ -1279,17 +1485,18 @@ async function refreshTopics() {
 	const condition = retopics
 		? ''
 		: `AND (p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION}${weaker.where})`;
-	const authors = authorQueueSql();
+	const target = targetSql();
+	const priority = priorityOrderSql();
 	const pending = db.prepare(`
 		SELECT p.id, p.name, p.rounds FROM packages p
-		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${authors.where}
-		ORDER BY ${authors.order}
+		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${target.where}
+		ORDER BY ${priority.order}
 	`);
 
-	const params = [...weaker.params, ...authors.params];
+	const params = [...(retopics ? [] : weaker.params), ...target.params, ...priority.params];
 	const queue = pending.all(...params);
 
-	say('topics', `через ${activeModel()}${authorQueueNote()}: паков без разметки ${queue.length}`
+	say('topics', `через ${activeModel()}${queueNote()}: паков без разметки ${queue.length}`
 		+ `${upgrade ? ' (считая размеченные моделью послабее)' : ''}. ${usageLine(activeModel())}`);
 
 	// Паки, разобранные старой версией, хранят только названия тем — по ним модель угадывает плохо
@@ -1299,9 +1506,7 @@ async function refreshTopics() {
 		say('topics', `у ${withoutSamples} паков нет образцов ответов: сначала стоит выполнить node src/indexer.js --parse-only --reparse`);
 	}
 
-	let labelled = 0;
-	let mixed = 0;
-	let repeats = 0;
+	const tally = { labelled: 0, mixed: 0, repeats: 0 };
 
 	await drain({
 		step: 'topics',
@@ -1319,69 +1524,7 @@ async function refreshTopics() {
 			try {
 				const model = activeModel();
 				const marks = await classifyThemes(themes);
-				const { shares, questions } = computeShares(themes, marks);
-				const { topic, share } = toPrimary(shares, questions);
-				const franchises = computeFranchises(themes, marks);
-				const top = franchises[0] ?? null;
-				const kinds = computeOtherKinds(themes, marks);
-				// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
-				// у солянки жанр называть не от чего, и список выйдет пустым
-				const genres = computeGenres(themes, marks, topic);
-
-				updateTopics.run(
-					JSON.stringify(shares ?? {}),
-					topic,
-					share,
-					JSON.stringify(franchises),
-					top?.name ?? null,
-					top?.share ?? null,
-					JSON.stringify(kinds),
-					JSON.stringify(genres),
-					genres.length > 0 ? topic : null,
-					Date.now(),
-					model,
-					row.id,
-				);
-
-				if (topic && topic !== 'mixed') {
-					labelled++;
-				} else if (topic === 'mixed') {
-					mixed++;
-				}
-
-				if (franchises.length > 0) {
-					repeats++;
-				}
-
-				const percents = Object.entries(shares ?? {})
-					.filter(([key, v]) => key !== 'other' && v > 0)
-					.sort((a, b) => b[1] - a[1])
-					.map(([key, v]) => `${key} ${Math.round(v * 100)}%`)
-					.join(', ');
-
-				// Повторы — вторая строка: в одну с процентами они не влезают
-				const repeated = franchises
-					.map(f => `${f.name} ×${f.themes}`)
-					.join(', ');
-
-				say('topics', `${label} «${row.name}»: ${percents || 'ничего тематического'} -> ${topic ?? 'мало вопросов'}`);
-
-				if (repeated) {
-					say('topics', `      повторы: ${repeated}`);
-				}
-
-				// Чем оказалось «прочее»: без этой строки в логе видно только
-				// «прочего 40%», а сорок процентов чего — непонятно
-				if (kinds.length > 0) {
-					say('topics', `      прочее: ${kinds.map(kind => `${OTHER_KINDS[kind.key]} ${Math.round(kind.share * 100)}%`).join(', ')}`);
-				}
-
-				// Чем этот музпак отличается от соседнего: рэп внутри или опенинги
-				if (genres.length > 0) {
-					const names = GENRES[topic].list;
-					say('topics', `      ${GENRES[topic].question.toLowerCase()} `
-						+ genres.map(genre => `${names[genre.key]} ${Math.round(genre.share * 100)}%`).join(', '));
-				}
+				saveTopics('topics', label, row, themes, marks, model, tally);
 			} catch (error) {
 				say('topics', `${label} «${row.name}»: ${error.message}`);
 
@@ -1394,7 +1537,8 @@ async function refreshTopics() {
 		},
 	});
 
-	say('topics', `ярлык получили ${labelled} паков, солянок ${mixed}, с повторами франшиз ${repeats}. ${usageLine(activeModel())}`);
+	say('topics', `ярлык получили ${tally.labelled} паков, солянок ${tally.mixed}, `
+		+ `с повторами франшиз ${tally.repeats}. ${usageLine(activeModel())}`);
 }
 
 /**
@@ -1413,17 +1557,21 @@ async function refreshSummaries() {
 	}
 
 	const weaker = weakerModelSql('summary_model');
-	const condition = resummary ? '' : `AND (p.summary_at IS NULL${weaker.where})`;
-	const authors = authorQueueSql();
+	// Паку, описанному до появления оценки аудитории, вопрос задаётся заново:
+	// спрашивается она тем же запросом, что и описание, и переспросить его —
+	// единственный способ её получить (см. audience_at в db.js)
+	const condition = resummary ? '' : `AND (p.summary_at IS NULL OR p.audience_at IS NULL${weaker.where})`;
+	const target = targetSql();
+	const priority = priorityOrderSql();
 	const pending = db.prepare(`
 		SELECT p.id, p.name, p.tags, p.rounds FROM packages p
-		WHERE p.status = 'ok' ${condition}${authors.where}
-		ORDER BY ${authors.order}
+		WHERE p.status = 'ok' ${condition}${target.where}
+		ORDER BY ${priority.order}
 	`);
 
-	const params = [...weaker.params, ...authors.params];
+	const params = [...(resummary ? [] : weaker.params), ...target.params, ...priority.params];
 
-	say('summary', `через ${activeModel()}${authorQueueNote()}: паков без описания ${pending.all(...params).length}`
+	say('summary', `через ${activeModel()}${queueNote()}: паков без описания ${pending.all(...params).length}`
 		+ `${upgrade ? ' (считая описанные моделью послабее)' : ''}. ${usageLine(activeModel())}`);
 
 	let described = 0;
@@ -1440,13 +1588,13 @@ async function refreshSummaries() {
 
 			try {
 				const model = activeModel();
-				const summary = await describePack({
+				const { summary, audience } = await describePack({
 					name: row.name ?? '',
 					tags: jsonOrDefault(row.tags, []),
 					themes,
 				});
 
-				updateSummary.run(summary || null, Date.now(), model, row.id);
+				saveSummary(row, model, summary, audience);
 
 				if (summary) {
 					described++;
@@ -1455,6 +1603,7 @@ async function refreshSummaries() {
 				}
 
 				say('summary', `${label} «${row.name}»: ${summary || 'сказать нечего'}`);
+				say('summary', `      ${audienceLine(audience)}`);
 			} catch (error) {
 				say('summary', `${label} «${row.name}»: ${error.message}`);
 
@@ -1469,9 +1618,133 @@ async function refreshSummaries() {
 	say('summary', `описание получили ${described} паков${silent ? `, сказать нечего про ${silent}` : ''}. ${usageLine(activeModel())}`);
 }
 
+/**
+ * Проценты категорий и краткое описание — за один запрос на пак.
+ *
+ * Этим шагом заменяются оба предыдущих, когда выбраны они вместе (см. selectedSteps).
+ * Смысл замены — суточный лимит: он считает запросы, а не темы, и пак, стоивший
+ * два запроса, стоит теперь один. Список тем при этом уезжает наверх один раз
+ * вместо двух — то есть за ту же ночь бесплатный ключ проходит вдвое больше паков.
+ *
+ * Очередь общая: сюда берётся пак, которому не хватает хоть чего-то одного —
+ * хоть разметки, хоть описания, — и получает он сразу оба. Спрашивать про
+ * описание отдельно, когда список тем всё равно уже отправлен, было бы странно.
+ */
+async function refreshAnalysis() {
+	if (!geminiReady('analyze')) {
+		return;
+	}
+
+	const weakTopics = weakerModelSql('topics_model');
+	const weakSummary = weakerModelSql('summary_model');
+	const needTopics = retopics
+		? '1'
+		: `(p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION}${weakTopics.where})`;
+	const needSummary = resummary ? '1' : `(p.summary_at IS NULL OR p.audience_at IS NULL${weakSummary.where})`;
+	const target = targetSql();
+	const priority = priorityOrderSql();
+
+	const pending = db.prepare(`
+		SELECT p.id, p.name, p.tags, p.rounds FROM packages p
+		WHERE p.status = 'ok' AND (${needTopics} OR ${needSummary})${target.where}
+		ORDER BY ${priority.order}
+	`);
+
+	const params = [
+		...(retopics ? [] : weakTopics.params),
+		...(resummary ? [] : weakSummary.params),
+		...target.params,
+		...priority.params,
+	];
+
+	say('analyze', `через ${activeModel()}${queueNote()}: паков без разметки или описания ${pending.all(...params).length}`
+		+ `${upgrade ? ' (считая размеченные моделью послабее)' : ''}. Спрашиваю всё об одном паке одним запросом. `
+		+ usageLine(activeModel()));
+
+	const tally = { labelled: 0, mixed: 0, repeats: 0 };
+	let described = 0;
+	let silent = 0;
+	let split = 0;
+
+	await drain({
+		step: 'analyze',
+		jobs: Math.max(1, config.geminiJobs),
+		stop: () => geminiQuotaSpent,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			const themes = listThemes(row.id, normalizeRounds(row.rounds));
+			const label = bar.label();
+
+			try {
+				const model = activeModel();
+				const answer = await analyzePack({
+					name: row.name ?? '',
+					tags: jsonOrDefault(row.tags, []),
+					themes,
+				});
+
+				// Пак без разобранных тем описание всё равно получает — по названию
+				// и тегам, — а вот доли считать не из чего
+				if (themes.length > 0) {
+					saveTopics('analyze', label, row, themes, answer.marks, model, tally);
+				}
+
+				saveSummary(row, model, answer.summary, answer.audience);
+
+				if (answer.summary) {
+					described++;
+				} else {
+					silent++;
+				}
+
+				say('analyze', `${themes.length > 0 ? '     ' : `${label} «${row.name}»:`} `
+					+ `описание: ${answer.summary || 'сказать нечего'}`);
+
+				// Кому этот пак: возраст и пол — оценка модели по содержимому,
+				// а не статистика игроков (см. AUDIENCE_RULES в gemini.js)
+				say('analyze', `      ${audienceLine(answer.audience)}`);
+
+				// Что модель искала в поиске. Строка нужна не для красоты: по ней
+				// видно, гуглит ли она то, о чём пак, — или само шуточное название
+				// темы, из которого не следует ничего (см. SOURCES в gemini.js)
+				if (answer.queries?.length > 0) {
+					say('analyze', `      искала: ${answer.queries.slice(0, 6).join(' | ')}`);
+				}
+
+				// Одним запросом не вышло — пак разобран по-старому, двумя.
+				// Считаем такие: если их много, стоит уменьшить паки, а не гадать
+				if (answer.split) {
+					split++;
+					say('analyze', `      одним запросом не вышло (${answer.reason}), спросил двумя`);
+				}
+			} catch (error) {
+				say('analyze', `${label} «${row.name}»: ${error.message}`);
+
+				if (isFatalGeminiError(error)) {
+					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
+					say('analyze', stopReason(error));
+				}
+			}
+		},
+	});
+
+	say('analyze', `ярлык получили ${tally.labelled} паков, солянок ${tally.mixed}, `
+		+ `с повторами франшиз ${tally.repeats}; описание получили ${described}`
+		+ `${silent ? `, сказать нечего про ${silent}` : ''}`
+		+ `${split ? `. Двумя запросами пришлось спросить про ${split}` : ''}. ${usageLine(activeModel())}`);
+}
+
 /** Пересчитывает уровни по уже сохранённым числам — нужен после правки порогов в настройках. */
 function recalcLevels() {
-	const rows = db.prepare('SELECT package_id, started_games, completed_games, shown, answered, correct, wrong, right_percent, take_percent FROM stats WHERE found = 1').all();
+	// Названные поимённо паки пересчитываются одни: точечное обновление не должно
+	// трогать соседей — даже пересчётом, который ничего не портит
+	const target = targetSql();
+	const only = target.where
+		? ` AND package_id IN (SELECT p.id FROM packages p WHERE 1 = 1${target.where})`
+		: '';
+
+	const rows = db.prepare(`SELECT package_id, started_games, completed_games, shown, answered, correct, wrong,
+		right_percent, take_percent FROM stats WHERE found = 1${only}`).all(...target.params);
 	const update = db.prepare('UPDATE stats SET level = ? WHERE package_id = ?');
 
 	let changed = 0;
@@ -1498,7 +1771,9 @@ function recalcLevels() {
 
 /** Пересчитывает ярлыки паков по сохранённым долям — нужен после правки порога. */
 function recalcTopics() {
-	const rows = db.prepare(`SELECT id, topic_shares, question_count, franchises, genre_topic FROM packages WHERE topics_at IS NOT NULL`).all();
+	const target = targetSql();
+	const rows = db.prepare(`SELECT p.id, p.topic_shares, p.question_count, p.franchises, p.genre_topic
+		FROM packages p WHERE p.topics_at IS NOT NULL${target.where}`).all(...target.params);
 	const update = db.prepare('UPDATE packages SET primary_topic = ?, primary_share = ?, franchise_top = ?, franchise_top_share = ? WHERE id = ?');
 
 	// Жанры пересчитать без модели нельзя вовсе: они считаются по разметке тем,
@@ -1651,22 +1926,45 @@ const STEPS = [
 	{ key: 'statsnew', name: 'Статистика только у новых', flag: '--stats-new', run: () => refreshStats('new'), byDefault: false, feeds: ['parse'] },
 	{ key: 'topics', name: 'Тематики и проценты', flag: '--topics-only', run: refreshTopics, byDefault: true, feeds: ['parse'] },
 	{ key: 'summary', name: 'Краткие описания', flag: '--summary-only', run: refreshSummaries, byDefault: true, feeds: ['parse'] },
+	// Оба предыдущих шага сразу, одним запросом к модели на пак. Своего ключа
+	// у него нет нарочно: выбирают не его, а те два, — а он получается сам,
+	// когда выбраны оба (см. selectedSteps)
+	{ key: 'analyze', name: 'Проценты и описания', flag: '--analyze', run: refreshAnalysis, byDefault: false, feeds: ['parse'] },
 	{ key: 'logos', name: 'Логотипы', flag: '--logos', run: fetchLogos, byDefault: false, feeds: ['parse'] },
 	{ key: 'specials', name: 'Спецвопросы', flag: '--specials', run: fetchSpecials, byDefault: false, feeds: ['parse'] },
-	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', run: recalcAll, byDefault: false, after: ['stats', 'statsnew', 'topics'] },
+	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', run: recalcAll, byDefault: false, after: ['stats', 'statsnew', 'topics', 'analyze'] },
 ];
 
 /** Какие шаги делать: по флагам, по списку --steps= или, если не сказано, обычный полный проход. */
 function selectedSteps() {
 	const asked = new Set(text('steps').split(',').map(s => s.trim()).filter(Boolean));
 	const chosen = STEPS.filter(step => asked.has(step.key) || has(step.flag));
-	const steps = chosen.length > 0 ? chosen : STEPS.filter(step => step.byDefault);
+	let steps = chosen.length > 0 ? chosen : STEPS.filter(step => step.byDefault);
 
 	// Полный обход статистики спрашивает и про новых тоже: делать рядом с ним ещё
 	// и короткий проход означало бы спросить их дважды
-	return steps.some(step => step.key === 'stats')
-		? steps.filter(step => step.key !== 'statsnew')
-		: steps;
+	if (steps.some(step => step.key === 'stats')) {
+		steps = steps.filter(step => step.key !== 'statsnew');
+	}
+
+	// Проценты и описания вместе — это один шаг, а не два: вопрос к модели у них
+	// общий (список тем пака), и задать его дважды означало бы вдвое быстрее
+	// исчерпать суточный лимит, который считает запросы (см. refreshAnalysis)
+	if (steps.some(step => step.key === 'topics') && steps.some(step => step.key === 'summary')) {
+		const analyze = STEPS.find(step => step.key === 'analyze');
+		steps = steps.filter(step => step.key !== 'topics' && step.key !== 'summary');
+		steps = [...steps, analyze].sort((a, b) => STEPS.indexOf(a) - STEPS.indexOf(b));
+	}
+
+	// Обсуждение по автору или по номеру пака не спрашивают: обход ВК читает тему
+	// целиком, и сузить его нечем. Точечное обновление — это про то, что уже
+	// в базе, поэтому шаг молча не пропускается, а называется вслух
+	if (targeted && steps.some(step => step.key === 'vk')) {
+		console.log('[ВК] обход обсуждений пропускаю: названы отдельные паки, а тему по ним не отобрать.');
+		steps = steps.filter(step => step.key !== 'vk');
+	}
+
+	return steps;
 }
 
 const steps = selectedSteps();

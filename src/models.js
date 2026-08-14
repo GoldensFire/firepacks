@@ -132,6 +132,28 @@ export function quotaDay(at = Date.now()) {
 	}).format(new Date(at));
 }
 
+/**
+ * Даёт ли ключ поиск Google.
+ *
+ * Спросить об этом нечем — только попробовать: у ключа без поиска первый же
+ * запрос с ним отвечает 429, будто кончилась суточная квота (см. gemini.js).
+ * Запрос при этом тратится. Один такой на весь запуск не жалко, но индексатор
+ * запускается и по десять раз за ночь, а точечное обновление — сколько угодно,
+ * и каждый запуск начинал бы с одного и того же выброшенного запроса.
+ *
+ * Поэтому отказ запоминается на сутки: сегодня больше не пробуем, завтра
+ * пробуем снова — платный тариф могли и включить.
+ */
+const SEARCH_KEY = 'gemini_search_refused';
+
+export function searchRefused() {
+	return getSetting(SEARCH_KEY) === quotaDay();
+}
+
+export function noteSearchRefused() {
+	setSetting(SEARCH_KEY, quotaDay());
+}
+
 const bumpRequests = db.prepare(`
 	INSERT INTO gemini_usage (day, model, requests) VALUES (?, ?, 1)
 	ON CONFLICT (day, model) DO UPDATE SET requests = requests + 1

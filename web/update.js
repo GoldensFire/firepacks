@@ -151,11 +151,12 @@ function renderStatus(state) {
 
 	$('start').disabled = running;
 	$('stop').disabled = !running;
-	// Выкладка и обновление ходят в одну и ту же базу, и разом им нельзя:
+	// Отправка и обновление ходят в одну и ту же базу, и разом им нельзя:
 	// сервер всё равно откажет, но мёртвая кнопка честнее отказа
 	$('deploy').disabled = running;
 
-	for (const id of ['reparse', 'retry', 'retopics', 'resummary', 'upgrade', 'serial', 'limit', 'pages', 'model']) {
+	for (const id of ['reparse', 'retry', 'retopics', 'resummary', 'upgrade', 'serial', 'limit', 'pages', 'model',
+		'packs', 'authors', 'force']) {
 		$(id).disabled = running;
 	}
 
@@ -339,6 +340,11 @@ async function start() {
 			model: $('model').value,
 			limit: $('limit').value,
 			pages: $('pages').value,
+			packs: $('packs').value,
+			authors: $('authors').value,
+			// «Переделать всё заново» имеет смысл только вместе с названными паками:
+			// по всей базе это значило бы переспросить пять тысяч паков разом
+			force: $('force').checked && Boolean($('packs').value.trim() || $('authors').value.trim()),
 		},
 	};
 
@@ -367,11 +373,12 @@ async function start() {
 }
 
 /**
- * Ручная выкладка на Cloudflare. Спрашиваем перед запуском: это единственная
- * кнопка на странице, которая меняет что-то за пределами этого компьютера.
+ * Повторная отправка на сайт — для случая, когда прошлая не доехала. Обычное
+ * обновление зовёт то же самое своим последним шагом и ни о чём не спрашивает:
+ * база одна, и её изменение и есть изменение сайта.
  */
 async function deploy() {
-	if (!confirm('Выложить нынешнюю базу и сайт на Cloudflare?')) {
+	if (!confirm('Отправить на сайт то, что дома есть, а наверху нет?')) {
 		return;
 	}
 
@@ -405,6 +412,19 @@ async function init() {
 	$('stop').addEventListener('click', stop);
 	$('deploy').addEventListener('click', deploy);
 	$('model').addEventListener('change', () => loadModels());
+
+	// Страница пака и страница автора приводят сюда с уже названными паками:
+	// «обнови вот этот». Заполняем поля из адреса, а запускает человек сам —
+	// посмотрев, что именно отмечено
+	const query = new URLSearchParams(window.location.search);
+
+	if (query.get('packs')) {
+		$('packs').value = query.get('packs');
+	}
+
+	if (query.get('authors')) {
+		$('authors').value = query.get('authors');
+	}
 
 	const info = await (await fetch('/api/update/steps')).json();
 	steps = info.steps;

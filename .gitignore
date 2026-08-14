@@ -17,6 +17,8 @@ data/state-stage/
 # Прежняя здешняя база, отодвинутая сверкой, и отметка о том, какой свёрток
 # с полки здесь развёрнут: и то, и другое своё у каждой машины.
 data/sibase.prev.db
+data/sibase.prev.db-shm
+data/sibase.prev.db-wal
 data/state-mark.json
 
 # Отчёты о ночных обходах: у каждой машины свои

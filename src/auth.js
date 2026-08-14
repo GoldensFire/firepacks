@@ -124,6 +124,15 @@ function cookieHeader(name, value, maxAgeSeconds) {
 	return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax${secure}${age}`;
 }
 
+/**
+ * Хозяин ли это сайта — тот, чей Discord назван в config.adminIds.
+ *
+ * Сверяется именно Discord-идентификатор, а не номер строки в таблице users:
+ * строки заводятся по мере того, как люди входят, и у одного и того же человека
+ * дома и на хостинге номера разные. Discord-номер один и тот же везде и навсегда.
+ */
+export const isAdmin = discordId => config.adminIds.includes(String(discordId));
+
 /** Кто прислал запрос, или null. Заодно изредка подчищает истёкшие сессии. */
 export function currentUser(request) {
 	const token = parseCookies(request)[SESSION_COOKIE];
@@ -152,6 +161,7 @@ export function currentUser(request) {
 	return {
 		id: row.id,
 		discordId: row.discord_id,
+		admin: isAdmin(row.discord_id),
 		name: row.global_name || row.username,
 		avatar: row.avatar
 			? `https://cdn.discordapp.com/avatars/${row.discord_id}/${row.avatar}.png?size=64`

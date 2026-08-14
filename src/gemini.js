@@ -1,7 +1,7 @@
 // Определение тематики тем через Gemini. Темы уходят пачками, ответ приходит строгим JSON.
 
 import { config, EXCLUSIVE_TOPIC_KEYS, OTHER_KINDS, OTHER_KIND_KEYS, GENRES, MUSIC_KEY, isGenre } from './config.js';
-import { currentModel, modelInfo, noteRequest, noteQuotaHit, noteUnavailable } from './models.js';
+import { currentModel, modelInfo, noteRequest, noteQuotaHit, noteUnavailable, searchRefused, noteSearchRefused } from './models.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -191,8 +191,42 @@ const GENRE_LIST = Object.keys(GENRES)
 	.map(topic => `${topic}: ${genreList(topic)}`)
 	.join('\n');
 
-const INSTRUCTION = `Ты разбираешь темы из пакетов вопросов для игры «Своя игра».
-Для каждой темы определи, о чём она, и выбери ровно одну категорию (поле c):
+/**
+ * Куда смотреть за тем, чего модель не знает.
+ *
+ * Половина паков написана про то, что вышло позже, чем кончились данные модели,
+ * а вторая половина — про то, что и в свежих данных лежит в одном экземпляре:
+ * ранобэ без экранизации, инди-игра, сериал одной страны. Раньше на таких темах
+ * модель угадывала по звучанию названия — и «Sousou no Frieren» становилась игрой,
+ * а «Дюна» то книгой, то фильмом наугад. Поэтому ей дан поиск (см. groundingTools),
+ * а здесь сказано, где искать: без этого она гуглит само название темы, а названия
+ * тем в «Своей игре» шуточные и в поиске не значат ничего.
+ */
+const SOURCES = `Чего не знаешь — посмотри, а не угадывай:
+- Тебе разрешено открывать страницы в интернете (url_context), а иногда и искать
+  (google_search). Незнакомое название, спор «это аниме или игра», два разных
+  произведения под одним именем, вышедшее после того, как кончились твои
+  данные, — всё это поводы посмотреть, а не гадать.
+- Смотри не по названию темы, а по тому, что за ней стоит: названия тем в «Своей
+  игре» шуточные и в поиске не значат ничего. Ищи по ответам — по именам,
+  которые в них названы.
+- Адреса, которые точно открываются, — подставь свой запрос вместо ЗАПРОС:
+  веб-поиск: https://duckduckgo.com/html/?q=ЗАПРОС
+  Википедия: https://ru.wikipedia.org/w/index.php?search=ЗАПРОС
+  К запросу добавляй слово, отсекающее лишнее: «аниме», «игра», «фильм», «книга».
+- Дальше иди по ссылкам из найденного, по своему делу: аниме и манга —
+  shikimori.one (у него есть и открытое API: https://shikimori.one/api/animes?search=…),
+  myanimelist.net, anilist.co; кино и сериалы — Кинопоиск, IMDb, Википедия;
+  игры — Steam, IGDB, вики на Fandom; книги — LiveLib, «Фантлаб», Goodreads.
+  Какой-то из сайтов не открылся — это обычное дело, возьми другой.
+- Выясняй не только то, что произведение существует, но и то, чем оно является:
+  аниме, игра, фильм, книга. Ровно из этого и следует категория.
+- Смотри только непонятное, и лучше одним заходом на весь пак, а не по заходу
+  на тему. Про то, что знаешь и так, ходить никуда не надо.
+- Ничего не нашлось — отвечай пустыми строками, как и велено ниже. Выдумка хуже
+  молчания.`;
+
+const THEME_RULES = `Для каждой темы определи, о чём она, и выбери ровно одну категорию (поле c):
 
 anime    — аниме, манга, японская анимация, персонажи и сэйю аниме
 games    — компьютерные, мобильные, консольные и настольные игры, киберспорт, персонажи игр
@@ -267,7 +301,13 @@ Kyojin». У other — область, которой тема посвящен�
   где произведение названо прямо в ответах, ты прячешь повтор, которого не увидит никто.
 - Ответы важнее названия темы: названия часто шуточные и ничего не значат.
 - Если тема смешанная или непонятная — c=other. Не угадывай.
-- Ответь массивом JSON, по объекту на каждую тему, в том же порядке.`;
+
+${SOURCES}`;
+
+const INSTRUCTION = `Ты разбираешь темы из пакетов вопросов для игры «Своя игра».
+${THEME_RULES}
+
+Ответь массивом JSON, по объекту на каждую тему, в том же порядке.`;
 
 const SCHEMA = {
 	type: 'ARRAY',
@@ -316,15 +356,101 @@ function thinkingConfig() {
 	return version >= 3 ? { thinkingLevel: 'low' } : { thinkingBudget: 0 };
 }
 
-async function askOnce(prompt, schema, withThinking) {
+/**
+ * Поиск и чтение страниц, которыми модель дополняет то, чего не знает сама.
+ *
+ * Вещи это разные, и дают их по-разному. `urlContext` — открыть названный адрес;
+ * он есть у бесплатного ключа и работает всегда. `googleSearch` — настоящий поиск
+ * с грундингом; у бесплатного ключа его нет вовсе, и узнаётся это не отказом
+ * «нельзя», а внезапным 429 «кончилась квота» на первом же запросе — при том, что
+ * суточная квота самой модели цела и не тронута. Принять этот отказ за конец
+ * суток означало бы остановить весь ночной обход из-за инструмента, которого
+ * у нас и так нет (см. ask: 429 при поиске сначала выключает поиск, а не сутки).
+ *
+ * Оттого и адреса в SOURCES выбраны так, чтобы поиск был не нужен: страница
+ * выдачи DuckDuckGo и поиск по Википедии открываются самим url_context, и модель
+ * ищет через них, даже когда googleSearch недоступен.
+ *
+ * Все три выключателя щёлкаются сами, по первому отказу, и на весь запуск.
+ */
+let searchOff = searchRefused();
+let browseOff = false;
+let searchSchemaOff = false;
+
+/** Пользуемся ли внешними источниками в этом запросе. */
+const grounded = search => Boolean(search) && config.geminiSearch !== false && !(searchOff && browseOff);
+
+/** Инструменты этого запроса — из тех, что ещё не выключились отказом. */
+function groundingTools() {
+	const tools = [];
+
+	if (!searchOff) {
+		tools.push({ googleSearch: {} });
+	}
+
+	if (!browseOff) {
+		tools.push({ urlContext: {} });
+	}
+
+	return tools;
+}
+
+/** Куда модель ходила: и запросы в поиск, и открытые страницы — одним списком для лога. */
+function groundingTrace(candidate) {
+	const queries = candidate?.groundingMetadata?.webSearchQueries ?? [];
+	const urls = (candidate?.urlContextMetadata?.urlMetadata ?? [])
+		.filter(item => item.urlRetrievalStatus === 'URL_RETRIEVAL_STATUS_SUCCESS')
+		.map(item => item.retrievedUrl);
+
+	return [...queries, ...urls];
+}
+
+/**
+ * Ответ без схемы приходит обычным текстом, и модель нет-нет да и обернёт его
+ * в ```json. Достаём из строки первый же объект или массив.
+ */
+function parseLoose(text) {
+	const clean = text.replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '').trim();
+
+	try {
+		return JSON.parse(clean);
+	} catch {
+		// оставляем как есть: попробуем вырезать из середины
+	}
+
+	const start = clean.search(/[[{]/);
+	const end = Math.max(clean.lastIndexOf(']'), clean.lastIndexOf('}'));
+
+	if (start === -1 || end <= start) {
+		throw new GeminiError(`ответ не разобрать как JSON: ${clean.slice(0, 200)}`, 0);
+	}
+
+	return JSON.parse(clean.slice(start, end + 1));
+}
+
+/**
+ * @returns {Promise<{value: any, queries: string[]}>} разобранный ответ и то,
+ *   что модель искала в поиске: по этому списку видно, гуглит ли она нужное
+ */
+async function askOnce(prompt, schema, options = {}) {
+	const search = grounded(options.search);
+	const withSchema = Boolean(schema) && !(search && searchSchemaOff);
+
 	const body = {
-		contents: [{ role: 'user', parts: [{ text: prompt }] }],
+		contents: [{
+			role: 'user',
+			parts: [{
+				text: withSchema
+					? prompt
+					: `${prompt}\n\nОтветь одним только JSON — без пояснений до и после и без разметки \`\`\`.`,
+			}],
+		}],
 		generationConfig: {
 			temperature: 0,
-			responseMimeType: 'application/json',
-			responseSchema: schema,
-			...(withThinking ? {} : { thinkingConfig: thinkingConfig() }),
+			...(withSchema ? { responseMimeType: 'application/json', responseSchema: schema } : {}),
+			...(options.withThinking ? {} : { thinkingConfig: thinkingConfig() }),
 		},
+		...(search ? { tools: groundingTools() } : {}),
 	};
 
 	const model = activeModel();
@@ -347,7 +473,10 @@ async function askOnce(prompt, schema, withThinking) {
 		throw new GeminiError(`пустой ответ (${candidate?.finishReason ?? 'без причины'})`, 0);
 	}
 
-	return JSON.parse(text);
+	return {
+		value: withSchema ? JSON.parse(text) : parseLoose(text),
+		queries: groundingTrace(candidate),
+	};
 }
 
 /**
@@ -364,17 +493,48 @@ let allowThinkingOff = true;
  */
 const MAX_QUOTA_WAIT_MS = 30_000;
 
-async function ask(prompt, schema) {
+async function ask(prompt, schema, options = {}) {
 	let lastError = null;
 
 	for (let attempt = 1; attempt <= config.geminiRetries; attempt++) {
 		try {
-			return await askOnce(prompt, schema, !allowThinkingOff);
+			return await askOnce(prompt, schema, { ...options, withThinking: !allowThinkingOff });
 		} catch (error) {
 			lastError = error;
 
+			// Попытки, потраченные на то, чтобы выяснить, чего эта модель не умеет,
+			// в счёт повторов не идут: каждый выключатель щёлкается один раз за
+			// запуск, а вот повторов на настоящую ошибку иначе не осталось бы вовсе
+			if ((error.status === 400 || error.status === 429) && grounded(options.search)) {
+				// Поиска у бесплатного ключа нет, и говорит он об этом отказом
+				// «кончилась квота» — при нетронутой суточной квоте самой модели.
+				// Поэтому первым делом снимается он: если дело и вправду в сутках,
+				// тот же отказ придёт и без поиска, и разберётся с ним общий разбор
+				// 429 ниже. Иначе одного этого хватало, чтобы объявить ночь
+				// законченной, не разметив ни единого пака.
+				if (!searchOff) {
+					searchOff = true;
+					noteSearchRefused();
+					attempt--;
+					continue;
+				}
+
+				if (error.status === 400 && !searchSchemaOff && schema) {
+					searchSchemaOff = true;
+					attempt--;
+					continue;
+				}
+
+				if (error.status === 400) {
+					browseOff = true;
+					attempt--;
+					continue;
+				}
+			}
+
 			if (allowThinkingOff && error.status === 400) {
 				allowThinkingOff = false;
+				attempt--;
 				continue;
 			}
 
@@ -429,13 +589,15 @@ async function ask(prompt, schema) {
 }
 
 async function askBatch(batch) {
-	const parsed = await ask(buildPrompt(batch), SCHEMA);
+	// Поиск нужен именно здесь: категория темы и есть тот ответ, ради которого
+	// стоит сходить на shikimori — «это аниме или игра» по названию не видно
+	const { value } = await ask(buildPrompt(batch), SCHEMA, { search: true });
 
-	if (!Array.isArray(parsed)) {
+	if (!Array.isArray(value)) {
 		throw new GeminiError('ответ не является массивом', 0);
 	}
 
-	return parsed;
+	return value;
 }
 
 /**
@@ -457,6 +619,67 @@ function cleanFranchise(value) {
 	}
 
 	return name.slice(0, 60);
+}
+
+/** Разметка темы, про которую модель ничего не сказала. */
+const UNMARKED = {
+	category: 'other',
+	music: false,
+	franchise: '',
+	franchiseEn: '',
+	kind: '',
+	genre: '',
+	musicGenre: '',
+};
+
+/**
+ * Раскладывает ответы модели по ключам тем и отсеивает всё, чего в списках нет.
+ *
+ * Вынесено отдельно, потому что ответ про темы приходит двумя путями: своим
+ * запросом (classifyThemes) и вместе с описанием пака одним запросом на всё
+ * (analyzePack). Проверять чужие слова оба должны совершенно одинаково.
+ *
+ * @param {Array} batch темы в том порядке, в каком они уехали к модели
+ * @param {Array} answers объекты ответа
+ * @param {Map} result куда складывать
+ */
+function collectMarks(batch, answers, result = new Map()) {
+	for (const answer of answers) {
+		const theme = batch[answer?.i];
+
+		if (theme && EXCLUSIVE_TOPIC_KEYS.includes(answer.c)) {
+			result.set(theme.key, {
+				category: answer.c,
+				music: answer.m === true,
+				// Предмет спрашивается у всех категорий, включая «прочее»: пак
+				// целиком про футбол или про Вархаммер — такой же пак про одно,
+				// как аниме-пак про «Наруто», и раньше он не получал ничего
+				franchise: cleanFranchise(answer.f),
+				// Второе написание нужно не для показа, а чтобы связать между собой
+				// темы, названные по-разному (см. franchise.js)
+				franchiseEn: cleanFranchise(answer.fe),
+				// Вид «прочего»: чем эта общая куча оказалась на деле — стримерами,
+				// историей, спортом. У остальных категорий вида нет и быть не должно
+				kind: answer.c === 'other' && OTHER_KIND_KEYS.includes(answer.k) ? answer.k : '',
+				// Жанр внутри тематики: чем один аниме-пак отличается от другого.
+				// Годится только жанр из списка своей категории — «detective»
+				// у категории games означал бы, что модель ответила невпопад
+				genre: isGenre(answer.c, answer.g) ? answer.g : '',
+				// Жанр музыки спрашивается отдельно и живёт отдельно: тема
+				// с опенингами — это и аниме (genre), и анисонг (musicGenre)
+				musicGenre: answer.m === true && isGenre(MUSIC_KEY, answer.gm) ? answer.gm : '',
+			});
+		}
+	}
+
+	// Темы, по которым модель промолчала, считаем неопределёнными
+	for (const theme of batch) {
+		if (!result.has(theme.key)) {
+			result.set(theme.key, { ...UNMARKED });
+		}
+	}
+
+	return result;
 }
 
 /**
@@ -503,48 +726,7 @@ export async function classifyThemes(themes, options = {}) {
 			throw error;
 		}
 
-		for (const answer of answers) {
-			const theme = batch[answer.i];
-
-			if (theme && EXCLUSIVE_TOPIC_KEYS.includes(answer.c)) {
-				result.set(theme.key, {
-					category: answer.c,
-					music: answer.m === true,
-					// Предмет спрашивается у всех категорий, включая «прочее»: пак
-					// целиком про футбол или про Вархаммер — такой же пак про одно,
-					// как аниме-пак про «Наруто», и раньше он не получал ничего
-					franchise: cleanFranchise(answer.f),
-					// Второе написание нужно не для показа, а чтобы связать между собой
-					// темы, названные по-разному (см. franchise.js)
-					franchiseEn: cleanFranchise(answer.fe),
-					// Вид «прочего»: чем эта общая куча оказалась на деле — стримерами,
-					// историей, спортом. У остальных категорий вида нет и быть не должно
-					kind: answer.c === 'other' && OTHER_KIND_KEYS.includes(answer.k) ? answer.k : '',
-					// Жанр внутри тематики: чем один аниме-пак отличается от другого.
-					// Годится только жанр из списка своей категории — «detective»
-					// у категории games означал бы, что модель ответила невпопад
-					genre: isGenre(answer.c, answer.g) ? answer.g : '',
-					// Жанр музыки спрашивается отдельно и живёт отдельно: тема
-					// с опенингами — это и аниме (genre), и анисонг (musicGenre)
-					musicGenre: answer.m === true && isGenre(MUSIC_KEY, answer.gm) ? answer.gm : '',
-				});
-			}
-		}
-
-		// Темы, по которым модель промолчала, считаем неопределёнными
-		for (const theme of batch) {
-			if (!result.has(theme.key)) {
-				result.set(theme.key, {
-					category: 'other',
-					music: false,
-					franchise: '',
-					franchiseEn: '',
-					kind: '',
-					genre: '',
-					musicGenre: '',
-				});
-			}
-		}
+		collectMarks(batch, answers, result);
 
 		done += batch.length;
 
@@ -562,14 +744,7 @@ export async function classifyThemes(themes, options = {}) {
 	return result;
 }
 
-const SUMMARY_INSTRUCTION = `Ты описываешь пакеты вопросов для игры «Своя игра».
-Нужна одна короткая фраза, по которой человек поймёт, что внутри пака.
-
-Тебе дают название пака, теги и список тем. У каждой темы после тире идёт
-выжимка её содержимого: ответы на вопросы и куски самих вопросов, через « / ».
-Именно она и говорит, о чём пак на самом деле.
-
-Правила:
+const SUMMARY_RULES = `Правила:
 - Не длиннее 70 знаков, с большой буквы, без точки в конце.
 - Суть определяй по выжимке — по ответам и текстам вопросов. Названия тем и пака
   в «Своей игре» сплошь шуточные и к содержимому отношения не имеют: тема
@@ -583,11 +758,88 @@ const SUMMARY_INSTRUCTION = `Ты описываешь пакеты вопрос
 - Не перечисляй темы подряд и не пиши «пак про» — сразу называй суть.
 - Пиши по-русски.`;
 
+/**
+ * Кому этот пак: возраст и пол тех, кому он интересен.
+ *
+ * Спрашивается вместе с описанием и по тому же списку тем — это ещё одна вещь
+ * про весь пак целиком, а не про отдельную тему, и отдельного запроса она
+ * не стоит (суточный лимит считает запросы, см. analyzePack).
+ *
+ * Это не статистика игроков и не может ею быть: сколько лет тем, кто запускал
+ * пак, не знает никто. Это оценка по содержимому — по годам вышедших игр
+ * и фильмов, по интернет-культуре, по тому, школьная это программа или взрослая
+ * эрудиция. Ровно так её и надо читать на карточке.
+ */
+const AUDIENCE_RULES = `Правила:
+- Возраст называй промежутком в годах: нижняя граница — поле af, верхняя — at.
+  Промежуток должен быть узким, лет в семь-десять: «18–25», «25–35», «12–18».
+  «10–60» не говорит ничего и потому не годится.
+- Доля мужчин — поле mp, целые проценты. Женщины — всё остальное до ста,
+  называть их отдельно не надо.
+- Суди по содержимому: по названиям тем, текстам вопросов и ответам. Картинок,
+  видео и звука из пака тебе не показывают, и судить по ним нельзя; по тому, как
+  пак выглядит, — тоже.
+- Гляди на годы вышедших игр, фильмов и музыки, на интернет-культуру, на общую
+  направленность: видеоигры, киберспорт, спорт, аниме, музыка, кино и сериалы,
+  технологии, литература, школьная программа, взрослая эрудиция.
+- Оценивай весь пак целиком, а не отдельную тему: одна тема про аниме
+  не делает аниме-паком пак про историю.
+- Не выдумывай того, чего в паке нет. Но и не отказывайся: даже когда трудно,
+  назови самое вероятное — пустых значений здесь не бывает.`;
+
+const SUMMARY_INSTRUCTION = `Ты описываешь пакеты вопросов для игры «Своя игра».
+Работы две, и делаются они по одному и тому же списку тем.
+
+Тебе дают название пака, теги и список тем. У каждой темы после тире идёт
+выжимка её содержимого: ответы на вопросы и куски самих вопросов, через « / ».
+Именно она и говорит, о чём пак на самом деле.
+
+ПЕРВОЕ — опиши весь пак одной короткой фразой (поле s): по ней человек поймёт,
+что внутри.
+${SUMMARY_RULES}
+
+ВТОРОЕ — назови целевую аудиторию пака: возраст и пол тех, кому он интересен.
+${AUDIENCE_RULES}`;
+
+const AUDIENCE_FIELDS = {
+	af: { type: 'INTEGER' },
+	at: { type: 'INTEGER' },
+	mp: { type: 'INTEGER' },
+};
+
 const SUMMARY_SCHEMA = {
 	type: 'OBJECT',
-	properties: { s: { type: 'STRING' } },
-	required: ['s'],
+	properties: { s: { type: 'STRING' }, ...AUDIENCE_FIELDS },
+	required: ['s', 'af', 'at', 'mp'],
 };
+
+/** Крайние значения, за которыми ответ модели считается промахом, а не оценкой. */
+const AGE_MIN = 6;
+const AGE_MAX = 70;
+
+/**
+ * Проверяет возраст и пол, названные моделью.
+ *
+ * Всё, что не разобралось, обнуляется целиком: половина оценки — «возраст есть,
+ * пола нет» — на карточке не значит ничего, а место занимает.
+ *
+ * @returns {{from: number, to: number, male: number}|null}
+ */
+function cleanAudience(answer) {
+	const from = Math.round(Number(answer?.af));
+	const to = Math.round(Number(answer?.at));
+	const male = Math.round(Number(answer?.mp));
+
+	if (![from, to, male].every(Number.isFinite)) {
+		return null;
+	}
+
+	if (from < AGE_MIN || to > AGE_MAX || from > to || male < 0 || male > 100) {
+		return null;
+	}
+
+	return { from, to, male };
+}
 
 /**
  * Краткая суть пака одной строкой: «Вселенная Гарри Поттера», «Логотипы компаний».
@@ -597,8 +849,12 @@ const SUMMARY_SCHEMA = {
  * Без неё описание получалось про названия, а названия тем в «Своей игре» шуточные
  * и о содержимом не говорят ничего.
  *
+ * Заодно тем же запросом спрашивается целевая аудитория пака (см. AUDIENCE_RULES):
+ * вопрос задаётся по тому же списку тем, и отдельного запроса он не стоит.
+ *
  * @param {{name: string, tags: string[], themes: Array<{name: string, sample: string}>}} pack
- * @returns {Promise<string>} описание или пустая строка, если сказать нечего
+ * @returns {Promise<{summary: string, audience: {from: number, to: number, male: number}|null}>}
+ *   описание (пустая строка, если сказать нечего) и оценка аудитории
  */
 export async function describePack(pack) {
 	const themes = pack.themes.slice(0, config.summaryThemeLimit).map(theme => {
@@ -610,23 +866,127 @@ export async function describePack(pack) {
 	// тем ничем не заслужил остаться единственным без описания, а сказать по одному
 	// названию модели чаще всего есть что; не найдёт смысла — вернёт пустую строку.
 	if (themes.length === 0 && !pack.name) {
-		return '';
+		return { summary: '', audience: null };
 	}
 
-	const tags = pack.tags?.length > 0 ? `\nТеги: ${pack.tags.join(', ')}` : '';
 	const cut = pack.themes.length > themes.length ? `\n(и ещё ${pack.themes.length - themes.length} тем)` : '';
 	const list = themes.length > 0
 		? `\nТемы:\n${themes.join('\n')}${cut}`
 		: '\n(тем в паке разобрать не удалось: суди по названию и тегам, а не найдёшь смысла — верни пустую строку)';
-	const prompt = `${SUMMARY_INSTRUCTION}\n\nПак: «${pack.name}»${tags}${list}`;
+	const prompt = `${SUMMARY_INSTRUCTION}\n\nПак: «${pack.name}»${packTags(pack)}${list}`;
 
-	const answer = await ask(prompt, SUMMARY_SCHEMA);
+	const { value } = await ask(prompt, SUMMARY_SCHEMA);
 
-	// Модель нет-нет да и обернёт фразу в кавычки или закончит точкой
-	return String(answer?.s ?? '')
+	return { summary: cleanSummary(value?.s), audience: cleanAudience(value) };
+}
+
+/** Теги пака строкой для запроса — одинаково у обоих способов спросить. */
+const packTags = pack => (pack.tags?.length > 0 ? `\nТеги: ${pack.tags.join(', ')}` : '');
+
+/** Модель нет-нет да и обернёт фразу в кавычки или закончит точкой. */
+function cleanSummary(value) {
+	return String(value ?? '')
 		.replace(/\s+/g, ' ')
 		.trim()
 		.replace(/^[«"']|[»"']$/g, '')
 		.replace(/\.$/, '')
 		.slice(0, 120);
+}
+
+// ————— всё про пак одним запросом —————
+
+const ANALYZE_INSTRUCTION = `Ты разбираешь пакет вопросов для игры «Своя игра».
+Работы три, и делаются они за один раз, по одному и тому же списку тем.
+
+ПЕРВОЕ — разбери темы пака по одной.
+${THEME_RULES}
+
+ВТОРОЕ — опиши весь пак одной короткой фразой (поле s): по ней человек поймёт,
+что внутри. У каждой темы после тире идёт выжимка её содержимого: ответы
+на вопросы и куски самих вопросов, через « / ». Именно она и говорит, о чём пак
+на самом деле.
+${SUMMARY_RULES}
+
+ТРЕТЬЕ — назови целевую аудиторию всего пака: возраст и пол тех, кому он интересен.
+${AUDIENCE_RULES}
+
+Ответь одним объектом JSON: поле s — фраза про весь пак, поля af, at и mp —
+про его аудиторию, поле t — массив, по объекту на каждую тему, в том же порядке,
+в каком темы даны.`;
+
+const ANALYZE_SCHEMA = {
+	type: 'OBJECT',
+	properties: {
+		s: { type: 'STRING' },
+		...AUDIENCE_FIELDS,
+		t: SCHEMA,
+	},
+	required: ['s', 'af', 'at', 'mp', 't'],
+};
+
+/**
+ * Всё, что модель может сказать про пак, за один запрос: и категория каждой темы,
+ * и краткое описание пака целиком.
+ *
+ * Зачем так. Суточный лимит бесплатного ключа считает запросы, а не темы и не
+ * токены: у лёгких моделей их пятьсот в сутки, у старших двадцать. Раньше пак
+ * стоил два запроса — один на проценты, другой на описание, — и делались они
+ * порознь, хотя вопрос задавался по одному и тому же списку тем. То есть половина
+ * суточного лимита уходила на то, чтобы отправить те же самые темы второй раз.
+ * Теперь пак стоит один запрос, и за ночь их проходит вдвое больше.
+ *
+ * Заодно от этого лучше и само описание: модель составляет его, уже разобрав
+ * каждую тему по отдельности, — а не отдельным заходом, где темы для неё снова
+ * просто список названий.
+ *
+ * Если ответ не влез (пак на две сотни тем) или сорвался — работа делается
+ * по-старому, двумя запросами. Это дороже ровно на тех паках, где случилось,
+ * и ничего не теряет.
+ *
+ * @param {{name: string, tags: string[], themes: Array}} pack темы из listThemes
+ * @returns {Promise<{marks: Map, summary: string, audience: object|null, queries: string[], split: boolean}>}
+ */
+export async function analyzePack(pack) {
+	const themes = pack.themes ?? [];
+	const list = themes.length > 0
+		? `\n\nТемы:\n${themes.map((theme, index) => {
+			const media = theme.media ? ` [в теме много: ${theme.media}]` : '';
+			const sample = theme.sample ? `\n   ответы: ${theme.sample}` : '';
+			return `${index}. «${theme.name}»${media}${sample}`;
+		}).join('\n')}`
+		: '\n\n(тем в паке разобрать не удалось: t оставь пустым массивом, а описание составь '
+			+ 'по названию и тегам — не найдёшь смысла, верни пустую строку)';
+
+	const prompt = `${ANALYZE_INSTRUCTION}\n\nПак: «${pack.name ?? ''}»${packTags(pack)}${list}`;
+
+	try {
+		const { value, queries } = await ask(prompt, ANALYZE_SCHEMA, { search: true });
+		const answers = Array.isArray(value?.t) ? value.t : [];
+
+		// Ответ короче списка тем — модель уперлась в предел длины и оборвалась
+		// на середине. Молчание про хвост тем засчиталось бы как «прочее»,
+		// и пак получил бы доли из ничего (см. classifyThemes)
+		if (answers.length < themes.length) {
+			throw new GeminiError(`ответ оборван: ${answers.length} тем из ${themes.length}`, 0);
+		}
+
+		return {
+			marks: collectMarks(themes, answers),
+			summary: cleanSummary(value?.s),
+			audience: cleanAudience(value),
+			queries,
+			split: false,
+		};
+	} catch (error) {
+		// Отвечать нечем — ключ, модель или кончившиеся лимиты: второй заход
+		// получит ровно тот же отказ, только вдвое дороже
+		if (error.fatal === true || themes.length === 0) {
+			throw error;
+		}
+
+		const marks = await classifyThemes(themes);
+		const { summary, audience } = await describePack({ ...pack, themes });
+
+		return { marks, summary, audience, queries: [], split: true, reason: error.message };
+	}
 }

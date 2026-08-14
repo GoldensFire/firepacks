@@ -215,6 +215,13 @@ function toPackage(row, counts) {
 		genres: jsonOrDefault(row.genres, []),
 		genreTopic: row.genre_topic,
 		summary: row.summary,
+		// Кому пак: возраст промежутком и доля мужчин в процентах. Это оценка
+		// модели по содержимому, а не статистика игроков, — так она и подписана
+		// на карточке. Нет хотя бы одной части — не отдаём ничего: половина
+		// оценки на карточке не значит ничего, а место занимает
+		audience: row.audience_from != null && row.audience_to != null && row.audience_male != null
+			? { from: row.audience_from, to: row.audience_to, male: row.audience_male }
+			: null,
 		// Имя выложившего наружу не отдаём: в интерфейсе это просто «Источник»
 		vkDate: row.vk_date,
 		vkTs: row.vk_ts,
@@ -752,8 +759,12 @@ export async function getFacets(db) {
 		// собирается третья полоска карточки — «какой жанр музыки»
 		genreNames: GENRES,
 		genreShare: settings.genreShare,
-		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё
+		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё.
+		// canUpdate называется прямо, а не оставляется пустым: по нему страница
+		// решает, показывать ли кнопки обновления, и «нет» должно быть сказано
+		// вслух, а не получиться само из отсутствующего поля
 		readOnly: true,
+		canUpdate: false,
 		playerUri: settings.playerUri,
 		// Прятать и отмечать без входа здесь нельзя: посетителей много, и список
 		// без хозяина оказался бы общим — один спрятал, у всех пропало

@@ -2008,18 +2008,6 @@ a.hide__item--login:hover {
 	color: var(--text);
 }
 
-/* Выкладка на сайт — не переход, а действие, и потому кнопка. Выглядеть она
-   обязана как соседние ссылки: в шапке это один ряд, и выпадающая из него
-   кнопка с рамкой читалась бы как что-то постороннее */
-.topbar__link--button {
-	padding: 0;
-	border: 0;
-	background: none;
-	font: inherit;
-	font-size: 13px;
-	cursor: pointer;
-}
-
 .update {
 	display: grid;
 	grid-template-columns: 380px 1fr;

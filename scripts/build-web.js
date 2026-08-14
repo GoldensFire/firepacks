@@ -49,10 +49,24 @@ const cachePath = path.join(root, 'data', 'thumbs');
 const SKIP = new Set(['update.html', 'update.js']);
 
 /**
+ * Счётчик посещений Cloudflare. Приписывается здесь, а не в самой вёрстке,
+ * нарочно: домашний сайт открывают тот же десяток раз в день, что и настоящий,
+ * и стой этот скрипт в web/*.html — половина статистики оказалась бы про
+ * localhost. Наверх уезжает собранная копия, её и метим.
+ *
+ * Ключ здесь не секрет и прятать его негде: он всё равно лежит открытым текстом
+ * в каждой странице сайта — этим счётчик и работает.
+ */
+const ANALYTICS = `<!-- Cloudflare Web Analytics -->`
+	+ `<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js"`
+	+ ` data-cf-beacon='{"token": "65f46cc707d64693b45688862ae8ae67"}'></script>`
+	+ `<!-- End Cloudflare Web Analytics -->`;
+
+/**
  * Скрипты и стили, к которым дописывается отпечаток содержимого. Ссылки на них
  * стоят в вёрстке, и сборка их переписывает: /app.js → /app.js?v=1a2b3c4d.
  */
-const VERSIONED = ['app.js', 'common.js', 'icons.js', 'authors.js', 'profile.js', 'style.css'];
+const VERSIONED = ['app.js', 'common.js', 'icons.js', 'card.js', 'pack.js', 'authors.js', 'profile.js', 'style.css'];
 
 /**
  * Значок туда же, хотя лежит он не в web, а в корне проекта. Имя у него одно
@@ -180,6 +194,11 @@ async function main() {
 			html = html.replaceAll(`"/${asset}"`, `"/${asset}?v=${stamp}"`);
 		}
 
+		// Счётчик посещений — последним, перед самым закрытием страницы: грузится
+		// он со стороны и к тому, что показано, отношения не имеет, поэтому ждать
+		// его вёрстке незачем
+		html = html.replace('</body>', `${ANALYTICS}\n</body>`);
+
 		fs.writeFileSync(file, html, 'utf8');
 	}
 
@@ -241,7 +260,7 @@ async function main() {
 	const weigh = directory => fs.readdirSync(directory)
 		.reduce((sum, name) => sum + fs.statSync(path.join(directory, name)).size, 0);
 
-	console.log(`  вёрстка: ${pages} файл(ов)`);
+	console.log(`  вёрстка: ${pages} файл(ов), со счётчиком посещений`);
 	console.log(`  обложки: ${reused} готовых, ${resized} уменьшено, ${failed.length} не вышло, ${missing} не нашлось`
 		+ `${swept > 0 ? `, ${swept} лишних убрано со склада` : ''}`);
 	console.log(`Собрано в cf/public, обложки весят ${(weigh(thumbsPath) / 1024 / 1024).toFixed(1)} МБ.`);

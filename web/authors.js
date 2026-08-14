@@ -15,7 +15,7 @@
  * браузер: пять тысяч строк это несколько сотен килобайт, они уже здесь,
  * и ходить за каждой страницей на сервер незачем.
  */
-const state = { period: 'all', page: 1, search: '' };
+const state = { period: 'all', page: 1, search: '', sort: 'games' };
 
 /** Сколько авторов на странице. Двести — столько же, сколько было во всём топе, когда он обрывался. */
 const PAGE_SIZE = 200;
@@ -30,6 +30,67 @@ const PERIOD_NAMES = {
 };
 
 const PERIOD_DAYS = { year: 365, half: 182, month: 30 };
+
+/**
+ * По чему считать топ. Число игр отвечает на вопрос «кого играют больше всех»,
+ * и человек с тремя сотнями паков стоит в нём выше того, чей единственный пак
+ * разошёлся по всему СНГ. Среднее за пак отвечает на другой вопрос — «чей пак
+ * стоит взять наугад», — и топ по нему выглядит совсем иначе.
+ *
+ * Сортировка идёт по всему списку, а не по странице: он приезжает целиком.
+ * Места считаются заново под выбранный порядок — «третий по среднему» и «третий
+ * по числу игр» это разные третьи, и показывать под ними одно и то же место
+ * было бы враньём.
+ */
+const SORTS = {
+	games: author => author.games,
+	average: author => averageOf(author),
+	packs: author => author.packs,
+};
+
+const SORT_NAMES = {
+	games: 'по числу игр',
+	average: 'по играм в среднем за пак',
+	packs: 'по числу паков',
+};
+
+/** Сколько игр приходится на один пак автора. */
+function averageOf(author) {
+	return author.packs > 0 ? author.games / author.packs : 0;
+}
+
+/**
+ * Среднее словами. Дробная часть нужна только маленьким числам: «3,4 игры
+ * на пак» и «3 игры на пак» — разные вещи, а «1247,3» — то же самое, что «1247»,
+ * только длиннее.
+ */
+function formatAverage(value) {
+	return value >= 10 ? formatNumber(Math.round(value)) : (Math.round(value * 10) / 10).toLocaleString('ru-RU');
+}
+
+/**
+ * Отсортированный список держим готовым: он не меняется, пока не сменились
+ * порядок или период, а перекладывать пять тысяч строк на каждую букву в поиске
+ * незачем. Сбрасывается в null — «пересортировать при следующем показе».
+ */
+let ordered = null;
+
+function ordering() {
+	if (!ordered) {
+		ordered = ranked();
+	}
+
+	return ordered;
+}
+
+/** Список в выбранном порядке, с проставленными местами. */
+function ranked() {
+	const by = SORTS[state.sort] ?? SORTS.games;
+
+	return [...data.authors]
+		.sort((a, b) => by(b) - by(a) || b.games - a.games || a.name.localeCompare(b.name, 'ru'))
+		.map((author, index) => ({ ...author, place: index + 1 }));
+}
 
 /** Начало периода: «за год» — это паки, выложенные после этой даты. */
 function periodStart(days) {
@@ -48,7 +109,15 @@ function renderHint() {
 		? `Найдено авторов: ${formatNumber(found.length)} из ${formatNumber(data.total)}. Места — из общего топа. `
 		: `Всего авторов: ${formatNumber(data.total)}, по ${PAGE_SIZE} на странице — список полный, а не первая сотня. `;
 
-	$('periodHint').textContent = all + (days
+	// Среднее за пак спрашивают не о том же, о чём общее число игр, и об этом
+	// стоит сказать прямо: наверху такого топа стоят авторы с одним-двумя паками,
+	// и без объяснения это выглядит ошибкой, а не ответом
+	const mean = state.sort === 'average'
+		? 'Порядок — по играм в среднем за пак: сколько раз запускали типичный пак автора, а не все его паки вместе. '
+			+ 'Поэтому наверху бывает и тот, у кого пак всего один: список отвечает на вопрос «чей пак стоит взять наугад». '
+		: '';
+
+	$('periodHint').textContent = all + mean + (days
 		? `Считаются паки, выложенные в обсуждение после ${periodStart(days)}, а игры у них — за всё время: `
 			+ 'сколько раз пак запускали именно за период, сервис статистики не сообщает. '
 			+ 'То есть это «чьи свежие паки играют больше всех», а не «кого больше играли этой весной».'
@@ -85,11 +154,20 @@ function createRow(author) {
 	const games = element('span', 'authors__games');
 	games.append(element('b', null, formatNumber(author.games)), document.createTextNode(
 		` ${plural(author.games, 'игра', 'игры', 'игр')}`));
+	games.title = 'Сколько раз запускали паки этого автора — по данным статистики SIGame';
 
-	const average = author.packs > 0 ? Math.round(author.games / author.packs) : 0;
-	games.title = `В среднем ${formatNumber(average)} ${plural(average, 'игра', 'игры', 'игр')} на пак`;
+	// Игр в среднем за пак. Число это не про славу, а про попадание: три сотни
+	// паков, которые открыли по разу, дают тот же итог, что и один разошедшийся,
+	// — и в общем топе они стоят рядом, хотя это совсем разные авторы.
+	const average = averageOf(author);
+	const mean = element('span', 'authors__average');
+	mean.append(element('b', null, formatAverage(average)), document.createTextNode(' за пак'));
+	mean.title = author.packs > 0
+		? `${formatNumber(author.games)} ${plural(author.games, 'игра', 'игры', 'игр')} на ${formatNumber(author.packs)} `
+			+ `${plural(author.packs, 'пак', 'пака', 'паков')}. Паки, которых статистика не знает, считаются нулём`
+		: 'Паков у автора нет';
 
-	row.append(place, name, packs, games);
+	row.append(place, name, packs, games, mean);
 	return row;
 }
 
@@ -106,10 +184,10 @@ function matching() {
 	const needle = normalize(state.search);
 
 	if (!needle) {
-		return data.authors;
+		return ordering();
 	}
 
-	return data.authors.filter(author => normalize(author.name).includes(needle));
+	return ordering().filter(author => normalize(author.name).includes(needle));
 }
 
 function render() {
@@ -117,7 +195,8 @@ function render() {
 	box.textContent = '';
 
 	$('heading').textContent = '';
-	$('heading').append(icon('trophy'), element('span', null, `Топ авторов паков ${PERIOD_NAMES[state.period]}`));
+	$('heading').append(icon('trophy'), element('span', null,
+		`Топ авторов паков ${SORT_NAMES[state.sort]} ${PERIOD_NAMES[state.period]}`));
 
 	renderHint();
 
@@ -146,7 +225,14 @@ function render() {
 		element('span', 'authors__name', 'Автор'),
 		element('span', 'authors__packs', 'Паков'),
 		element('span', 'authors__games', 'Игр'),
+		element('span', 'authors__average', 'В среднем'),
 	);
+
+	// По какому столбцу список сейчас разложен — видно прямо в шапке: иначе
+	// выбранный порядок остаётся только в списке над таблицей
+	const sorted = { games: 'authors__games', average: 'authors__average', packs: 'authors__packs' }[state.sort];
+
+	head.querySelector(`.${sorted}`)?.classList.add('authors__column--sorted');
 
 	box.append(head);
 
@@ -220,6 +306,7 @@ function renderPager(total) {
 
 async function load() {
 	data = await (await fetch(`/api/authors?period=${encodeURIComponent(state.period)}`)).json();
+	ordered = null;
 	render();
 }
 
@@ -227,6 +314,15 @@ $('period').addEventListener('change', event => {
 	state.period = event.target.value;
 	state.page = 1;
 	load();
+});
+
+// Порядок меняется без похода на сервер: список уже здесь, а сортировать его
+// он всё равно умеет только одним способом — по числу игр
+$('sort').addEventListener('change', event => {
+	state.sort = event.target.value;
+	state.page = 1;
+	ordered = null;
+	render();
 });
 
 // Поиск идёт по уже приехавшему списку, поэтому ждать здесь нечего: буква —

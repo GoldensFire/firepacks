@@ -1,6 +1,6 @@
 // Определение тематики тем через Gemini. Темы уходят пачками, ответ приходит строгим JSON.
 
-import { config, EXCLUSIVE_TOPIC_KEYS, OTHER_KINDS, OTHER_KIND_KEYS } from './config.js';
+import { config, EXCLUSIVE_TOPIC_KEYS, OTHER_KINDS, OTHER_KIND_KEYS, GENRES, MUSIC_KEY, isGenre } from './config.js';
 import { currentModel, modelInfo, noteRequest, noteQuotaHit, noteUnavailable } from './models.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -177,6 +177,20 @@ export async function listModels() {
 		.map(model => ({ name: model.name.replace(/^models\//, ''), title: model.displayName }));
 }
 
+/** Жанры одной тематики в строку: «isekai — исекай, mecha — меха, …». */
+const genreList = topic => Object.entries(GENRES[topic].list)
+	.map(([key, name]) => `${key} — ${name}`)
+	.join(', ');
+
+/**
+ * Жанры всех тематик, кроме музыки: у неё свой вопрос («по музыке отгадывают»),
+ * и спрашивается она не по категории темы, а по признаку m.
+ */
+const GENRE_LIST = Object.keys(GENRES)
+	.filter(topic => topic !== MUSIC_KEY)
+	.map(topic => `${topic}: ${genreList(topic)}`)
+	.join('\n');
+
 const INSTRUCTION = `Ты разбираешь темы из пакетов вопросов для игры «Своя игра».
 Для каждой темы определи, о чём она, и выбери ровно одну категорию (поле c):
 
@@ -195,6 +209,22 @@ other    — всё остальное: наука, история, геогра
 Если категория other, назови ещё и вид «прочего» (поле k) — одно значение из списка:
 ${OTHER_KIND_KEYS.map(key => `${key} — ${OTHER_KINDS[key]}`).join('\n')}
 Ничего из списка не подходит или категория не other — оставь пустую строку.
+
+Назови жанр темы (поле g) — одно значение из списка своей категории:
+${GENRE_LIST}
+У категории other жанра нет: там оставь пустую строку.
+
+Если тема музыкальная (m=true), назови ещё и жанр самой музыки (поле gm) —
+одно значение из списка:
+${genreList(MUSIC_KEY)}
+Тема немузыкальная — пустая строка.
+
+Жанр всегда один, а подходят обычно несколько: бери тот, что выше в списке.
+Списки нарочно составлены по старшинству, от самого говорящего жанра к самому
+общему. «Re:Zero» — это и фэнтези, и драма, и романтика, но прежде всего isekai,
+и потому isekai стоит первым; «Тетрадь смерти» — detective, а не drama.
+Жанра по теме не видно или ничего из списка не подходит — пустая строка.
+Выдуманный жанр хуже пустой строки: по этим ответам считаются доли пака.
 
 Ещё назови предмет темы — то одно, чему тема посвящена целиком, в двух
 написаниях: по-русски (поле f) и латиницей (поле fe, ромадзи или английское
@@ -254,8 +284,13 @@ const SCHEMA = {
 			// пустая строка, часть моделей отвергает целиком, невнятным 400 на весь
 			// запрос. Проверка всё равно наша: чужое слово отсеется при разборе ответа
 			k: { type: 'STRING' },
+			// Жанр темы и жанр её музыки. Перечислением не ограничены по той же
+			// причине, что и вид «прочего»: пустая строка здесь законный ответ,
+			// а списки к тому же разные у каждой категории — одним enum их не выразить
+			g: { type: 'STRING' },
+			gm: { type: 'STRING' },
 		},
-		required: ['i', 'c', 'm', 'f', 'fe', 'k'],
+		required: ['i', 'c', 'm', 'f', 'fe', 'k', 'g', 'gm'],
 	},
 };
 
@@ -443,6 +478,16 @@ export async function classifyThemes(themes, options = {}) {
 
 		try {
 			answers = await askBatch(batch);
+
+			// Ответ пришёл короче вопроса: модель уперлась в предел длины ответа
+			// и оборвалась на середине списка. Прежде это молчание засчитывалось
+			// как «тема ни о чём» (см. ниже) — то есть пак, у которого не влезла
+			// половина тем, честно получал сорок процентов «прочего» и становился
+			// солянкой из ничего. Заметить это можно только здесь и только так:
+			// ответ при этом совершенно правильный, просто неполный.
+			if (answers.length < batch.length && batch.length > 1) {
+				throw new GeminiError(`ответ оборван: ${answers.length} тем из ${batch.length}`, 0);
+			}
 		} catch (error) {
 			// Ответ мог не влезть в лимит — делим пачку и пробуем ещё раз.
 			// Но не тогда, когда отвечать уже нечем: на кончившихся лимитах
@@ -475,6 +520,13 @@ export async function classifyThemes(themes, options = {}) {
 					// Вид «прочего»: чем эта общая куча оказалась на деле — стримерами,
 					// историей, спортом. У остальных категорий вида нет и быть не должно
 					kind: answer.c === 'other' && OTHER_KIND_KEYS.includes(answer.k) ? answer.k : '',
+					// Жанр внутри тематики: чем один аниме-пак отличается от другого.
+					// Годится только жанр из списка своей категории — «detective»
+					// у категории games означал бы, что модель ответила невпопад
+					genre: isGenre(answer.c, answer.g) ? answer.g : '',
+					// Жанр музыки спрашивается отдельно и живёт отдельно: тема
+					// с опенингами — это и аниме (genre), и анисонг (musicGenre)
+					musicGenre: answer.m === true && isGenre(MUSIC_KEY, answer.gm) ? answer.gm : '',
 				});
 			}
 		}
@@ -482,7 +534,15 @@ export async function classifyThemes(themes, options = {}) {
 		// Темы, по которым модель промолчала, считаем неопределёнными
 		for (const theme of batch) {
 			if (!result.has(theme.key)) {
-				result.set(theme.key, { category: 'other', music: false, franchise: '', franchiseEn: '', kind: '' });
+				result.set(theme.key, {
+					category: 'other',
+					music: false,
+					franchise: '',
+					franchiseEn: '',
+					kind: '',
+					genre: '',
+					musicGenre: '',
+				});
 			}
 		}
 

@@ -11,8 +11,11 @@
 //   2. Отметки «сыграно» лежат по общему ключу пака и принадлежат вошедшему,
 //      а не установке: посетителей тут много, см. cf/schema.sql.
 
-import { settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS } from '../../src/settings.js';
+import {
+	settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
+} from '../../src/settings.js';
 import { jsonOrDefault, normalizeRounds, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import { packSlug } from '../../src/slug.js';
 import { groupSubjects, subjectMatches } from '../../src/subject.js';
 import { findHits, idList } from './search.js';
 
@@ -164,6 +167,10 @@ function toPackage(row, counts) {
 		packKey: packKey(row),
 		name: row.name,
 		fileName: row.file_name,
+		// Название в адресе отдельной страницы пака: /pack/128-anime-pak. Правило
+		// перевода общее с домашним сайтом (src/slug.js) — иначе ссылка, которой
+		// поделились здесь, вела бы дома в другое место
+		slug: packSlug(row.name ?? row.file_name),
 		authors,
 		// Сколько паков у каждого из них — по порядку, тем же списком
 		authorPacks: authors.map(author => counts.get(buildAuthorKey(author)) ?? 1),
@@ -194,6 +201,10 @@ function toPackage(row, counts) {
 		franchises: jsonOrDefault(row.franchises, []),
 		// Чем оказалось «прочее»: стримеры, история, спорт — только то, чего набралось заметно
 		otherKinds: jsonOrDefault(row.other_kinds, []),
+		// Жанры внутри тематики: чем этот музпак отличается от соседнего.
+		// genreTopic — из чьего списка эти ключи: он же называет и саму полоску
+		genres: jsonOrDefault(row.genres, []),
+		genreTopic: row.genre_topic,
 		summary: row.summary,
 		// Имя выложившего наружу не отдаём: в интерфейсе это просто «Источник»
 		vkDate: row.vk_date,
@@ -547,6 +558,45 @@ export async function listPackages(db, query, userId) {
 }
 
 /**
+ * Один пак по номеру строки — для его отдельной страницы (/pack/…).
+ *
+ * Поля те же самые, что и в выдаче: страница пака рисуется той же карточкой,
+ * и недостающее поле обернулось бы там пустым местом посреди готовой вёрстки.
+ * Чёрный список здесь не применяется нарочно: спрятанный пак пропадает из выдачи,
+ * но по прямой ссылке открываться должен — иначе она выглядит битой.
+ */
+export async function getPackage(db, id, userId) {
+	if (!Number.isFinite(id)) {
+		return null;
+	}
+
+	const row = await db.prepare(`
+		SELECT p.*, ${STATS_FIELDS}, ${PLAYED_FLAG},
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		${BASE_FROM}
+		WHERE p.id = ? AND p.status = 'ok'
+	`).bind(userId, userId, id).first();
+
+	return row ? toPackage(row, await authorPackCounts(db)) : null;
+}
+
+/**
+ * Все паки для карты сайта: только то, из чего складывается адрес и дата.
+ *
+ * Пятнадцать тысяч строк за раз — самый большой запрос, который тут вообще есть,
+ * и платить за него каждым обращением поисковика нельзя. Поэтому ответ лежит
+ * в кэше Cloudflare сутки (см. cf/src/index.js): карта меняется не чаще, чем
+ * заливается база, то есть раз в ночь.
+ */
+export async function listSitemap(db) {
+	const { results } = await db.prepare(`
+		SELECT id, name, file_name, vk_ts FROM packages WHERE status = 'ok' ORDER BY id
+	`).all();
+
+	return results.map(row => ({ id: row.id, name: row.name ?? row.file_name, vk_ts: row.vk_ts }));
+}
+
+/**
  * Всё, что не зависит от того, кто спрашивает: списки тем, языков, франшиз
  * и числа по базе. Меняется только при заливке базы, поэтому изолят держит
  * готовый ответ у себя — иначе каждое открытие страницы стоило бы десятка
@@ -678,6 +728,10 @@ export async function getFacets(db) {
 		// Виды «прочего» и порог, с которого их стоит называть вслух: «Прочее: стримеры, история»
 		otherKindNames: OTHER_KINDS,
 		otherKindShare: settings.otherKindShare,
+		// Жанры внутри тематики и порог, с которого жанр стоит называть: из них
+		// собирается третья полоска карточки — «какой жанр музыки»
+		genreNames: GENRES,
+		genreShare: settings.genreShare,
 		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё
 		readOnly: true,
 		playerUri: settings.playerUri,

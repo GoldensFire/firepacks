@@ -265,6 +265,21 @@ function main() {
 		db.exec('DELETE FROM d1_sync');
 		db.exec('INSERT INTO d1_sync (tbl, row_id, hash) SELECT tbl, row_id, hash FROM d1_pending');
 		db.exec('DELETE FROM d1_pending');
+
+		// Отпечаток схемы — туда же и по той же причине. Пока он ставился прямо
+		// при выгрузке, одна сорвавшаяся выкладка калечила все следующие: схема
+		// наверху оставалась старой, а база уже считала, что сообщила о новой,
+		// и вместо «выложить целиком» собирала CREATE TABLE IF NOT EXISTS —
+		// в существующую старую таблицу, где новой колонки нет. Заливка после
+		// этого падала на первом же паке («table packages has no column named …»),
+		// и сама выправиться не могла: каждая следующая выгрузка приходила
+		// к тому же выводу.
+		db.exec(`
+			INSERT OR REPLACE INTO d1_meta (key, value)
+			SELECT 'schema', value FROM d1_meta WHERE key = 'schema_pending'
+		`);
+
+		db.exec(`DELETE FROM d1_meta WHERE key = 'schema_pending'`);
 		console.log('Отмечено: выгруженное доехало.');
 		db.close();
 		return;
@@ -446,7 +461,9 @@ function main() {
 
 	writer.flush();
 
-	db.prepare(`INSERT OR REPLACE INTO d1_meta (key, value) VALUES ('schema', ?)`).run(schemaHash);
+	// Заявка, а не отметка: настоящей она станет в --commit, когда выгруженное
+	// действительно доедет. До тех пор наверху, по нашим сведениям, прежняя схема.
+	db.prepare(`INSERT OR REPLACE INTO d1_meta (key, value) VALUES ('schema_pending', ?)`).run(schemaHash);
 	const pending = db.prepare('SELECT COUNT(*) AS c FROM d1_pending').get().c;
 	db.close();
 

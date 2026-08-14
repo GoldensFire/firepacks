@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<!-- Название пака сервер подставляет сюда сам, ещё до отправки страницы:
+	     рисует-то её скрипт, а заголовок вкладки и описание для поисковика читают
+	     из самой вёрстки. См. injectPackMeta в src/meta.js — там же и остальные
+	     строчки, которые встают на место этой отметки. -->
+	<title>Пак — FirePacks</title>
+	<!--pack-meta-->
+	<link rel="icon" href="/favicon.ico" sizes="any">
+	<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+	<header class="topbar">
+		<div class="topbar__inner">
+			<a class="brand" href="/" title="На главную страницу библиотеки">
+				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
+				<span class="brand__text">FirePacks</span>
+			</a>
+
+			<a class="topbar__link" href="/">← К библиотеке</a>
+			<a class="topbar__link" href="/authors">Топ авторов →</a>
+			<a class="topbar__link" href="/profile">Профиль →</a>
+
+			<div class="account" id="account"></div>
+		</div>
+	</header>
+
+	<main class="pack-page">
+		<div id="pack" class="pack-page__card">
+			<div class="empty">Загрузка…</div>
+		</div>
+	</main>
+
+	<script src="/common.js"></script>
+	<script src="/icons.js"></script>
+	<script src="/card.js"></script>
+	<script src="/pack.js"></script>
+</body>
+</html>

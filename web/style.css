@@ -630,7 +630,12 @@ a.brand:hover .brand__text {
 	border-color: #39404f;
 }
 
-.card--played {
+/* Сыгранный пак приглушён — но приглушено всё, кроме оценки. Гасится он затем,
+   чтобы не спорить в выдаче с теми, во что ещё не играли; звёзды же на сыгранном
+   паке — единственное, что от человека осталось нужным, и гасить их значит прятать
+   ровно то действие, которого от него ждут. Раньше прозрачность стояла на всей
+   карточке разом, а изнутри её не отменить ничем: дети наследуют её вместе с ней. */
+.card--played > *:not(.rating) {
 	opacity: .62;
 }
 
@@ -694,6 +699,26 @@ a.brand:hover .brand__text {
 	font-weight: 600;
 	line-height: 1.3;
 	overflow-wrap: anywhere;
+}
+
+/* Название в выдаче ведёт на страницу пака. Подчёркивания у него нет: карточка
+   и так вся про этот пак, а подчёркнутый заголовок читался бы как ссылка наружу.
+   Подсветка появляется при наведении — там же, где курсор становится пальцем. */
+.card__name-link {
+	color: inherit;
+	text-decoration: none;
+}
+
+.card__name-link:hover .card__name,
+.card__name-link:focus-visible .card__name {
+	color: var(--accent);
+}
+
+/* Обложка ведёт туда же, куда и название: в выдаче по ней целятся не реже */
+.card__cover {
+	display: block;
+	flex: none;
+	line-height: 0;
 }
 
 .card__authors {
@@ -1109,16 +1134,16 @@ a.brand:hover .brand__text {
 }
 
 .rating--big .rating__stars {
-	font-size: 38px;
-	letter-spacing: 3px;
+	font-size: 46px;
+	letter-spacing: 4px;
 }
 
 .rating--big .rating__value {
-	font-size: 15px;
+	font-size: 16px;
 }
 
 .rating--big .rating__value--known {
-	font-size: 18px;
+	font-size: 20px;
 }
 
 /* Чёрный список: кнопка «Скрыть» с меню на выбор — пак или автор */
@@ -1327,6 +1352,30 @@ a.hide__item--login:hover {
 .shares__part--books { background: var(--books); }
 .shares__part--other { background: #333a49; }
 
+/* Вопрос над полоской жанров: «Какой жанр музыки?». Есть только у неё — две
+   верхние полоски подписаны сами собой, а эта без вопроса читалась бы как
+   ещё один непонятный ряд цветных кусков */
+.shares__caption {
+	font-size: 11px;
+	line-height: 1.5;
+	color: var(--text-muted);
+}
+
+/* Жанры. Цвет здесь достаётся по месту в полоске, а не по смыслу: список жанров
+   свой у каждой тематики, один и тот же ключ значит в них разное, и общего
+   цвета у «комедии» быть не может. Оттенки взяты потусклее тематических —
+   полоска стоит третьей и спорить с верхними ей незачем */
+.shares__part--genre-1 { background: #d8563f; }
+.shares__part--genre-2 { background: #3f8fd8; }
+.shares__part--genre-3 { background: #57b25b; }
+.shares__part--genre-4 { background: #c9a13a; }
+.shares__part--genre-5 { background: #9b62d0; }
+.shares__part--genre-6 { background: #3fb5b0; }
+
+/* Всё, чего по отдельности набралось меньше порога: не «не посчитано», а «всего
+   понемногу», и цвет у него такой же ничей, как у «прочего» наверху */
+.shares__part--genre-rest { background: #333a49; }
+
 /* Виды содержимого. Цвета нарочно свои, не тематические: две полоски стоят
    вплотную, и одинаковый оттенок в них читался бы как одно и то же */
 .shares__part--text { background: #4d566b; }
@@ -1433,6 +1482,114 @@ a.hide__item--login:hover {
 .card__actions .button {
 	padding: 7px 12px;
 	font-size: 13px;
+}
+
+/* Отметка «сыграно» — своей строкой над «Играть» и «Скачать», во всю ширину.
+   Играть и скачивать идут те, кто пак ещё не видел; отмечают его вернувшиеся
+   со стола, и дальше у них всё держится на этой отметке — оценку ставят только
+   сыгранному. Раньше кнопка стояла третьей в общем ряду, между «Скачать»
+   и чёрным списком, и на карточке её было не отличить от них. */
+.card__actions--mark {
+	margin-top: auto;
+	padding-top: 0;
+}
+
+/* Прижимает к низу карточки строку отметки, а не обе: две подряд auto-margin
+   поделили бы пустоту между собой, и между кнопками появился бы провал */
+.card__actions--mark + .card__actions {
+	margin-top: 0;
+}
+
+.card__actions--mark .button--mark {
+	flex: 1;
+	justify-content: center;
+}
+
+/* «Поделиться»: один значок без подписи, как и у чёрного списка рядом. Подпись
+   ему не нужна — кнопка не соперничает с «Играть», а стоит при ней. */
+.button--share {
+	padding: 7px 10px;
+	align-self: stretch;
+}
+
+.button--share:hover {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
+.button--share svg {
+	display: block;
+	width: 1.45em;
+	height: 1.45em;
+}
+
+/* Всплывающая подпись внизу экрана: «ссылка скопирована». Нажатие, после которого
+   на странице не меняется ничего, читается как несработавшее — а копирование
+   по определению не видно. */
+.toast {
+	position: fixed;
+	left: 50%;
+	bottom: 24px;
+	z-index: 50;
+	max-width: min(520px, calc(100vw - 32px));
+	padding: 10px 16px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--bg-panel-2);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+	color: var(--text);
+	font-size: 13px;
+	text-align: center;
+	overflow-wrap: anywhere;
+	/* до появления подпись не должна ни мигать при загрузке, ни ловить мышь */
+	opacity: 0;
+	transform: translate(-50%, 12px);
+	pointer-events: none;
+	transition: opacity .18s, transform .18s;
+}
+
+.toast--shown {
+	opacity: 1;
+	transform: translate(-50%, 0);
+}
+
+/* Отдельная страница пака: та же карточка, но одна и во всю ширину чтения.
+   Шире делать нечего — строки описания длиннее восьмидесяти знаков читаются
+   тяжелее, сколько бы места ни было. */
+
+.pack-page {
+	max-width: 820px;
+	margin: 0 auto;
+	padding: 18px 16px 40px;
+}
+
+.pack-page__card {
+	display: block;
+}
+
+.card--page {
+	padding: 18px;
+}
+
+.card--page .card__name {
+	font-size: 24px;
+	line-height: 1.25;
+}
+
+.card--page .logo {
+	width: 108px;
+	height: 108px;
+}
+
+.card--page .card__authors,
+.card--page .card__summary {
+	font-size: 13px;
+}
+
+/* Состав раундов на своей странице раскрыт сразу, и «Подробнее» над ним
+   превращается в подпись к списку, а не в мишень */
+.card--page .details summary {
+	cursor: default;
 }
 
 .details {
@@ -1793,6 +1950,18 @@ a.hide__item--login:hover {
 	color: var(--text);
 }
 
+/* Выкладка на сайт — не переход, а действие, и потому кнопка. Выглядеть она
+   обязана как соседние ссылки: в шапке это один ряд, и выпадающая из него
+   кнопка с рамкой читалась бы как что-то постороннее */
+.topbar__link--button {
+	padding: 0;
+	border: 0;
+	background: none;
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+}
+
 .update {
 	display: grid;
 	grid-template-columns: 380px 1fr;
@@ -2100,7 +2269,7 @@ a.hide__item--login:hover {
 
 .authors__row {
 	display: grid;
-	grid-template-columns: 48px 1fr 140px 160px;
+	grid-template-columns: 48px 1fr 120px 140px 130px;
 	align-items: center;
 	gap: 10px;
 	padding: 9px 14px;
@@ -2145,7 +2314,8 @@ a.authors__row:hover {
 }
 
 .authors__packs,
-.authors__games {
+.authors__games,
+.authors__average {
 	color: var(--text-muted);
 	font-variant-numeric: tabular-nums;
 	text-align: right;
@@ -2153,6 +2323,13 @@ a.authors__row:hover {
 
 .authors__games b {
 	color: var(--accent);
+}
+
+/* Столбец, по которому список сейчас разложен. Подсвечена только шапка: строки
+   и так стоят в этом порядке, а подкрашенный столбец чисел спорил бы с ним */
+.authors__column--sorted {
+	color: var(--text);
+	font-weight: 700;
 }
 
 /* ————— Узкие экраны —————
@@ -2319,9 +2496,14 @@ a.authors__row:hover {
 
 	/* Знак запрета остаётся знаком запрета и на телефоне: растягивать его во всю
 	   строку, как остальные кнопки, значило бы обещать действие, которого он
-	   не стоит */
-	.hide {
+	   не стоит. То же и с «поделиться» — оба стоят при «Играть», а не вместо него */
+	.hide,
+	.card__actions .button--share {
 		flex: 0 0 auto;
+	}
+
+	.card__actions .button--share {
+		padding: 9px 12px;
 	}
 
 	.card__actions .hide .button--ban {
@@ -2386,7 +2568,7 @@ a.authors__row:hover {
 		padding: 8px 9px;
 	}
 
-	/* Топ авторов: четыре столбца в ширину телефона не встают. Числа уходят
+	/* Топ авторов: пять столбцов в ширину телефона не встают. Числа уходят
 	   под имя, а шапка таблицы становится не нужна — подписи и так при числах */
 	.authors__row {
 		grid-template-columns: 34px 1fr;
@@ -2394,7 +2576,8 @@ a.authors__row:hover {
 	}
 
 	.authors__packs,
-	.authors__games {
+	.authors__games,
+	.authors__average {
 		grid-column: 2;
 		text-align: left;
 	}

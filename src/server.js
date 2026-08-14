@@ -3,13 +3,17 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS } from './config.js';
+import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS, GENRES } from './config.js';
 import {
 	db, jsonOrDefault, normalizeRounds, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
 } from './db.js';
 import { runSearch } from './search.js';
 import { groupSubjects, subjectMatches } from './subject.js';
-import { startUpdate, stopUpdate, updateState, subscribe, updateModels, UPDATE_STEPS } from './updater.js';
+import { packSlug, packIdFromPath } from './slug.js';
+import { injectPackMeta, buildSitemap, buildRobots } from './meta.js';
+import {
+	startUpdate, startDeploy, stopUpdate, updateState, subscribe, updateModels, UPDATE_STEPS,
+} from './updater.js';
 import {
 	hasDiscord, redirectUri, currentUser, startLogin, finishLogin, logout,
 	rate, setBlacklisted, listBlacklist,
@@ -179,6 +183,10 @@ function toPackage(row) {
 		packKey: packKey(row),
 		name: row.name,
 		fileName: row.file_name,
+		// Название в адресе отдельной страницы пака: /pack/128-anime-pak. Считается
+		// здесь, а не на сайте, чтобы правило перевода было одно на всех — им же
+		// пользуются карта сайта и ссылка «поделиться» (см. src/slug.js)
+		slug: packSlug(row.name ?? row.file_name),
 		authors,
 		// Сколько паков у каждого из них — по порядку, тем же списком
 		authorPacks: authors.map(author => counts.get(buildAuthorKey(author)) ?? 1),
@@ -208,6 +216,10 @@ function toPackage(row) {
 		franchises: jsonOrDefault(row.franchises, []),
 		// Чем оказалось «прочее»: стримеры, история, спорт — только то, чего набралось заметно
 		otherKinds: jsonOrDefault(row.other_kinds, []),
+		// Жанры внутри тематики: чем этот музпак отличается от соседнего.
+		// genreTopic — из чьего списка эти ключи: он же называет и саму полоску
+		genres: jsonOrDefault(row.genres, []),
+		genreTopic: row.genre_topic,
 		summary: row.summary,
 		// Имя выложившего наружу не отдаём: в интерфейсе это просто «Источник»
 		vkDate: row.vk_date,
@@ -495,6 +507,31 @@ function listPackages(query, userId) {
 	return { total, page, pageSize, levels: countLevels(query, userId), packages: rows.map(toPackage) };
 }
 
+/**
+ * Один пак по номеру строки — для его отдельной страницы (/pack/…).
+ *
+ * Поля те же самые, что и в выдаче: страница пака рисуется той же карточкой,
+ * и недостающее поле обернулось бы там пустым местом посреди готовой вёрстки.
+ * Чёрный список здесь не применяется нарочно: спрятанный пак пропадает из выдачи,
+ * но по прямой ссылке открываться должен — иначе она выглядит битой.
+ */
+function getPackage(id, userId) {
+	const row = db.prepare(`
+		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
+			s.found AS stats_found, CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played,
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		${BASE_FROM}
+		WHERE p.id = ? AND p.status = 'ok'
+	`).get(userId ?? null, id);
+
+	return row ? toPackage(row) : null;
+}
+
+/** Все паки для карты сайта: только то, из чего складывается адрес и дата. */
+const sitemapQuery = db.prepare(`
+	SELECT id, name, file_name, vk_ts FROM packages WHERE status = 'ok' ORDER BY id
+`);
+
 function getFacets() {
 	// Теги в паках пишут кто как: «Аниме», «аниме», «anime». Считаем их одним и тем же
 	// и показываем то написание, которое встречается чаще.
@@ -613,6 +650,10 @@ function getFacets() {
 		// Виды «прочего» и порог, с которого их стоит называть вслух: «Прочее: стримеры, история»
 		otherKindNames: OTHER_KINDS,
 		otherKindShare: config.otherKindShare,
+		// Жанры внутри тематики и порог, с которого жанр стоит называть: из них
+		// собирается третья полоска карточки — «какой жанр музыки»
+		genreNames: GENRES,
+		genreShare: config.genreShare,
 		// На хостинге собирать базу нечем: сайт не показывает ни страницы обновления, ни ссылки на неё
 		readOnly: config.readOnly,
 		playerUri: config.playerUri,
@@ -1004,6 +1045,19 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
+		// Один пак: этим живёт его отдельная страница
+		if (url.pathname === '/api/package') {
+			const pack = getPackage(parseInt(url.searchParams.get('id') ?? '', 10), blacklistOwner(user));
+
+			if (!pack) {
+				sendJson(response, { error: 'Такого пака нет' }, 404);
+				return;
+			}
+
+			sendJson(response, { package: pack });
+			return;
+		}
+
 		if (url.pathname === '/api/facets') {
 			sendJson(response, { ...getFacets(), user });
 			return;
@@ -1072,6 +1126,19 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
+		// Ручная выкладка на Cloudflare. Живёт среди методов обновления нарочно:
+		// это такой же запуск программы с раздачей её вывода в лог, и на хостинге
+		// его точно так же нет (см. отказ выше).
+		if (url.pathname === '/api/update/deploy' && request.method === 'POST') {
+			try {
+				sendJson(response, startDeploy());
+			} catch (error) {
+				sendJson(response, { error: error.message }, 409);
+			}
+
+			return;
+		}
+
 		if (url.pathname === '/api/update/stop' && request.method === 'POST') {
 			try {
 				sendJson(response, stopUpdate());
@@ -1119,6 +1186,48 @@ const server = http.createServer(async (request, response) => {
 		// Страница обновления на хостинге не должна открываться и по прямой ссылке
 		if (config.readOnly && /^\/update(\.html)?$/.test(url.pathname)) {
 			response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Обновление базы отключено');
+			return;
+		}
+
+		// Каким адресом сайт сам себя видит. Нужен только поисковым мелочам —
+		// полной ссылке на страницу пака и адресу карты сайта в robots.txt.
+		const origin = `http://${request.headers.host ?? `localhost:${config.port}`}`;
+
+		// ————— отдельная страница пака —————
+		//
+		// Открывает её номер, стоящий сразу за /pack/, а название после него —
+		// для человека и поисковой выдачи (см. src/slug.js). Вёрстка у всех паков
+		// одна и та же, но заголовок вкладки и описание для поисковика в неё
+		// подставляются здесь: рисует-то страницу скрипт, а читают их из самого
+		// HTML, ещё до того, как хоть что-то отработает.
+		const packId = packIdFromPath(url.pathname);
+
+		if (packId !== null) {
+			const pack = getPackage(packId, blacklistOwner(user));
+			const html = fs.readFileSync(path.join(config.webPath, 'pack.html'), 'utf8');
+
+			// Пака нет — страница всё равно та же самая: она сама скажет об этом
+			// словами и позовёт обратно в библиотеку. Ответ при этом честный,
+			// чтобы поисковик не держал у себя ссылку на пропавший пак.
+			response.writeHead(pack ? 200 : 404, { 'Content-Type': MIME['.html'] });
+			response.end(pack ? injectPackMeta(html, pack, origin) : html);
+			return;
+		}
+
+		// Карта сайта. Без неё отдельные страницы паков поисковику взять неоткуда:
+		// постраничность выдачи сделана кнопками, и обойти её по ссылкам нельзя.
+		if (url.pathname === '/sitemap.xml') {
+			const rows = sitemapQuery.all().map(row => ({ id: row.id, name: row.name ?? row.file_name, vk_ts: row.vk_ts }));
+			const body = buildSitemap(rows, origin);
+
+			response.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8' });
+			response.end(body);
+			return;
+		}
+
+		if (url.pathname === '/robots.txt') {
+			response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+			response.end(buildRobots(origin));
 			return;
 		}
 

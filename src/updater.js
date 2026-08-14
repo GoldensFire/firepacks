@@ -3,6 +3,12 @@
 //
 // Индексатор остаётся обычной программой командной строки — здесь только
 // перевод галочек в его флаги и разбор того, что он печатает.
+//
+// Тем же способом отсюда запускается и выкладка на Cloudflare (scripts/deploy-cf.js):
+// программа другая, а всё остальное то же самое — один процесс за раз, вывод
+// строками в тот же лог. Разделять их незачем, а вот пускать разом нельзя:
+// выкладка выгружает базу, и индексатор, дописывающий её в это же время,
+// отправил бы наверх половину себя.
 
 import { spawn } from 'node:child_process';
 import { config, PROGRESS_PREFIX } from './config.js';
@@ -264,9 +270,26 @@ export function startUpdate(request) {
 		args.push(`--pages=${pages}`);
 	}
 
+	return launch(args, {
+		steps: steps.map(key => ({ key, name: UPDATE_STEPS.find(s => s.key === key).name })),
+		what: 'индексатор',
+		failed: code => `Индексатор завершился с кодом ${code}.`,
+		stopped: 'Остановлено. Всё, что успело посчитаться, уже в базе.',
+	});
+}
+
+/**
+ * Общее для индексатора и выкладки: сброс состояния, запуск, разбор вывода.
+ *
+ * @param {string[]} args ключи для node
+ * @param {{steps: Array, what: string, failed: Function, stopped: string, active?: string[]}} about
+ *   как называть шаги на странице, как назвать саму программу в сообщении об
+ *   ошибке запуска и что написать, когда она сорвалась или её остановили кнопкой
+ */
+function launch(args, about) {
 	state.running = true;
-	state.steps = steps.map(key => ({ key, name: UPDATE_STEPS.find(s => s.key === key).name }));
-	state.active = [];
+	state.steps = about.steps;
+	state.active = about.active ?? [];
 	state.progress = {};
 	state.startedAt = Date.now();
 	state.finishedAt = null;
@@ -287,7 +310,7 @@ export function startUpdate(request) {
 
 	child.on('error', error => {
 		state.error = error.message;
-		pushLog(`Не вышло запустить индексатор: ${error.message}`);
+		pushLog(`Не вышло запустить ${about.what}: ${error.message}`);
 	});
 
 	// Убитый процесс приходит сюда без кода выхода, зато с сигналом, — для страницы
@@ -300,9 +323,9 @@ export function startUpdate(request) {
 		state.finishedAt = Date.now();
 
 		if (state.stopped) {
-			pushLog('Остановлено. Всё, что успело посчитаться, уже в базе.');
+			pushLog(about.stopped);
 		} else if (code !== 0) {
-			pushLog(`Индексатор завершился с кодом ${code ?? signal}.`);
+			pushLog(about.failed(code ?? signal));
 		}
 
 		send({ type: 'state', state: updateState() });
@@ -311,6 +334,37 @@ export function startUpdate(request) {
 	send({ type: 'state', state: updateState() });
 
 	return updateState();
+}
+
+/**
+ * Выкладывает на Cloudflare то, что уже лежит в местной базе: собирает статику,
+ * выгружает изменившиеся строки, заливает их и обновляет сам Worker
+ * (см. scripts/deploy-cf.js).
+ *
+ * Отдельной кнопкой, а не концом ночного обхода, нарочно: сначала на всё это
+ * смотрят на местном сайте — доли, ярлыки, описания, — и только потом решают,
+ * стоит ли оно того, чтобы уехать наверх. Ночной обход в облаке живёт своей
+ * жизнью и этой кнопки не касается.
+ *
+ * Полоски выполнения у выкладки нет: wrangler отчитывается сплошным текстом,
+ * и всё, что о ней можно показать, — её же вывод в логе.
+ */
+export function startDeploy() {
+	if (state.running) {
+		throw new Error('Сейчас уже что-то идёт: дождитесь конца или остановите');
+	}
+
+	return launch(['--no-warnings', config.deployPath], {
+		steps: [{ key: 'deploy', name: 'Выкладка на сайт' }],
+		active: ['deploy'],
+		what: 'выкладку',
+		failed: code => `Выкладка сорвалась (код ${code}). Наверху всё осталось как было; `
+			+ `что именно не вышло — в последних строках выше.`,
+		// Оборванная на середине выкладка ничего не ломает: отметка «доехало»
+		// ставится последним шагом, и следующая просто отправит те же строки заново
+		stopped: 'Выкладка остановлена. Наверху осталось то, что успело доехать; '
+			+ 'следующая отправит недостающее заново.',
+	});
 }
 
 /**

@@ -151,6 +151,9 @@ function renderStatus(state) {
 
 	$('start').disabled = running;
 	$('stop').disabled = !running;
+	// Выкладка и обновление ходят в одну и ту же базу, и разом им нельзя:
+	// сервер всё равно откажет, но мёртвая кнопка честнее отказа
+	$('deploy').disabled = running;
 
 	for (const id of ['reparse', 'retry', 'retopics', 'resummary', 'upgrade', 'serial', 'limit', 'pages', 'model']) {
 		$(id).disabled = running;
@@ -363,6 +366,33 @@ async function start() {
 	applyState(data);
 }
 
+/**
+ * Ручная выкладка на Cloudflare. Спрашиваем перед запуском: это единственная
+ * кнопка на странице, которая меняет что-то за пределами этого компьютера.
+ */
+async function deploy() {
+	if (!confirm('Выложить нынешнюю базу и сайт на Cloudflare?')) {
+		return;
+	}
+
+	let data;
+
+	try {
+		const response = await fetch('/api/update/deploy', { method: 'POST' });
+		data = await response.json();
+	} catch (error) {
+		data = { error: `Сайт не ответил на выкладку: ${error.message}` };
+	}
+
+	if (data.error) {
+		$('statusText').textContent = data.error;
+		$('statusText').className = 'update__state update__state--failed';
+		return;
+	}
+
+	applyState(data);
+}
+
 async function stop() {
 	$('stop').disabled = true;
 	await fetch('/api/update/stop', { method: 'POST' });
@@ -373,6 +403,7 @@ async function init() {
 	// там оставляла страницу с нарисованной, но мёртвой кнопкой «Запустить»
 	$('start').addEventListener('click', start);
 	$('stop').addEventListener('click', stop);
+	$('deploy').addEventListener('click', deploy);
 	$('model').addEventListener('change', () => loadModels());
 
 	const info = await (await fetch('/api/update/steps')).json();

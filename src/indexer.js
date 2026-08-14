@@ -46,7 +46,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS } from './config.js';
+import { config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS, GENRES } from './config.js';
 import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
 import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi.js';
@@ -55,7 +55,7 @@ import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
 import { hasGemini, classifyThemes, describePack, listModels, useModel, activeModel } from './gemini.js';
 import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
-import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds } from './topics.js';
+import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds, computeGenres } from './topics.js';
 
 const args = process.argv.slice(2);
 const has = flag => args.includes(flag);
@@ -428,6 +428,7 @@ const updateLogo = db.prepare('UPDATE packages SET logo_file = ?, logo_state = ?
 const updateTopics = db.prepare(`
 	UPDATE packages SET topic_shares = ?, primary_topic = ?, primary_share = ?,
 		franchises = ?, franchise_top = ?, franchise_top_share = ?, other_kinds = ?,
+		genres = ?, genre_topic = ?,
 		topics_at = ?, topics_model = ?, topics_version = ${TOPICS_VERSION} WHERE id = ?
 `);
 
@@ -1323,6 +1324,9 @@ async function refreshTopics() {
 				const franchises = computeFranchises(themes, marks);
 				const top = franchises[0] ?? null;
 				const kinds = computeOtherKinds(themes, marks);
+				// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
+				// у солянки жанр называть не от чего, и список выйдет пустым
+				const genres = computeGenres(themes, marks, topic);
 
 				updateTopics.run(
 					JSON.stringify(shares ?? {}),
@@ -1332,6 +1336,8 @@ async function refreshTopics() {
 					top?.name ?? null,
 					top?.share ?? null,
 					JSON.stringify(kinds),
+					JSON.stringify(genres),
+					genres.length > 0 ? topic : null,
 					Date.now(),
 					model,
 					row.id,
@@ -1368,6 +1374,13 @@ async function refreshTopics() {
 				// «прочего 40%», а сорок процентов чего — непонятно
 				if (kinds.length > 0) {
 					say('topics', `      прочее: ${kinds.map(kind => `${OTHER_KINDS[kind.key]} ${Math.round(kind.share * 100)}%`).join(', ')}`);
+				}
+
+				// Чем этот музпак отличается от соседнего: рэп внутри или опенинги
+				if (genres.length > 0) {
+					const names = GENRES[topic].list;
+					say('topics', `      ${GENRES[topic].question.toLowerCase()} `
+						+ genres.map(genre => `${names[genre.key]} ${Math.round(genre.share * 100)}%`).join(', '));
 				}
 			} catch (error) {
 				say('topics', `${label} «${row.name}»: ${error.message}`);
@@ -1485,10 +1498,19 @@ function recalcLevels() {
 
 /** Пересчитывает ярлыки паков по сохранённым долям — нужен после правки порога. */
 function recalcTopics() {
-	const rows = db.prepare(`SELECT id, topic_shares, question_count, franchises FROM packages WHERE topics_at IS NOT NULL`).all();
+	const rows = db.prepare(`SELECT id, topic_shares, question_count, franchises, genre_topic FROM packages WHERE topics_at IS NOT NULL`).all();
 	const update = db.prepare('UPDATE packages SET primary_topic = ?, primary_share = ?, franchise_top = ?, franchise_top_share = ? WHERE id = ?');
 
+	// Жанры пересчитать без модели нельзя вовсе: они считаются по разметке тем,
+	// а в базе от неё остались одни доли. Поэтому у пака, сменившего тип, жанры
+	// убираются, а сам пак встаёт обратно в очередь к модели (topics_version = 0):
+	// жанры музыки под подписью «какой жанр аниме» — не полбеды, а прямое враньё.
+	// Доли и ярлык при этом остаются на месте, и до переспроса пак выглядит как
+	// прежде, только без жанров.
+	const dropGenres = db.prepare(`UPDATE packages SET genres = '[]', genre_topic = NULL, topics_version = 0 WHERE id = ?`);
+
 	let labelled = 0;
+	let dropped = 0;
 
 	for (const row of rows) {
 		const shares = jsonOrDefault(row.topic_shares, null);
@@ -1505,9 +1527,15 @@ function recalcTopics() {
 		if (topic && topic !== 'mixed') {
 			labelled++;
 		}
+
+		if (row.genre_topic && row.genre_topic !== topic) {
+			dropGenres.run(row.id);
+			dropped++;
+		}
 	}
 
-	say('recalc', `тематики: обработано ${rows.length}, ярлык получили ${labelled}`);
+	say('recalc', `тематики: обработано ${rows.length}, ярлык получили ${labelled}`
+		+ `${dropped > 0 ? `, у ${dropped} сменился тип — жанры переспросим` : ''}`);
 }
 
 /** Общий пересчёт по сохранённым данным: и уровни, и ярлыки. */

@@ -36,17 +36,86 @@ const whole = local || process.argv.includes('--full');
 
 const DB_NAME = 'firepacks';
 
+/**
+ * Секреты сюда не пишутся: сначала переменная окружения, потом файл в папке data.
+ * Тот же порядок и те же файлы, что у остальных ключей проекта (см. src/config.js);
+ * повторено здесь, а не взято оттуда, нарочно — этот скрипт запускается и в GitHub
+ * Actions, где никакого config.js с его настройками не нужно вовсе.
+ */
+function readSecret(envName, fileName) {
+	if (process.env[envName]) {
+		return process.env[envName].trim();
+	}
+
+	try {
+		return fs.readFileSync(path.join(root, 'data', fileName), 'utf8').trim();
+	} catch {
+		return '';
+	}
+}
+
+/**
+ * Чем wrangler будет доказывать, что он — это мы.
+ *
+ * Обычно ничем: своего входа (`npx wrangler login`) хватает и здесь, и кнопке
+ * «Задеплоить на сайт» — дочерний процесс без всякого терминала выкладывает
+ * ровно так же. Пропуск от входа живёт час и обновляется сам.
+ *
+ * Ключ нужен там, где входить некому: ночному обходу в Actions (он приезжает
+ * переменной из секретов репозитория) — и как выручалка, если wrangler вдруг
+ * заявляет «non-interactive environment». Такое случалось у кнопки: запущенный
+ * из-под одного сервера wrangler своего пропуска не видел, а из-под свежего —
+ * видел, и отчего так, выяснить не вышло. Перезапуск сервера лечит; постоянный
+ * ключ снимает вопрос совсем, потому что не протухает.
+ *
+ * Кладётся в data/cloudflare-token.txt (папка под .gitignore, как и остальные
+ * ключи). Переменная окружения старше файла — в Actions файла нет вовсе.
+ *
+ * Заводится на dash.cloudflare.com → My Profile → API Tokens → Create Token,
+ * шаблон «Edit Cloudflare Workers», и в правах добавить D1 → Edit.
+ */
+const CLOUDFLARE_ENV = {
+	CLOUDFLARE_API_TOKEN: readSecret('CLOUDFLARE_API_TOKEN', 'cloudflare-token.txt'),
+	// Номер учётной записи нужен только тогда, когда их у ключа несколько:
+	// с одной wrangler определяет её сам. Пустое значение не передаём — иначе
+	// wrangler примет пустую строку за ответ и станет искать учётную запись «».
+	CLOUDFLARE_ACCOUNT_ID: readSecret('CLOUDFLARE_ACCOUNT_ID', 'cloudflare-account.txt'),
+};
+
 function run(command, args) {
 	console.log(`\n$ ${command} ${args.join(' ')}`);
+
+	const passed = Object.fromEntries(Object.entries(CLOUDFLARE_ENV).filter(([, value]) => value));
 
 	const result = spawnSync(command, args, {
 		cwd: root,
 		stdio: 'inherit',
 		shell: process.platform === 'win32',
+		env: { ...process.env, ...passed },
 	});
 
 	if (result.status !== 0) {
 		console.error(`\nСорвалось на: ${command} ${args.join(' ')}`);
+
+		// Отдельно про вход: сообщение у wrangler самое непонятное из всех, и по
+		// нему не догадаться, что делать. Здесь говорим прямо и в том порядке,
+		// в каком это чаще всего помогает.
+		if (args[0] === 'wrangler' && !CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN) {
+			console.error('');
+			console.error('Если написано про non-interactive environment или CLOUDFLARE_API_TOKEN —');
+			console.error('дело во входе в Cloudflare, а не в самой выкладке. По порядку:');
+			console.error('');
+			console.error('  • перезапустите сервер, если выкладку запускала кнопка: у сервера,');
+			console.error('    прожившего долго, wrangler перестаёт видеть свой пропуск;');
+			console.error('  • войдите заново:  npx wrangler login');
+			console.error('  • или положите постоянный ключ в data/cloudflare-token.txt');
+			console.error('    (dash.cloudflare.com → My Profile → API Tokens → Create Token,');
+			console.error('    шаблон «Edit Cloudflare Workers», в правах добавить D1 → Edit).');
+			console.error('');
+			console.error('Последнее снимает вопрос насовсем: ключ не протухает, а пропуск от входа');
+			console.error('живёт час.');
+		}
+
 		process.exit(result.status ?? 1);
 	}
 }
@@ -67,16 +136,8 @@ function execute(file) {
  * Файл переписывается каждой проверкой и в облако не уезжает никогда.
  */
 function writeDevVars() {
-	const read = name => {
-		try {
-			return fs.readFileSync(path.join(root, 'data', name), 'utf8').trim();
-		} catch {
-			return '';
-		}
-	};
-
-	const id = read('discord-client-id.txt');
-	const secret = read('discord-client-secret.txt');
+	const id = readSecret('DISCORD_CLIENT_ID', 'discord-client-id.txt');
+	const secret = readSecret('DISCORD_CLIENT_SECRET', 'discord-client-secret.txt');
 
 	if (!id || !secret) {
 		console.log('Ключей Discord в data нет — вход на местной копии работать не будет.');
@@ -102,6 +163,7 @@ function main() {
 			console.error('Сначала заведите базу в Cloudflare: npm run cf:setup');
 			process.exit(1);
 		}
+
 	}
 
 	console.log('\n───── Статика ─────');

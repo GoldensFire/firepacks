@@ -1,6 +1,6 @@
 // Доли тематик в паке. Категорию каждой темы определяет Gemini, здесь только арифметика.
 
-import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS } from './config.js';
+import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES } from './config.js';
 import { Names, nameKey, isFormatMarker, mergeRelated } from './franchise.js';
 
 /** Устойчивый ключ темы: по нему ответ модели возвращается на своё место. */
@@ -112,6 +112,70 @@ export function computeOtherKinds(themes, marks) {
 		.filter(kind => kind.share >= config.otherKindShare)
 		.sort((a, b) => b.questions - a.questions)
 		.slice(0, config.otherKindLimit);
+}
+
+/**
+ * Считает жанры внутри тематики пака: чем этот музпак отличается от соседнего.
+ *
+ * Спрашивать это имеет смысл только у пака, который чем-то одним и является:
+ * тип пака (см. toPrimary) отвечает на вопрос «откуда вопросы», и у музпака
+ * ответ на него известен заранее — музыка. А вот русский рэп внутри или опенинги
+ * нулевых, не видно было ниоткуда, хотя играются такие паки совсем по-разному.
+ *
+ * Что считать жанром, зависит от типа пака, и это не мелочь. У музпака жанр
+ * берётся у музыкальных тем — у всех, какой бы категории они ни были: опенинги
+ * аниме в музпаке это тоже музыка, и жанр у них музыкальный (анисонги).
+ * У остальных — жанр тем своей категории: в аниме-паке считаются аниме-темы,
+ * а случайная тема про футбол жанра аниме не имеет и в счёт не идёт.
+ *
+ * Доли считаются от всего пака, как и у видов «прочего»: вопрос здесь —
+ * «стоит ли писать это на карточке», а не «как поделена одна тематика внутри
+ * себя». Пак, где аниме-тем всего пятая часть, исекайным не является никак.
+ *
+ * @param {Array} themes темы из listThemes
+ * @param {Map<string, {category: string, music: boolean, genre: string, musicGenre: string}>} marks
+ * @param {string|null} topic тип пака: по нему выбирается список жанров
+ * @returns {Array<{key: string, questions: number, share: number}>} от частых
+ *   к редким, только те, что взяли порог genreShare
+ */
+export function computeGenres(themes, marks, topic) {
+	if (!topic || !GENRES[topic]) {
+		return [];
+	}
+
+	const weights = new Map();
+	let total = 0;
+
+	for (const theme of themes) {
+		const weight = theme.questions > 0 ? theme.questions : 1;
+		total += weight;
+
+		const mark = marks.get(theme.key);
+
+		if (!mark) {
+			continue;
+		}
+
+		const genre = topic === MUSIC_KEY
+			? (mark.music ? mark.musicGenre : '')
+			: (mark.category === topic ? mark.genre : '');
+
+		if (!genre || !Object.hasOwn(GENRES[topic].list, genre)) {
+			continue;
+		}
+
+		weights.set(genre, (weights.get(genre) ?? 0) + weight);
+	}
+
+	if (total === 0) {
+		return [];
+	}
+
+	return [...weights.entries()]
+		.map(([key, questions]) => ({ key, questions, share: Math.round((questions / total) * 1000) / 1000 }))
+		.filter(genre => genre.share >= config.genreShare)
+		.sort((a, b) => b.questions - a.questions)
+		.slice(0, config.genreLimit);
 }
 
 /**

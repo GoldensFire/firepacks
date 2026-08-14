@@ -13,9 +13,12 @@
 // в статике, — то есть /api/… и /auth/….
 
 import {
-	listPackages, getFacets, getTopAuthors, getProfile,
+	listPackages, getPackage, getFacets, getTopAuthors, getProfile, listSitemap,
 	setPlayed, setPlayedKeys, isPlayedPack, playedCount,
 } from './library.js';
+
+import { packIdFromPath } from '../../src/slug.js';
+import { injectPackMeta, buildSitemap, buildRobots } from '../../src/meta.js';
 
 import {
 	hasDiscord, currentUser, startLogin, finishLogin, logout,
@@ -42,7 +45,14 @@ import {
 const PUBLIC_TTL = 300;
 
 /** Что вообще можно так отдавать: только чтение и только общее. */
-const CACHEABLE = new Set(['/api/packages', '/api/facets', '/api/authors']);
+const CACHEABLE = new Set(['/api/packages', '/api/facets', '/api/authors', '/api/package']);
+
+/**
+ * Карта сайта — самый дорогой запрос, какой тут есть: она читает все паки разом.
+ * Меняется она не чаще, чем заливается база, то есть раз в ночь, и платить
+ * за неё каждым приходом поисковика не за что.
+ */
+const SITEMAP_TTL = 86400;
 
 /**
  * Вошёл ли пришедший — по печенью, без похода в базу. Именно этим решается,
@@ -188,6 +198,13 @@ export default {
 				return share(json(await listPackages(env.DB, url.searchParams, userId)));
 			}
 
+			// Один пак: этим живёт его отдельная страница
+			if (url.pathname === '/api/package') {
+				const pack = await getPackage(env.DB, parseInt(url.searchParams.get('id') ?? '', 10), userId);
+
+				return pack ? share(json({ package: pack })) : json({ error: 'Такого пака нет' }, 404);
+			}
+
 			if (url.pathname === '/api/facets') {
 				// Общая часть считается редко и лежит готовой у изолята, а «сколько
 				// сыграно» у каждого своё и спрашивается всегда.
@@ -237,6 +254,69 @@ export default {
 
 			if (url.pathname.startsWith('/api/')) {
 				return json({ error: 'Неизвестный метод' }, 404);
+			}
+
+			// ————— отдельная страница пака —————
+			//
+			// Открывает её номер, стоящий сразу за /pack/, а название после него —
+			// для человека и поисковой выдачи (см. src/slug.js). Вёрстка у всех
+			// паков одна и та же и лежит в статике; здесь в неё подставляются
+			// заголовок вкладки и описание для поисковика — рисует-то страницу
+			// скрипт, а читают их из самого HTML, до всякого JS.
+			const packId = packIdFromPath(url.pathname);
+
+			if (packId !== null) {
+				const [pack, page] = await Promise.all([
+					getPackage(env.DB, packId, userId),
+					env.ASSETS.fetch(new URL('/pack.html', url)),
+				]);
+
+				const html = await page.text();
+
+				// Пака нет — страница всё равно та же самая: она сама скажет об этом
+				// словами и позовёт обратно в библиотеку. Ответ при этом честный,
+				// чтобы поисковик не держал у себя ссылку на пропавший пак.
+				return new Response(pack ? injectPackMeta(html, pack, url.origin) : html, {
+					status: pack ? 200 : 404,
+					headers: {
+						'Content-Type': 'text/html; charset=utf-8',
+						// Личного в этой вёрстке нет ничего: оценки и отметки страница
+						// спрашивает сама, уже в браузере
+						'Cache-Control': 'public, max-age=300',
+					},
+				});
+			}
+
+			// Карта сайта. Без неё отдельные страницы паков поисковику взять
+			// неоткуда: постраничность выдачи сделана кнопками, а не ссылками,
+			// и обойти её ползая по ссылкам нельзя.
+			if (url.pathname === '/sitemap.xml') {
+				const found = await cache.match(request);
+
+				if (found) {
+					return found;
+				}
+
+				const body = buildSitemap(await listSitemap(env.DB), url.origin);
+
+				const response = new Response(body, {
+					headers: {
+						'Content-Type': 'application/xml; charset=utf-8',
+						'Cache-Control': `public, max-age=${SITEMAP_TTL}`,
+					},
+				});
+
+				ctx.waitUntil(cache.put(request, response.clone()));
+				return response;
+			}
+
+			if (url.pathname === '/robots.txt') {
+				return new Response(buildRobots(url.origin), {
+					headers: {
+						'Content-Type': 'text/plain; charset=utf-8',
+						'Cache-Control': `public, max-age=${SITEMAP_TTL}`,
+					},
+				});
 			}
 
 			// Сюда доходит только то, чего в статике не нашлось. Обычно это ошибка

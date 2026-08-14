@@ -23,6 +23,13 @@
 			<a class="topbar__link" href="/profile">Профиль →</a>
 			<a class="topbar__link" id="updateLink" href="/update">Обновить базу →</a>
 
+			<!-- Выкладка стоит здесь, а не только на странице обновления, нарочно:
+			     смотрят на новое именно тут, в библиотеке, и решение «уезжать
+			     этому наверх или нет» принимается на этой же странице. Сам ход
+			     выкладки показывает страница обновления — туда кнопка и уводит. -->
+			<button class="topbar__link topbar__link--button" id="deployLink" type="button"
+				title="Выложить нынешнюю базу и сайт на Cloudflare">Задеплоить →</button>
+
 			<div class="account" id="account"></div>
 		</div>
 	</header>
@@ -163,6 +170,9 @@
 
 	<script src="/common.js"></script>
 	<script src="/icons.js"></script>
+	<!-- Карточка пака живёт отдельно: ею же нарисована и его собственная
+	     страница (/pack/…), см. web/card.js -->
+	<script src="/card.js"></script>
 	<script src="/app.js"></script>
 </body>
 </html>

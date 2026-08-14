@@ -3,11 +3,12 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS, GENRES } from './config.js';
 import {
-	db, jsonOrDefault, normalizeRounds, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
+	db, jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
 } from './db.js';
-import { runSearch } from './search.js';
+import { runSearch, warmSearch } from './search.js';
 import { groupSubjects, subjectMatches } from './subject.js';
 import { packSlug, packIdFromPath } from './slug.js';
 import { injectPackMeta, buildSitemap, buildRobots } from './meta.js';
@@ -191,7 +192,7 @@ function toPackage(row) {
 		// Сколько паков у каждого из них — по порядку, тем же списком
 		authorPacks: authors.map(author => counts.get(buildAuthorKey(author)) ?? 1),
 		tags: jsonOrDefault(row.tags, []),
-		rounds: normalizeRounds(row.rounds),
+		rounds: roundsForApi(row.rounds),
 		contentStat: jsonOrDefault(row.content_stat, {}),
 		authorDifficulty: row.author_difficulty,
 		language: row.language,
@@ -228,6 +229,9 @@ function toPackage(row) {
 		vkComment: row.vk_comment,
 		commentText: row.comment_text,
 		played: row.played === 1,
+		// Отобран на будущий вечер. Отдельно от played нарочно: одно про прошлое,
+		// другое про будущее, и пак бывает и там, и там сразу
+		planned: row.planned === 1,
 		// Оценки игроков — то, чего не знает статистика SIGame: она считает,
 		// сколько раз пак запускали, а не понравился ли он.
 		rating: {
@@ -383,6 +387,12 @@ function buildWhere(query, userId) {
 		conditions.push('pl.package_id IS NOT NULL');
 	}
 
+	// Запланированное отбирается тут же, рядом с сыгранным: «что мы собирались
+	// сыграть» — тот же вопрос к своим отметкам, только про будущее
+	if (query.get('onlyPlanned') === '1') {
+		conditions.push('pn.package_id IS NOT NULL');
+	}
+
 	// Отсечка по времени появления в обсуждении живёт здесь, а не в сортировке:
 	// иначе счётчик «найдено» считал бы паки, которых в выдаче нет.
 	const period = periodOf(query.get('sort') ?? 'added');
@@ -401,6 +411,7 @@ const BASE_FROM = `
 	FROM packages p
 	LEFT JOIN stats s ON s.package_id = p.id
 	LEFT JOIN played pl ON pl.package_id = p.id
+	LEFT JOIN planned pn ON pn.package_id = p.id
 	LEFT JOIN temp.search_hits h ON h.package_id = p.id
 	LEFT JOIN (
 		SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
@@ -494,6 +505,7 @@ function listPackages(query, userId) {
 	const rows = db.prepare(`
 		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
 			s.found AS stats_found, CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played,
+			CASE WHEN pn.package_id IS NULL THEN 0 ELSE 1 END AS planned,
 			r.rating_count, r.rating_average, ${MY_SCORE}
 		${BASE_FROM}
 		WHERE ${where}
@@ -519,6 +531,7 @@ function getPackage(id, userId) {
 	const row = db.prepare(`
 		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
 			s.found AS stats_found, CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played,
+			CASE WHEN pn.package_id IS NULL THEN 0 ELSE 1 END AS planned,
 			r.rating_count, r.rating_average, ${MY_SCORE}
 		${BASE_FROM}
 		WHERE p.id = ? AND p.status = 'ok'
@@ -630,6 +643,11 @@ function getFacets() {
 		played: db.prepare(`
 			SELECT COUNT(DISTINCT ${PACK_KEY_SQL}) AS c
 			FROM played pl JOIN packages p ON p.id = pl.package_id
+		`).get().c,
+		// Отложенное на будущий вечер — тем же счётом
+		planned: db.prepare(`
+			SELECT COUNT(DISTINCT ${PACK_KEY_SQL}) AS c
+			FROM planned pn JOIN packages p ON p.id = pn.package_id
 		`).get().c,
 		minGames: config.minGamesForDifficulty,
 		// Второй порог оценки: одних игр мало, по паку ещё должно быть показано
@@ -772,12 +790,58 @@ function setPlayed(id, played) {
 	for (const packageId of ids) {
 		if (played) {
 			markPlayed.run(packageId, Date.now());
+			// Сыграли — значит, «собираемся сыграть» кончилось само собой. Оставлять
+			// пак в запланированном после отметки значило бы требовать двух нажатий
+			// там, где произошло одно событие; вернуть его в список можно тем же
+			// «Запланировать», если за него сядут ещё раз.
+			unmarkPlanned.run(packageId);
 		} else {
 			unmarkPlayed.run(packageId);
 		}
 	}
 
 	return ids.length;
+}
+
+const markPlanned = db.prepare('INSERT OR REPLACE INTO planned (package_id, marked_at) VALUES (?, ?)');
+const unmarkPlanned = db.prepare('DELETE FROM planned WHERE package_id = ?');
+
+/**
+ * Отобрать пак на будущий вечер — или передумать. Устроено ровно как отметка
+ * «сыграно»: ставится сразу на все копии пака, потому что копия — это тот же
+ * самый файл, выложенный в обсуждение дважды.
+ */
+function setPlanned(id, planned) {
+	const ids = twinPackages.all(id).map(row => row.id);
+
+	for (const packageId of ids) {
+		if (planned) {
+			markPlanned.run(packageId, Date.now());
+		} else {
+			unmarkPlanned.run(packageId);
+		}
+	}
+
+	return ids.length;
+}
+
+/** То же по общему ключу: этим переезжают отметки, сделанные до входа. */
+function setPlannedKeys(keys, planned) {
+	let affected = 0;
+
+	for (const key of new Set((keys ?? []).map(value => String(value ?? '').trim()).filter(Boolean))) {
+		for (const row of packagesByKey.all(key)) {
+			if (planned) {
+				markPlanned.run(row.id, Date.now());
+			} else {
+				unmarkPlanned.run(row.id);
+			}
+
+			affected++;
+		}
+	}
+
+	return affected;
 }
 
 /** Строки паков по общему ключу: у копий одного файла ключ один на всех. */
@@ -860,11 +924,34 @@ function getProfile(userId) {
 		}
 	}
 
+	// Запланированное. Тот же запрос, только по другой таблице и в обратную
+	// сторону по смыслу: сыгранное — что уже было, запланированное — что впереди.
+	// Сортировка тоже своя: сначала недавно отложенное — то, о чём человек
+	// думал последним.
+	const plannedRows = db.prepare(`
+		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
+			s.found AS stats_found, 1 AS planned,
+			CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played, MIN(pn.marked_at) AS marked_at,
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		FROM planned pn
+		JOIN packages p ON p.id = pn.package_id
+		LEFT JOIN stats s ON s.package_id = p.id
+		LEFT JOIN played pl ON pl.package_id = p.id
+		LEFT JOIN (
+			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
+			FROM ratings GROUP BY pack_key
+		) r ON r.pack_key = ${PACK_KEY_SQL}
+		WHERE p.status = 'ok'
+		GROUP BY ${PACK_KEY_SQL}
+		ORDER BY marked_at DESC
+	`).all(userId ?? null);
+
 	return {
 		total: packages.length,
 		questions,
 		levels,
 		topics,
+		planned: plannedRows.map(row => ({ ...toPackage(row), markedAt: row.marked_at })),
 		// Личный чёрный список: показать его больше негде, а снимать оттуда
 		// как-то надо — на карточках спрятанного по определению не видно
 		blacklist: userId ? listBlacklist(userId) : [],
@@ -887,12 +974,104 @@ function readBody(request) {
 	});
 }
 
-function sendJson(response, data, status = 200) {
-	const body = JSON.stringify(data);
-	response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
-	response.end(body);
+// ————— сжатие ответов —————
+//
+// Cloudflare сжимает всё, что отдаёт, сам; домашний сервер не сжимал ничего,
+// и разница выходила не косметическая. Страница библиотеки — это ответ выдачи
+// на две дюжины паков, список тем для фильтров, стили и три скрипта: полтора
+// мегабайта текста, каждый байт которого ехал как есть. Текст этот сжимается
+// раз в пять-семь (много повторов: одни и те же ключи JSON, русские названия
+// тем), и по домашней сети разница заметна, а по Wi-Fi с телефона — тем более.
+//
+// Сжимается только текст. Обложки уже сжаты своим форматом, и второй проход
+// по ним — чистая трата времени процессора: AVIF от gzip не худеет.
+
+/** Меньше этого сжимать не за чем: заголовок ответа и тот длиннее. */
+const COMPRESS_MIN = 1024;
+
+const COMPRESSIBLE = /^(text\/|application\/(json|xml|javascript)|image\/svg)/;
+
+/**
+ * Brotli жмёт лучше gzip, но его настройка по умолчанию (11) считает секундами:
+ * она рассчитана на файл, который сожмут один раз при сборке, а не на ответ,
+ * который собирают заново каждому пришедшему. Четвёрка — обычный выбор для
+ * ответов на лету: по весу это тот же gzip или чуть лучше, по времени — миллисекунды.
+ */
+const BROTLI = {
+	params: {
+		[zlib.constants.BROTLI_PARAM_QUALITY]: 4,
+		[zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
+	},
+};
+
+function pickEncoding(request) {
+	const accepted = String(request?.headers?.['accept-encoding'] ?? '');
+
+	if (/\bbr\b/.test(accepted)) {
+		return 'br';
+	}
+
+	return /\bgzip\b/.test(accepted) ? 'gzip' : null;
 }
 
+/**
+ * Ответ телом-буфером, сжатый, если пришедший это умеет и если сжимать есть что.
+ *
+ * Запрос берётся из самого ответа (`response.req`): звать sendJson приходится
+ * из трёх десятков мест, и таскать через все из них ещё один довод ради одного
+ * заголовка не за чем.
+ */
+function sendBody(response, status, headers, body, request = response.req) {
+	const encoding = COMPRESSIBLE.test(headers['Content-Type'] ?? '') && body.length >= COMPRESS_MIN
+		? pickEncoding(request)
+		: null;
+
+	if (!encoding) {
+		response.writeHead(status, { ...headers, 'Content-Length': body.length });
+		response.end(body);
+		return;
+	}
+
+	const pack = (input, done) => (encoding === 'br'
+		? zlib.brotliCompress(input, BROTLI, done)
+		: zlib.gzip(input, done));
+
+	pack(body, (error, packed) => {
+		// Сжать не вышло — отдаём как есть: ответ важнее его веса
+		if (error) {
+			response.writeHead(status, { ...headers, 'Content-Length': body.length });
+			response.end(body);
+			return;
+		}
+
+		response.writeHead(status, {
+			...headers,
+			'Content-Encoding': encoding,
+			'Content-Length': packed.length,
+			// Без этого промежуточный кэш отдал бы сжатый ответ тому, кто сжатия
+			// не просил, — и наоборот
+			Vary: headers.Vary ? `${headers.Vary}, Accept-Encoding` : 'Accept-Encoding',
+		});
+
+		response.end(packed);
+	});
+}
+
+function sendJson(response, data, status = 200) {
+	sendBody(response, status, { 'Content-Type': 'application/json; charset=utf-8' }, Buffer.from(JSON.stringify(data)));
+}
+
+/**
+ * Отдаёт файл с диска.
+ *
+ * @param {boolean} cacheable вечный ли у файла кэш. Обложки — самое тяжёлое,
+ *   что отдаёт сайт: их тысячи, в среднем по 180 КБ, и на страницу их разом
+ *   приходит два десятка. Файл обложки никогда не меняется (имя привязано
+ *   к номеру пака, а новая обложка получает новое имя), поэтому кэш вечный
+ *   и безусловный. Вёрстке и скриптам так нельзя — их правят, — но и им
+ *   спрашивать про каждый файл заново незачем: ниже у всего есть отпечаток,
+ *   и в ответ на «не менялось ли» приходит пустой 304 вместо ста килобайт.
+ */
 function sendFile(response, filePath, request = null, cacheable = false) {
 	fs.readFile(filePath, (error, data) => {
 		if (error) {
@@ -901,33 +1080,31 @@ function sendFile(response, filePath, request = null, cacheable = false) {
 		}
 
 		const headers = { 'Content-Type': MIME[path.extname(filePath)] ?? 'application/octet-stream' };
+		const stat = fs.statSync(filePath, { throwIfNoEntry: false });
 
-		// Обложки — самое тяжёлое, что отдаёт сайт: их под четыре сотни, в среднем
-		// по 180 КБ, и на страницу их разом приходит два десятка. Без этих
-		// заголовков браузер тянул все двадцать заново на каждый чих — переход по
-		// страницам, смену фильтра, сортировку, — и обложки просто не успевали
-		// появиться. Файл логотипа никогда не меняется (имя = номер пака, а новый
-		// логотип получает новое имя), поэтому кэш вечный и безусловный.
-		if (cacheable) {
-			const stat = fs.statSync(filePath, { throwIfNoEntry: false });
-			const tag = stat ? `"${stat.size.toString(16)}-${stat.mtimeMs.toString(16)}"` : null;
+		// Отпечаток считается по размеру и времени правки: содержимое для этого
+		// читать не надо, а меняются они вместе с ним.
+		//
+		// Способ сжатия входит в отпечаток нарочно: у сжатого и несжатого ответа
+		// тела разные, и один и тот же отпечаток на оба означал бы, что кэш
+		// однажды отдаст gzip тому, кто его не понимает.
+		const encoding = pickEncoding(request);
+		const tag = stat ? `"${stat.size.toString(16)}-${stat.mtimeMs.toString(16)}${encoding ? `-${encoding}` : ''}"` : null;
 
-			headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+		headers['Cache-Control'] = cacheable ? 'public, max-age=31536000, immutable' : 'no-cache';
 
-			if (tag) {
-				headers.ETag = tag;
+		if (tag) {
+			headers.ETag = tag;
 
-				// Браузер уже спрашивал про этот файл — не гоним его второй раз
-				if (request?.headers['if-none-match'] === tag) {
-					response.writeHead(304, headers);
-					response.end();
-					return;
-				}
+			// Браузер уже спрашивал про этот файл — не гоним его второй раз
+			if (request?.headers['if-none-match'] === tag) {
+				response.writeHead(304, headers);
+				response.end();
+				return;
 			}
 		}
 
-		response.writeHead(200, headers);
-		response.end(data);
+		sendBody(response, 200, headers, data, request);
 	});
 }
 
@@ -1091,6 +1268,21 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
+		// Запланированное — отдельным методом, а не признаком у /api/played:
+		// это две разные отметки, и снимать одну, ставя другую, сайт не должен
+		// (см. таблицу planned). Отвечает он тем же, чем и сыгранное.
+		if (url.pathname === '/api/planned' && request.method === 'POST') {
+			const { id, packKeys, planned } = JSON.parse(await readBody(request));
+
+			if (Array.isArray(packKeys)) {
+				sendJson(response, { planned: !!planned, affected: setPlannedKeys(packKeys, planned) });
+				return;
+			}
+
+			sendJson(response, { id, planned: !!planned, affected: setPlanned(id, planned) });
+			return;
+		}
+
 		// На хостинге обновлять нечего: индексатора там нет, а Gemini и ВК с чужого
 		// адреса дёргать не следует. Отвечаем отказом до разбора конкретного метода,
 		// чтобы не осталось ни одной работающей лазейки.
@@ -1189,9 +1381,14 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
-		// Каким адресом сайт сам себя видит. Нужен только поисковым мелочам —
-		// полной ссылке на страницу пака и адресу карты сайта в robots.txt.
-		const origin = `http://${request.headers.host ?? `localhost:${config.port}`}`;
+		// Каким адресом сайт сам себя видит. Нужен поисковым мелочам — полной
+		// ссылке на страницу пака, адресу карты сайта в robots.txt, каноническому
+		// адресу в шапке.
+		//
+		// PUBLIC_URL важнее заголовка Host: за обратным прокси Host — это адрес
+		// прокси, и в canonical уехал бы он, а поисковик по canonical решает,
+		// какая страница настоящая. Дома PUBLIC_URL не задан, и остаётся Host.
+		const origin = config.publicUrl || `http://${request.headers.host ?? `localhost:${config.port}`}`;
 
 		// ————— отдельная страница пака —————
 		//
@@ -1209,8 +1406,8 @@ const server = http.createServer(async (request, response) => {
 			// Пака нет — страница всё равно та же самая: она сама скажет об этом
 			// словами и позовёт обратно в библиотеку. Ответ при этом честный,
 			// чтобы поисковик не держал у себя ссылку на пропавший пак.
-			response.writeHead(pack ? 200 : 404, { 'Content-Type': MIME['.html'] });
-			response.end(pack ? injectPackMeta(html, pack, origin) : html);
+			sendBody(response, pack ? 200 : 404, { 'Content-Type': MIME['.html'] },
+				Buffer.from(pack ? injectPackMeta(html, pack, origin) : html), request);
 			return;
 		}
 
@@ -1220,14 +1417,12 @@ const server = http.createServer(async (request, response) => {
 			const rows = sitemapQuery.all().map(row => ({ id: row.id, name: row.name ?? row.file_name, vk_ts: row.vk_ts }));
 			const body = buildSitemap(rows, origin);
 
-			response.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8' });
-			response.end(body);
+			sendBody(response, 200, { 'Content-Type': 'application/xml; charset=utf-8' }, Buffer.from(body), request);
 			return;
 		}
 
 		if (url.pathname === '/robots.txt') {
-			response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-			response.end(buildRobots(origin));
+			sendBody(response, 200, { 'Content-Type': 'text/plain; charset=utf-8' }, Buffer.from(buildRobots(origin)), request);
 			return;
 		}
 
@@ -1274,4 +1469,9 @@ server.listen(config.port, process.env.HOST || undefined, () => {
 		console.log(`  впишите в OAuth2 → Redirects адрес ${redirectUri()}`);
 		console.log('  и положите ключи в data/discord-client-id.txt и data/discord-client-secret.txt');
 	}
+
+	// Список слов для поиска — заранее, пока сервер пустой. Собирается он полсекунды,
+	// и без этой строчки они достаются тому, кто первым что-нибудь наберёт: набирают
+	// по букве, и вся задержка приходится ровно на первую.
+	setImmediate(warmSearch);
 });

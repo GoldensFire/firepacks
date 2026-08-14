@@ -15,6 +15,7 @@
 import {
 	listPackages, getPackage, getFacets, getTopAuthors, getProfile, listSitemap,
 	setPlayed, setPlayedKeys, isPlayedPack, playedCount,
+	setPlanned, setPlannedKeys, plannedCount,
 } from './library.js';
 
 import { packIdFromPath } from '../../src/slug.js';
@@ -208,12 +209,13 @@ export default {
 			if (url.pathname === '/api/facets') {
 				// Общая часть считается редко и лежит готовой у изолята, а «сколько
 				// сыграно» у каждого своё и спрашивается всегда.
-				const [facets, played] = await Promise.all([
+				const [facets, played, planned] = await Promise.all([
 					getFacets(env.DB),
 					playedCount(env.DB, userId),
+					plannedCount(env.DB, userId),
 				]);
 
-				return share(json({ ...facets, played, hasDiscord: hasDiscord(env), user }));
+				return share(json({ ...facets, played, planned, hasDiscord: hasDiscord(env), user }));
 			}
 
 			if (url.pathname === '/api/authors') {
@@ -241,6 +243,25 @@ export default {
 				}
 
 				const result = await setPlayed(env.DB, userId, id, played);
+
+				return json(result, result.error ? 404 : 200);
+			}
+
+			// Запланированное — отдельным методом, а не признаком у /api/played:
+			// это две разные отметки, и снимать одну, ставя другую, сайт не должен
+			// (см. таблицу planned в cf/schema.sql).
+			if (url.pathname === '/api/planned' && request.method === 'POST') {
+				if (!user) {
+					return json({ error: 'Планировать паки можно, только войдя через Discord' }, 401);
+				}
+
+				const { id, packKeys, planned } = await readJson(request) ?? {};
+
+				if (Array.isArray(packKeys)) {
+					return json(await setPlannedKeys(env.DB, userId, packKeys, planned));
+				}
+
+				const result = await setPlanned(env.DB, userId, id, planned);
 
 				return json(result, result.error ? 404 : 200);
 			}

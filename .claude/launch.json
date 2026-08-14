@@ -4,7 +4,7 @@
 		{
 			"name": "firepacks",
 			"runtimeExecutable": "node",
-			"runtimeArgs": ["--no-warnings", "src/server.js"],
+			"runtimeArgs": ["--no-warnings", "scripts/start.js"],
 			"port": 3000,
 			"autoPort": true
 		},

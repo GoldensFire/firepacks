@@ -102,6 +102,14 @@ const minutes = () => ((Date.now() - startedAt.getTime()) / 60000).toFixed(1);
 
 say(`Ночной обход базы начат. Отчёт: ${logFile}`);
 
+// Сверка с полкой — то же самое, что делает запуск сайта (см. scripts/state.js).
+// Дополнять вчерашнюю копию нельзя: работа ляжет поверх устаревшего, а потом
+// уедет на полку и затрёт там свежее. В Actions базу привозит отдельный шаг
+// самого workflow, и второй раз её тянуть незачем.
+if (!process.env.GITHUB_ACTIONS) {
+	await run(process.execPath, ['--no-warnings', 'scripts/state.js', 'sync']);
+}
+
 // Индексатор без ключей делает обычный полный проход: ВК, разбор новых паков,
 // статистика, тематики и краткие описания (см. STEPS в src/indexer.js).
 const indexed = await run(process.execPath, ['--no-warnings', 'src/indexer.js', ...indexerArgs]);

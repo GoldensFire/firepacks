@@ -27,6 +27,19 @@ const local = process.argv.includes('--local');
 const dbOnly = process.argv.includes('--db-only');
 
 /**
+ * Класть ли базу на полку после удачной заливки. По умолчанию — да, и это
+ * не мелочь, а вторая половина сверки (см. scripts/state.js): здешний запуск
+ * сайта подгоняет базу под полку, значит на полке обязано лежать ровно то,
+ * что стоит на сайте. Не положить сюда — и следующий запуск дома вернёт
+ * вчерашнюю копию, стерев то, что только что уехало наверх.
+ *
+ * Ключ --no-state снимает это для разовых случаев. В GitHub Actions полка
+ * и так обновляется отдельным шагом (.github/workflows/nightly.yml) — второй
+ * раз гнать туда семьдесят мегабайт незачем.
+ */
+const toShelf = !local && !process.argv.includes('--no-state') && !process.env.GITHUB_ACTIONS;
+
+/**
  * Местная копия — всегда целиком и без отметки «доехало». Она живёт в .wrangler
  * рядом с проектом и к настоящей базе в Cloudflare отношения не имеет: запомнить
  * по ней, что там уже лежит, значило бы соврать самим себе, и следующая настоящая
@@ -155,6 +168,30 @@ function writeDevVars() {
 	console.log('Ключи Discord для местной проверки записаны в .dev.vars');
 }
 
+/**
+ * Положить базу на полку — ту самую, с которой её берёт запуск сайта дома
+ * и ночной обход в облаке.
+ *
+ * Сорвалось — говорим и живём дальше: сайт-то уже обновлён, и валить из-за
+ * этого всю выкладку не за что. Но сказать надо громко: пока на полке лежит
+ * прежнее, здешняя база расходится с сайтом, и первая же сверка вернёт её
+ * к вчерашнему виду.
+ */
+function shelve() {
+	console.log('\n───── Полка ─────');
+
+	const result = spawnSync(process.execPath, ['--no-warnings', 'scripts/state.js', 'push'], {
+		cwd: root,
+		stdio: 'inherit',
+	});
+
+	if (result.status !== 0) {
+		console.error('');
+		console.error('На полку база не легла. Сайт при этом обновлён — расходится только полка.');
+		console.error('Положить руками: npm run state:push (а если полка новее — npm run state:push -- --force).');
+	}
+}
+
 function main() {
 	if (!local) {
 		const config = fs.readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8');
@@ -196,11 +233,20 @@ function main() {
 
 	if (dbOnly) {
 		console.log('\nБаза залита. Сам сайт не трогали.');
+
+		if (toShelf) {
+			shelve();
+		}
+
 		return;
 	}
 
 	console.log('\n───── Выкладка ─────');
 	run('npx', ['wrangler', 'deploy']);
+
+	if (toShelf) {
+		shelve();
+	}
 
 	console.log('\nГотово.');
 }

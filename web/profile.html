@@ -4,6 +4,11 @@
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>Профиль — FirePacks</title>
+	<!-- Личная страница: у каждого своя, и в поисковой выдаче ей делать нечего.
+	     Закрыта дважды — здесь и в robots.txt: robots запрещает обход, а метка
+	     запрещает показ, и это разные запреты. Страницу, на которую ведут ссылки
+	     со стороны, поисковик показывает в выдаче и не обходя её. -->
+	<meta name="robots" content="noindex, nofollow">
 	<link rel="icon" href="/favicon.ico" sizes="any">
 	<link rel="stylesheet" href="/style.css">
 </head>
@@ -58,6 +63,19 @@
 		<section class="profile__block" id="authorsBlock" hidden>
 			<h2 class="filters__title">Авторы, к которым возвращаешься</h2>
 			<div class="profile__chips" id="authors"></div>
+		</section>
+
+		<!-- Запланированное стоит ВЫШЕ сыгранного нарочно: сыгранное — это архив,
+		     в него заглядывают из любопытства, а запланированное открывают затем,
+		     чтобы сегодня во что-то сыграть. Отвечать на этот вопрос страница
+		     должна первым делом, а не после прокрутки мимо всего сыгранного. -->
+		<section class="profile__block" id="plannedBlock">
+			<div class="content__head">
+				<h2 class="filters__title">Запланировано</h2>
+				<div id="plannedInfo" class="result-info"></div>
+			</div>
+
+			<div id="plannedGrid" class="grid"></div>
 		</section>
 
 		<section class="profile__block">

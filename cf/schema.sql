@@ -71,3 +71,18 @@ CREATE TABLE IF NOT EXISTS played (
 );
 
 CREATE INDEX IF NOT EXISTS ix_played_key ON played (pack_key);
+
+-- Запланированное: паки, отобранные на будущий вечер. Устроено ровно как
+-- played, и по тем же причинам — хозяин обязателен, ключ вместо номера.
+--
+-- Отдельная таблица, а не признак у played, потому что это не состояние одной
+-- отметки, а две разные: «во что играли» — прошлое, «во что собираемся» —
+-- будущее, и пак вполне бывает и там, и там сразу.
+CREATE TABLE IF NOT EXISTS planned (
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	pack_key TEXT NOT NULL,
+	marked_at INTEGER NOT NULL,
+	PRIMARY KEY (user_id, pack_key)
+);
+
+CREATE INDEX IF NOT EXISTS ix_planned_key ON planned (pack_key);

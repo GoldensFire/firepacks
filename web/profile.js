@@ -174,6 +174,15 @@ function renderNumbers() {
 	add(`${share}%`, 'от всей библиотеки', `Всего в библиотеке ${formatNumber(facets.total)} паков`);
 	add(formatNumber(profile.questions), plural(profile.questions, 'вопрос', 'вопроса', 'вопросов'),
 		'Столько вопросов лежит в сыгранных паках — не столько прозвучало за столом');
+
+	const planned = profile.planned?.length ?? 0;
+
+	// Пустого «0 паков в планах» здесь нет: это число про то, чего человек
+	// ни разу не делал, а объясняет это сам список ниже
+	if (planned > 0) {
+		add(formatNumber(planned), plural(planned, 'пак в планах', 'пака в планах', 'паков в планах'),
+			'Отложено на будущее — список ниже');
+	}
 }
 
 /** Разбивка сыгранного по сложности и по типу пака: чем ссылка, тем в библиотеку. */
@@ -247,8 +256,20 @@ function renderAuthors() {
  * во что играть, а вспоминают, во что играли, — значит, важны название, когда
  * это было, и возможность вернуться к паку или снять отметку.
  */
-function createCard(pack) {
-	const card = element('div', 'card');
+function createCard(pack, options = {}) {
+	const planned = options.planned === true;
+	const card = element('div', 'card card--clickable');
+
+	// Карточка целиком ведёт на страницу пака — как и в библиотеке (см. card.js).
+	// Кнопки внизу до этого обработчика не доходят: они останавливают событие
+	// сами, а здесь их всего две и обе — <button>.
+	card.addEventListener('click', event => {
+		if (event.target.closest('a, button')) {
+			return;
+		}
+
+		window.location.href = pack.slug ? `/pack/${pack.id}-${pack.slug}` : `/pack/${pack.id}`;
+	});
 
 	const head = element('div', 'card__head');
 	head.append(createLogo(pack));
@@ -281,8 +302,8 @@ function createCard(pack) {
 	const meta = element('div', 'meta');
 
 	if (pack.markedAt) {
-		const date = iconText('check', new Date(pack.markedAt).toLocaleDateString('ru-RU'), 'meta__date');
-		date.title = 'Когда пак был отмечен сыгранным';
+		const date = iconText(planned ? 'bookmark' : 'check', new Date(pack.markedAt).toLocaleDateString('ru-RU'), 'meta__date');
+		date.title = planned ? 'Когда пак отложили на будущее' : 'Когда пак был отмечен сыгранным';
 		meta.append(date);
 	}
 
@@ -315,29 +336,92 @@ function createCard(pack) {
 	const actions = element('div', 'card__actions');
 	actions.append(createPlayLink(pack, facets.playerUri));
 
+	// У запланированного пака второе действие своё: не «убрать из сыгранного»,
+	// а «сыграно» — за него как раз садятся, и отметка сама уберёт его из планов
+	// (см. setPlayed на сервере). Передумать можно третьей кнопкой.
+	if (planned) {
+		const done = element('button', 'button', 'Сыграно');
+		done.type = 'button';
+		done.title = 'Отметить сыгранным. Из запланированного пак при этом уйдёт';
+		done.addEventListener('click', () => mark(done, '/api/played', { id: pack.id, played: true }));
+
+		const forget = element('button', 'button button--ghost', 'Убрать из планов');
+		forget.type = 'button';
+		forget.addEventListener('click', () => mark(forget, '/api/planned', { id: pack.id, planned: false }));
+
+		actions.append(done, forget);
+		card.append(actions);
+
+		return card;
+	}
+
 	const remove = element('button', 'button', 'Убрать из сыгранного');
 	remove.type = 'button';
-
-	remove.addEventListener('click', async () => {
-		remove.disabled = true;
-
-		try {
-			await fetch('/api/played', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ id: pack.id, played: false }),
-			});
-
-			await start();
-		} catch {
-			remove.disabled = false;
-		}
-	});
+	remove.addEventListener('click', () => mark(remove, '/api/played', { id: pack.id, played: false }));
 
 	actions.append(remove);
 	card.append(actions);
 
 	return card;
+}
+
+/** Отметка со страницы профиля: отправить и перечитать страницу целиком. */
+async function mark(button, url, body) {
+	button.disabled = true;
+
+	try {
+		await fetch(url, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+
+		await start();
+	} catch {
+		button.disabled = false;
+	}
+}
+
+/**
+ * Запланированное: паки, отобранные на будущий вечер, — за этим страницу
+ * и открывают чаще всего, поэтому список стоит выше сыгранного.
+ *
+ * Без входа на общем сайте отметок здесь нет: они лежат в самом браузере,
+ * а страница показывает то, что знает сервер (то же самое, что и с сыгранным).
+ */
+function renderPlanned() {
+	const grid = $('plannedGrid');
+	const packs = profile.planned ?? [];
+
+	grid.textContent = '';
+
+	if (packs.length === 0) {
+		const anonymous = !user && facets.localBlacklist !== true;
+
+		grid.append(element('div', 'empty', anonymous
+			? 'Здесь собираются паки, отложенные на будущее. Пока входа нет, отметки живут '
+				+ 'в самом браузере и сюда не попадают: войдите через Discord — они переедут в учётную запись.'
+			: 'Здесь собираются паки, отложенные на будущее. Отложить можно в библиотеке — '
+				+ 'кнопкой «Запланировать» на карточке.'));
+
+		$('plannedInfo').textContent = '';
+		return;
+	}
+
+	for (const pack of packs) {
+		grid.append(createCard(pack, { planned: true }));
+	}
+
+	const info = $('plannedInfo');
+	info.textContent = '';
+
+	info.append(document.createTextNode(`Всего ${packs.length}, сначала отложенные недавно · `));
+
+	// Ссылка в библиотеку с уже выставленным отбором: здесь список целиком,
+	// а там по нему можно искать теми же фильтрами, что и по всей базе
+	const inLibrary = element('a', null, 'показать в библиотеке');
+	inLibrary.href = '/?onlyPlanned=1';
+	info.append(inLibrary);
 }
 
 function renderLibrary() {
@@ -389,6 +473,7 @@ async function start() {
 
 	renderAuthors();
 	renderBlacklist();
+	renderPlanned();
 	renderLibrary();
 }
 

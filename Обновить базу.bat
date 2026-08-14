@@ -6,6 +6,7 @@ echo Там можно отметить, что именно обновлять:
 echo статистику, проценты категорий, краткие описания.
 echo Окно не закрывайте — на нём держится сайт.
 echo.
-start "" http://localhost:3000/update
-node --no-warnings src/server.js
+echo Сначала сверяю базу с сайтом: обновлять вчерашнюю копию незачем.
+echo.
+node --no-warnings scripts\start.js --open --page=/update
 pause

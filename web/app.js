@@ -6,6 +6,9 @@ const state = {
 	unrated: true,
 	hidePlayed: false,
 	onlyPlayed: false,
+	// Отобранное на будущий вечер. Полный список — в профиле, а здесь по нему
+	// можно искать теми же фильтрами, что и по всей библиотеке
+	onlyPlanned: false,
 	// Тем, типов пака и языков можно выбрать сразу несколько: подходит тот пак,
 	// что попал хотя бы в один из выбранных
 	tags: new Set(),
@@ -124,6 +127,23 @@ function onPlayedChange(pack) {
 	}
 }
 
+/**
+ * Пак отложили на будущее или передумали. Как и с «сыграно», сама карточка
+ * к этому мигу уже перерисована — здесь остаётся счётчик в шапке.
+ *
+ * Выдача при этом не перезагружается, даже когда включено «только
+ * запланированные»: пак, только что убранный из планов, исчез бы прямо
+ * из-под руки, и человек не увидел бы даже, что именно пропало. Уйдёт он
+ * при следующем обновлении страницы — так же, как спрятанное в чёрный список.
+ */
+function onPlannedChange(pack) {
+	if (serverMarks()) {
+		facets.planned = Math.max(0, (facets.planned ?? 0) + (pack.planned ? 1 : -1));
+	}
+
+	renderCounters();
+}
+
 function buildQuery() {
 	const query = new URLSearchParams({
 		sort: state.sort,
@@ -152,6 +172,10 @@ function buildQuery() {
 
 	if (state.onlyPlayed) {
 		query.set('onlyPlayed', '1');
+	}
+
+	if (state.onlyPlanned) {
+		query.set('onlyPlanned', '1');
 	}
 
 	if (state.tags.size > 0) {
@@ -192,12 +216,15 @@ function buildQuery() {
 function renderPlayedFilters() {
 	const locked = !serverMarks();
 
-	for (const id of ['hidePlayed', 'onlyPlayed']) {
+	for (const id of ['hidePlayed', 'onlyPlayed', 'onlyPlanned']) {
 		const input = $(id);
 		input.disabled = locked;
 
+		// Отбор снимается и с галочки, и из состояния: он мог приехать из адреса
+		// (/?onlyPlanned=1 — ссылка из профиля), а работать ему всё равно нечем
 		if (locked) {
 			input.checked = false;
+			state[id] = false;
 		}
 
 		const row = input.closest('.check');
@@ -620,11 +647,15 @@ function renderCounters() {
 	// не знает и присылает ноль, а на счётчике должно стоять то же число, что
 	// человек видит на карточках
 	const played = serverMarks() ? facets.played : localPlayed.size;
+	const planned = serverMarks() ? (facets.planned ?? 0) : localPlanned.size;
 
 	$('counters').innerHTML =
 		`Паков: <b>${facets.total}</b>` +
 		` · С оценкой: <b>${facets.rated}</b>` +
-		` · Сыграно: <b id="playedCount">${played}</b>`;
+		` · Сыграно: <b id="playedCount">${played}</b>` +
+		// Запланированное показывается, только когда оно есть: пустой счётчик
+		// в шапке — это строка про то, чего человек ни разу не делал
+		(planned > 0 ? ` · В планах: <b id="plannedCount">${planned}</b>` : '');
 }
 
 /** Плашки поверх выдачи: показывают, что список сужен, и снимают фильтр по клику. */
@@ -704,6 +735,7 @@ function countActiveFilters() {
 		+ (state.author ? 1 : 0)
 		+ (state.hidePlayed ? 1 : 0)
 		+ (state.onlyPlayed ? 1 : 0)
+		+ (state.onlyPlanned ? 1 : 0)
 		+ (state.unrated || state.levels.size > 0 ? 0 : 1);
 }
 
@@ -931,6 +963,14 @@ function bind() {
 		load();
 	});
 
+	// «Только запланированные» ни с чем не спорит: отложить можно и сыгранный пак,
+	// и неоценённый, — поэтому соседние галочки эта не снимает
+	$('onlyPlanned').addEventListener('change', event => {
+		state.onlyPlanned = event.target.checked;
+		state.page = 1;
+		load();
+	});
+
 	let tagTimer = null;
 
 	$('tagSearch').addEventListener('input', () => {
@@ -988,6 +1028,7 @@ function resetFilters() {
 	state.unrated = true;
 	state.hidePlayed = false;
 	state.onlyPlayed = false;
+	state.onlyPlanned = false;
 	state.tags.clear();
 	state.topics.clear();
 	state.languages.clear();
@@ -1001,6 +1042,7 @@ function resetFilters() {
 	$('search').value = '';
 	$('hidePlayed').checked = false;
 	$('onlyPlayed').checked = false;
+	$('onlyPlanned').checked = false;
 	$('tagSearch').value = '';
 	$('subjectSearch').value = '';
 	$('sort').value = 'added';
@@ -1050,12 +1092,19 @@ function readUrlState() {
 	state.subject = query.get('subject') ?? '';
 	state.author = query.get('author') ?? '';
 
+	// Из профиля ведёт ссылка «показать запланированное в библиотеке»: там список
+	// целиком, а здесь по нему можно искать теми же фильтрами, что и по всей базе
+	state.onlyPlanned = query.get('onlyPlanned') === '1';
+	state.onlyPlayed = query.get('onlyPlayed') === '1';
+
 	if (query.get('sort')) {
 		state.sort = query.get('sort');
 	}
 
 	$('search').value = state.search;
 	$('sort').value = state.sort;
+	$('onlyPlanned').checked = state.onlyPlanned;
+	$('onlyPlayed').checked = state.onlyPlayed;
 }
 
 /**
@@ -1092,7 +1141,7 @@ async function start() {
 	// и без них нельзя составить запрос выдачи. Отметки, сделанные до входа,
 	// лежат там же, где и фильтры, — под рукой, и спрашивать о них некого.
 	readUrlState();
-	loadLocalPlayed();
+	loadLocalMarks();
 
 	// Оба обращения к серверу уходят разом. Выдача не зависит от настроек —
 	// ждать их ответа, чтобы только начать спрашивать паки, значило дарить
@@ -1120,11 +1169,18 @@ async function start() {
 	// на самих уровнях сложности и ярлыках тематик.
 
 	// На хостинге собирать базу нечем, и ссылок на страницу обновления и выкладку
-	// там быть не должно: выкладывать самого себя оттуда некуда и нечем
+	// там быть не должно: выкладывать самого себя оттуда некуда и нечем.
+	//
+	// В вёрстке обе спрятаны, и здесь они только показываются — не наоборот.
+	// Раньше их убирали отсюда же, но стояли они открытыми, и на хостинге были
+	// видны всё время, пока идёт первый запрос: «Обновить базу» и «Задеплоить»
+	// успевали помигать на общем сайте у каждого, кто его открыл.
 	if (facets.readOnly) {
 		$('updateLink').remove();
 		$('deployLink').remove();
 	} else {
+		$('updateLink').hidden = false;
+		$('deployLink').hidden = false;
 		$('deployLink').addEventListener('click', startDeploy);
 	}
 
@@ -1132,8 +1188,8 @@ async function start() {
 	// время им переехать. Делается это до выдачи нарочно — иначе первая же
 	// страница показала бы паки неотмеченными, и человек решил бы, что отметки
 	// пропали при входе.
-	if (serverMarks() && localPlayed.size > 0) {
-		await uploadLocalPlayed();
+	if (serverMarks() && localMarks() > 0) {
+		await uploadLocalMarks();
 
 		// Настройки и выдачу спрашиваем заново: те ответы уехали с сервера до
 		// переезда отметок, и паки в них ещё не отмечены

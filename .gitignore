@@ -12,6 +12,12 @@ data/sibase.db-wal
 data/logos/
 data/thumbs/
 data/state.tgz
+data/state-stage/
+
+# Прежняя здешняя база, отодвинутая сверкой, и отметка о том, какой свёрток
+# с полки здесь развёрнут: и то, и другое своё у каждой машины.
+data/sibase.prev.db
+data/state-mark.json
 
 # Отчёты о ночных обходах: у каждой машины свои
 data/nightly/

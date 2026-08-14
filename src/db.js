@@ -75,6 +75,18 @@ CREATE TABLE IF NOT EXISTS played (
 	marked_at INTEGER NOT NULL
 );
 
+/* Запланированное: паки, отобранные на будущий вечер.
+
+   Отдельная таблица, а не колонка в played, потому что это не состояние одной
+   отметки, а две разные: «во что играли» — прошлое, «во что собираемся» —
+   будущее, и пак вполне бывает и там, и там (сыграли, хотим ещё раз). Устроена
+   она ровно как played, и по той же причине без хозяина: дома отметки
+   принадлежат установке (см. LOCAL_USER_ID). */
+CREATE TABLE IF NOT EXISTS planned (
+	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
+	marked_at INTEGER NOT NULL
+);
+
 /* Авторы пака по одному в строке: иначе «Кот» находится внутри «Котовский». */
 CREATE TABLE IF NOT EXISTS pack_authors (
 	package_id INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,

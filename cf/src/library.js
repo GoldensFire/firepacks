@@ -14,7 +14,7 @@
 import {
 	settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
 } from '../../src/settings.js';
-import { jsonOrDefault, normalizeRounds, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import { jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
 import { packSlug } from '../../src/slug.js';
 import { groupSubjects, subjectMatches } from '../../src/subject.js';
 import { findHits, idList } from './search.js';
@@ -87,6 +87,15 @@ const BASE_FROM = `
 const MY_SCORE = `(SELECT score FROM ratings WHERE pack_key = ${PACK_KEY_SQL} AND user_id = ?) AS my_score`;
 
 const PLAYED_FLAG = 'CASE WHEN pl.pack_key IS NULL THEN 0 ELSE 1 END AS played';
+
+/**
+ * Отобран ли пак на будущий вечер. Подзапросом, а не ещё одним подшиванием
+ * в BASE_FROM, нарочно: BASE_FROM участвует и в счёте «найдено», и в числах
+ * сложностей, а тем про запланированное знать нечего. Лишнее подшивание в них
+ * означало бы лишний прочитанный столбец на каждой из пятнадцати тысяч строк —
+ * а у D1 прочитанное считано по тарифу.
+ */
+const PLANNED_FLAG = `(SELECT 1 FROM planned pn WHERE pn.user_id = ? AND pn.pack_key = ${PACK_KEY_SQL}) AS planned`;
 
 const STATS_FIELDS = `s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
 	s.found AS stats_found`;
@@ -175,7 +184,7 @@ function toPackage(row, counts) {
 		// Сколько паков у каждого из них — по порядку, тем же списком
 		authorPacks: authors.map(author => counts.get(buildAuthorKey(author)) ?? 1),
 		tags: jsonOrDefault(row.tags, []),
-		rounds: normalizeRounds(row.rounds),
+		rounds: roundsForApi(row.rounds),
 		contentStat: jsonOrDefault(row.content_stat, {}),
 		authorDifficulty: row.author_difficulty,
 		language: row.language,
@@ -213,6 +222,9 @@ function toPackage(row, counts) {
 		vkComment: row.vk_comment,
 		commentText: row.comment_text,
 		played: row.played === 1,
+		// Отобран на будущий вечер. Отдельно от played нарочно: одно про прошлое,
+		// другое про будущее, и пак бывает и там, и там сразу
+		planned: row.planned === 1,
 		// Оценки игроков — то, чего не знает статистика SIGame: она считает,
 		// сколько раз пак запускали, а не понравился ли он.
 		rating: {
@@ -369,6 +381,14 @@ function buildWhere(query, userId, hits, groups = []) {
 		conditions.push('pl.pack_key IS NOT NULL');
 	}
 
+	// Запланированное отбирается тут же, рядом с сыгранным: «что мы собирались
+	// сыграть» — тот же вопрос к своим отметкам, только про будущее. Подзапросом,
+	// а не подшиванием, по той же причине, что и PLANNED_FLAG.
+	if (userId && query.get('onlyPlanned') === '1') {
+		conditions.push(`EXISTS (SELECT 1 FROM planned pn WHERE pn.user_id = ? AND pn.pack_key = ${PACK_KEY_SQL})`);
+		params.push(userId);
+	}
+
 	// Отсечка по времени появления в обсуждении живёт здесь, а не в сортировке:
 	// иначе счётчик «найдено» считал бы паки, которых в выдаче нет.
 	const period = periodOf(query.get('sort') ?? 'added');
@@ -506,12 +526,12 @@ export async function listPackages(db, query, userId) {
 
 	const listQuery = db.prepare(`
 		SELECT p.*, ${STATS_FIELDS}, ${PLAYED_FLAG},
-			r.rating_count, r.rating_average, ${MY_SCORE}
+			r.rating_count, r.rating_average, ${MY_SCORE}, ${PLANNED_FLAG}
 		${BASE_FROM}
 		WHERE ${where}
 		ORDER BY ${orderBy}, p.id DESC
 		LIMIT ? OFFSET ?
-	`).bind(userId, userId, ...params, pageSize, offset);
+	`).bind(userId, userId, userId, ...params, pageSize, offset);
 
 	// Ключ счёта — сам отбор, а не адрес страницы: и «где» со своими значениями
 	// решает всё. Страница, размер страницы и порядок в него не входят нарочно —
@@ -572,10 +592,10 @@ export async function getPackage(db, id, userId) {
 
 	const row = await db.prepare(`
 		SELECT p.*, ${STATS_FIELDS}, ${PLAYED_FLAG},
-			r.rating_count, r.rating_average, ${MY_SCORE}
+			r.rating_count, r.rating_average, ${MY_SCORE}, ${PLANNED_FLAG}
 		${BASE_FROM}
 		WHERE p.id = ? AND p.status = 'ok'
-	`).bind(userId, userId, id).first();
+	`).bind(userId, userId, userId, id).first();
 
 	return row ? toPackage(row, await authorPackCounts(db)) : null;
 }
@@ -825,8 +845,13 @@ export async function setPlayed(db, userId, id, played) {
 	}
 
 	if (played) {
-		await db.prepare('INSERT OR REPLACE INTO played (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
-			.bind(userId, row.pack_key, Date.now()).run();
+		// Сыграли — значит, «собираемся сыграть» кончилось само собой. Обе записи
+		// одним заходом: D1 живёт за сетью, и две ходки туда там дороже, чем дома.
+		await db.batch([
+			db.prepare('INSERT OR REPLACE INTO played (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
+				.bind(userId, row.pack_key, Date.now()),
+			db.prepare('DELETE FROM planned WHERE user_id = ? AND pack_key = ?').bind(userId, row.pack_key),
+		]);
 	} else {
 		await db.prepare('DELETE FROM played WHERE user_id = ? AND pack_key = ?')
 			.bind(userId, row.pack_key).run();
@@ -887,13 +912,66 @@ export async function playedCount(db, userId) {
 	return row.c;
 }
 
+/** Сколько паков отложено на будущее. Тем же счётом, что и сыгранное. */
+export async function plannedCount(db, userId) {
+	if (!userId) {
+		return 0;
+	}
+
+	const row = await db.prepare('SELECT COUNT(*) AS c FROM planned WHERE user_id = ?').bind(userId).first();
+	return row.c;
+}
+
+/**
+ * Отобрать пак на будущий вечер — или передумать. Всё как у отметки «сыграно»:
+ * лежит по общему ключу пака, то есть накрывает все его копии разом.
+ */
+export async function setPlanned(db, userId, id, planned) {
+	const row = await db.prepare(`SELECT ${PACK_KEY_SQL} AS pack_key FROM packages p WHERE p.id = ?`)
+		.bind(id).first();
+
+	if (!row) {
+		return { error: 'Такого пака нет' };
+	}
+
+	if (planned) {
+		await db.prepare('INSERT OR REPLACE INTO planned (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
+			.bind(userId, row.pack_key, Date.now()).run();
+	} else {
+		await db.prepare('DELETE FROM planned WHERE user_id = ? AND pack_key = ?')
+			.bind(userId, row.pack_key).run();
+	}
+
+	return { id, planned: Boolean(planned), affected: 1 };
+}
+
+/** То же самое сразу по ключам: этим переезжают отметки, сделанные до входа. */
+export async function setPlannedKeys(db, userId, keys, planned) {
+	const list = [...new Set((keys ?? []).map(key => String(key ?? '').trim()).filter(Boolean))].slice(0, 2000);
+
+	if (list.length === 0) {
+		return { affected: 0 };
+	}
+
+	const now = Date.now();
+
+	const statements = planned
+		? list.map(key => db.prepare('INSERT OR REPLACE INTO planned (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
+			.bind(userId, key, now))
+		: list.map(key => db.prepare('DELETE FROM planned WHERE user_id = ? AND pack_key = ?').bind(userId, key));
+
+	await db.batch(statements);
+
+	return { affected: list.length, planned: Boolean(planned) };
+}
+
 /**
  * Профиль: всё, что известно про сыгранное. Копии одного пака считаются за один —
  * отметка ставится сразу на все, и в библиотеке они иначе двоились бы.
  */
 export async function getProfile(db, userId, blacklist) {
 	if (!userId) {
-		return { total: 0, questions: 0, levels: {}, topics: {}, blacklist: [], favouriteAuthors: [], packages: [] };
+		return { total: 0, questions: 0, levels: {}, topics: {}, planned: [], blacklist: [], favouriteAuthors: [], packages: [] };
 	}
 
 	// Пак, выложенный в обсуждение дважды, лежит в базе двумя строками, а отметка
@@ -915,6 +993,25 @@ export async function getProfile(db, userId, blacklist) {
 		WHERE p.status = 'ok' AND pl.user_id = ?
 		GROUP BY pl.pack_key
 		ORDER BY pl.marked_at DESC
+	`).bind(userId, userId).all();
+
+	// Запланированное. Тот же запрос, только по другой таблице и в обратную сторону
+	// по смыслу: сыгранное — что уже было, запланированное — что впереди.
+	const plannedRows = await db.prepare(`
+		SELECT p.*, ${STATS_FIELDS}, 1 AS planned, pn.marked_at AS marked_at, MIN(p.id) AS chosen_id,
+			CASE WHEN pl.pack_key IS NULL THEN 0 ELSE 1 END AS played,
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		FROM planned pn
+		JOIN packages p ON ${PACK_KEY_SQL} = pn.pack_key
+		LEFT JOIN stats s ON s.package_id = p.id
+		LEFT JOIN played pl ON pl.pack_key = pn.pack_key AND pl.user_id = pn.user_id
+		LEFT JOIN (
+			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
+			FROM ratings GROUP BY pack_key
+		) r ON r.pack_key = pn.pack_key
+		WHERE p.status = 'ok' AND pn.user_id = ?
+		GROUP BY pn.pack_key
+		ORDER BY pn.marked_at DESC
 	`).bind(userId, userId).all();
 
 	const counts = await authorPackCounts(db);
@@ -947,6 +1044,7 @@ export async function getProfile(db, userId, blacklist) {
 		questions,
 		levels,
 		topics,
+		planned: plannedRows.results.map(row => ({ ...toPackage(row, counts), markedAt: row.marked_at })),
 		// Личный чёрный список: показать его больше негде, а снимать оттуда
 		// как-то надо — на карточках спрятанного по определению не видно
 		blacklist,

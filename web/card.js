@@ -202,6 +202,75 @@ async function uploadLocalPlayed() {
 	saveLocalPlayed();
 }
 
+// ————— запланированное —————
+//
+// «Отметить сыгранным» отвечает на вопрос про прошлое, а перед игрой стоит другой:
+// вот пак, играть в него сегодня некогда, но сесть за него хочется — и запомнить
+// это было негде. Приходилось либо держать название в голове, либо складывать
+// ссылки в заметки на стороне.
+//
+// Устроено ровно как «сыграно», вплоть до жизни в браузере до входа: это тот же
+// список отметок, только про будущее. Пак бывает и сыгранным, и запланированным
+// сразу — сыграли, хотим ещё раз, — поэтому список свой, а не признак у того.
+
+const LOCAL_PLANNED_KEY = 'firepacks.planned';
+
+let localPlanned = new Set();
+
+function loadLocalPlanned() {
+	try {
+		const saved = JSON.parse(window.localStorage.getItem(LOCAL_PLANNED_KEY) ?? '[]');
+		localPlanned = new Set(Array.isArray(saved) ? saved.filter(key => typeof key === 'string') : []);
+	} catch {
+		localPlanned = new Set();
+	}
+}
+
+function saveLocalPlanned() {
+	try {
+		window.localStorage.setItem(LOCAL_PLANNED_KEY, JSON.stringify([...localPlanned]));
+	} catch {
+		// Некуда сохранять — отметка проживёт до обновления страницы
+	}
+}
+
+/** Отобран ли пак на будущее: сервером или этим браузером. */
+const isPlanned = pack => pack.planned || localPlanned.has(pack.packKey);
+
+/** Переносит запланированное браузера в учётную запись — вместе с сыгранным. */
+async function uploadLocalPlanned() {
+	if (localPlanned.size === 0) {
+		return;
+	}
+
+	const response = await fetch('/api/planned', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ packKeys: [...localPlanned], planned: true }),
+	});
+
+	const result = await response.json().catch(() => ({ error: 'не удалось' }));
+
+	if (result.error) {
+		return;
+	}
+
+	localPlanned.clear();
+	saveLocalPlanned();
+}
+
+/** Обе стопки местных отметок разом: их читают и переносят всегда вместе. */
+function loadLocalMarks() {
+	loadLocalPlayed();
+	loadLocalPlanned();
+}
+
+const localMarks = () => localPlayed.size + localPlanned.size;
+
+async function uploadLocalMarks() {
+	await Promise.all([uploadLocalPlayed(), uploadLocalPlanned()]);
+}
+
 /**
  * Карточки, которые сейчас на странице: пак и его узел. Нужны чёрному списку —
  * спрятав автора, гасить надо все его карточки разом, а не ту одну, на которой
@@ -933,6 +1002,75 @@ function createPlayedButton(pack, onDone) {
 }
 
 /**
+ * Кнопка «Запланировать». Стоит в одной строке с «Отметить сыгранным», справа
+ * от неё: обе отвечают на вопрос «а что у меня с этим паком», только одна про
+ * прошлое, а другая про будущее. Отложенное собирается в профиле отдельным
+ * списком — оттуда за него и садятся.
+ *
+ * Уже сыгранный пак запланировать по-прежнему можно: во что-то садятся и по
+ * второму разу, и запрещать это значило бы решать за человека.
+ *
+ * @param {Function} onDone что перерисовать после переключения
+ */
+function createPlannedButton(pack, onDone) {
+	const button = element('button', `button button--mark button--plan${isPlanned(pack) ? ' button--active' : ''}`);
+	button.type = 'button';
+
+	const render = () => {
+		button.textContent = '';
+		button.append(icon('bookmark'), element('span', null, isPlanned(pack) ? 'В планах' : 'Запланировать'));
+		button.classList.toggle('button--active', isPlanned(pack));
+
+		button.title = isPlanned(pack)
+			? 'Пак отложен на будущее и лежит в профиле, в «Запланированном». Нажмите, чтобы убрать оттуда'
+			: 'Отложить пак на будущий вечер: он соберётся списком в профиле'
+				+ (serverMarks() ? '' : '. Отметка сохранится в этом браузере — войдите через Discord, '
+					+ 'и она переедет в учётную запись');
+	};
+
+	render();
+
+	button.addEventListener('click', async () => {
+		button.disabled = true;
+
+		try {
+			const next = !isPlanned(pack);
+
+			if (serverMarks()) {
+				const response = await fetch('/api/planned', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ id: pack.id, planned: next }),
+				});
+
+				const result = await response.json();
+
+				if (result.error) {
+					alert(result.error);
+					return;
+				}
+
+				pack.planned = result.planned;
+			} else if (next) {
+				localPlanned.add(pack.packKey);
+				saveLocalPlanned();
+			} else {
+				localPlanned.delete(pack.packKey);
+				saveLocalPlanned();
+			}
+
+			render();
+			onDone();
+			onPlannedChange(pack);
+		} finally {
+			button.disabled = false;
+		}
+	});
+
+	return button;
+}
+
+/**
  * «Поделиться»: кладёт ссылку на страницу пака в буфер обмена.
  *
  * Ссылка эта появилась только теперь — раньше у пака не было своего адреса вовсе,
@@ -1037,11 +1175,68 @@ function showToast(text) {
  *     раскрыт сразу. В выдаче всё наоборот: название ведёт на эту самую страницу,
  *     а лишнее спрятано, чтобы карточки не разъезжались по высоте.
  */
+/**
+ * Что внутри карточки нажимается само по себе и открывать страницу пака
+ * при этом не должно: кнопки, ссылки, темы, звёзды оценки. Всё остальное —
+ * обложка, числа, полоски, описание — мишень для перехода (см. makeCardClickable).
+ */
+const OWN_TARGETS = 'a, button, input, label, select, textarea, summary, .tag, .badge--topic, .rating, .card__ban';
+
+/**
+ * Нажатие на карточку целиком открывает страницу пака.
+ *
+ * Раньше туда вели только название и обложка — то есть узкая полоска в самом
+ * верху, — а вся остальная карточка была величиной с пол-экрана и не делала
+ * ничего. Целиться в заголовок приходилось глазами, и на телефоне особенно:
+ * там карточка занимает всю ширину, а мишень в ней — две строки текста.
+ *
+ * Название и обложка остаются настоящими ссылками: у них свой адрес, их видит
+ * поисковик, их открывают средней кнопкой и «в новой вкладке» из меню. Здешний
+ * обработчик — добавка к ним, а не замена.
+ *
+ * Не срабатывает он в трёх случаях: нажали по тому, что и так нажимается
+ * (кнопки, темы, звёзды); выделяли мышью текст описания — тогда отпускание
+ * кнопки не переход, а конец выделения; держали Ctrl, Shift или среднюю
+ * кнопку — тогда открываем в новой вкладке, как это делает сама ссылка.
+ */
+function makeCardClickable(card, pack) {
+	card.classList.add('card--clickable');
+
+	const open = event => {
+		if (event.defaultPrevented || event.target.closest(OWN_TARGETS)) {
+			return;
+		}
+
+		// Выделять текст на карточке никто не запрещал, и заканчивать выделение
+		// переходом на другую страницу — худшее, что можно сделать в ответ
+		if (String(window.getSelection?.() ?? '').length > 0) {
+			return;
+		}
+
+		const href = packHref(pack);
+
+		if (event.button === 1 || event.ctrlKey || event.metaKey || event.shiftKey) {
+			window.open(href, '_blank', 'noopener');
+		} else if (event.button === 0) {
+			window.location.href = href;
+		}
+	};
+
+	card.addEventListener('click', open);
+	// Средняя кнопка приходит отдельным событием: обычный click на неё не срабатывает
+	card.addEventListener('auxclick', open);
+}
+
 function createCard(pack, options = {}) {
 	const standalone = options.standalone === true;
 	const card = element('div', 'card'
 		+ (standalone ? ' card--page' : '')
 		+ (isPlayed(pack) ? ' card--played' : ''));
+
+	// На своей странице пака переходить некуда: она и есть та страница
+	if (!standalone) {
+		makeCardClickable(card, pack);
+	}
 
 	// Самая верхняя строка карточки: слева дата, посередине число вопросов,
 	// справа — сколько раз играли. Все три отвечают на один и тот же вопрос —
@@ -1336,7 +1531,12 @@ function createCard(pack, options = {}) {
 	// у них всё держится на этой отметке: оценка ставится только сыгранному.
 	const marks = element('div', 'card__actions card__actions--mark');
 
+	// «Запланировать» — вторая половина той же строки: одна кнопка про прошлое
+	// пака, вторая про будущее, и стоять им порознь не за чем
+	let plan = createPlannedButton(pack, () => {});
+
 	const played = createPlayedButton(pack, () => {
+		const wasPlanned = isPlanned(pack);
 		card.classList.toggle('card--played', isPlayed(pack));
 
 		// Оценивать можно только сыгранное — значит, звёзды меняют своё состояние
@@ -1344,9 +1544,23 @@ function createCard(pack, options = {}) {
 		const stars = buildRating();
 		rating.replaceWith(stars);
 		rating = stars;
+
+		// Сыграли — «собираемся сыграть» кончилось: так же, как это делает сервер
+		// (см. setPlayed). Кнопка обязана сказать об этом сразу, а не после
+		// обновления страницы, иначе выглядит, будто пак остался в планах.
+		if (isPlayed(pack) && wasPlanned) {
+			pack.planned = false;
+			localPlanned.delete(pack.packKey);
+			saveLocalPlanned();
+
+			const next = createPlannedButton(pack, () => {});
+			plan.replaceWith(next);
+			plan = next;
+			onPlannedChange(pack);
+		}
 	});
 
-	marks.append(played);
+	marks.append(played, plan);
 	card.append(marks);
 
 	const actions = element('div', 'card__actions');

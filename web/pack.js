@@ -29,8 +29,9 @@ function pickFilter(kind, value) {
 	window.location.href = `/?${names[kind]}=${encodeURIComponent(value)}`;
 }
 
-/** Отметка «сыграно» на этой странице ничего за пределами карточки не меняет. */
+/** Отметки на этой странице ничего за пределами карточки не меняют. */
 function onPlayedChange() {}
+function onPlannedChange() {}
 
 /**
  * Уголок входа. Тот же, что в библиотеке, но короче: заводить здесь пояснения
@@ -92,7 +93,7 @@ function renderMissing() {
 async function start() {
 	const id = packIdFromPath();
 
-	loadLocalPlayed();
+	loadLocalMarks();
 
 	// Обе ходки уходят разом: пак не зависит от настроек, а настройки — от пака
 	const [facetsResponse, packResponse] = await Promise.all([
@@ -117,8 +118,8 @@ async function start() {
 	// Отметки, сделанные до входа, переезжают в учётную запись там же, где и в
 	// библиотеке: человек мог войти прямо отсюда, и первое, что он ждёт увидеть, —
 	// свою отметку на месте
-	if (serverMarks() && localPlayed.size > 0) {
-		await uploadLocalPlayed();
+	if (serverMarks() && localMarks() > 0) {
+		await uploadLocalMarks();
 	}
 
 	const box = $('pack');

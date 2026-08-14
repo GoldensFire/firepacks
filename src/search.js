@@ -18,14 +18,38 @@ export { normalizeText };
 let index = null;
 let indexKey = '';
 
+const stampQuery = db.prepare(`
+	SELECT COUNT(*) AS c, MAX(id) AS id, MAX(indexed_at) AS indexed, MAX(summary_at) AS summary
+	FROM packages WHERE status = 'ok'
+`);
+
+/**
+ * Как часто спрашивать базу, не изменилась ли она. Сам вопрос недешёвый: два
+ * из четырёх чисел — время правки и время описания, указателей на них нет,
+ * и база вынуждена прочесть все строки целиком. На пятнадцати тысячах паков
+ * это сотня миллисекунд, а спрашивается оно дважды на каждый запрос с поиском
+ * (выдача и числа сложностей рядом с ней считаются порознь) — то есть впятеро
+ * дороже самого подбора.
+ *
+ * Пять секунд — это про то, через сколько поиск заметит пак, разобранный прямо
+ * сейчас, во время идущего обновления базы. В любое другое время база не меняется
+ * вовсе, и заметить нечего.
+ */
+const STAMP_TTL = 5000;
+
+let stamp = null;
+let stampAt = 0;
+
 /** Слепок базы: пока он не меняется, пересобирать список слов незачем. */
 function currentKey() {
-	const row = db.prepare(`
-		SELECT COUNT(*) AS c, MAX(id) AS id, MAX(indexed_at) AS indexed, MAX(summary_at) AS summary
-		FROM packages WHERE status = 'ok'
-	`).get();
+	if (stamp === null || Date.now() - stampAt > STAMP_TTL) {
+		const row = stampQuery.get();
 
-	return `${row.c}|${row.id}|${row.indexed}|${row.summary}`;
+		stamp = `${row.c}|${row.id}|${row.indexed}|${row.summary}`;
+		stampAt = Date.now();
+	}
+
+	return stamp;
 }
 
 function getIndex() {
@@ -42,10 +66,31 @@ function getIndex() {
 	return index;
 }
 
+/**
+ * Собрать список слов заранее, не дожидаясь первого поиска. Зовётся сразу после
+ * того, как сервер поднялся: сборка стоит полсекунды, и достаётся она тому, кто
+ * первым что-нибудь наберёт, — а набирают обычно по букве, и полсекунды приходятся
+ * ровно на первую. Здесь же они приходятся на пустой сервер, которого никто
+ * ещё не спрашивал.
+ */
+export function warmSearch() {
+	getIndex();
+}
+
 db.exec('CREATE TEMP TABLE IF NOT EXISTS search_hits (package_id INTEGER PRIMARY KEY, tier INTEGER NOT NULL)');
 
 const clearHits = db.prepare('DELETE FROM search_hits');
 const addHit = db.prepare('INSERT INTO search_hits (package_id, tier) VALUES (?, ?)');
+
+/**
+ * Что сейчас лежит в search_hits. Один запрос выдачи спрашивает отбор дважды —
+ * сам список и числа сложностей рядом с ним (см. countLevels в src/server.js), —
+ * и подбор в памяти шёл на оба раза заново: полторы сотни миллисекунд, потраченных
+ * на то, чтобы получить ровно то же самое, что уже лежит в таблице.
+ *
+ * Ключом стоит и слепок базы: разобрался новый пак — прежнее найденное устарело.
+ */
+let hitsFor = null;
 
 /**
  * Складывает найденное во временную таблицу search_hits. Рядом с паком пишется
@@ -57,19 +102,44 @@ const addHit = db.prepare('INSERT INTO search_hits (package_id, tier) VALUES (?,
 export function runSearch(text) {
 	const tokens = normalizeText(text).split(' ').filter(Boolean);
 
-	clearHits.run();
-
 	if (tokens.length === 0) {
+		if (hitsFor !== null) {
+			clearHits.run();
+			hitsFor = null;
+		}
+
 		return false;
 	}
 
-	for (const entry of getIndex()) {
-		const tier = matchEntry(entry, tokens);
+	const entries = getIndex();
+	const key = `${indexKey}\n${tokens.join(' ')}`;
 
-		if (tier >= 0) {
-			addHit.run(entry.id, tier);
-		}
+	if (hitsFor === key) {
+		return true;
 	}
 
+	clearHits.run();
+	hitsFor = null;
+
+	// Одной сделкой: каждая вставка по отдельности — это своя запись в журнал,
+	// а находится по запросу и две тысячи паков
+	db.exec('BEGIN');
+
+	try {
+		for (const entry of entries) {
+			const tier = matchEntry(entry, tokens);
+
+			if (tier >= 0) {
+				addHit.run(entry.id, tier);
+			}
+		}
+
+		db.exec('COMMIT');
+	} catch (error) {
+		db.exec('ROLLBACK');
+		throw error;
+	}
+
+	hitsFor = key;
 	return true;
 }

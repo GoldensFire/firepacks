@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Локальная библиотека пакетов SIGame с уровнями сложности по статистике",
   "scripts": {
-    "start": "node --no-warnings src/server.js",
+    "start": "node --no-warnings scripts/start.js",
+    "start:asis": "node --no-warnings scripts/start.js --no-sync",
     "index": "node --no-warnings src/indexer.js",
     "stats": "node --no-warnings src/indexer.js --stats-only",
     "topics": "node --no-warnings src/indexer.js --topics-only",
@@ -13,6 +14,7 @@
     "logos": "node --no-warnings src/indexer.js --logos",
     "nightly": "node --no-warnings scripts/nightly.js",
     "state": "node --no-warnings scripts/state.js status",
+    "sync": "node --no-warnings scripts/state.js sync",
     "state:pull": "node --no-warnings scripts/state.js pull",
     "state:push": "node --no-warnings scripts/state.js push",
     "cf:setup": "node --no-warnings scripts/setup-cf.js",

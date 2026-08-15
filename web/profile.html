@@ -20,72 +20,104 @@
 				<span class="brand__text">FirePacks</span>
 			</a>
 
-			<a class="topbar__link" href="/">← К библиотеке</a>
-			<a class="topbar__link" href="/authors">Топ авторов →</a>
+			<a class="topbar__link" href="/">К библиотеке</a>
+			<a class="topbar__link" href="/top">Топ пакетов</a>
+			<a class="topbar__link" href="/authors">Топ авторов</a>
 		</div>
 	</header>
 
+	<!-- Списки паков заняли страницу целиком, а сам профиль уехал в колонку справа.
+	     Причина та же, по которой запланированное раньше стояло выше сыгранного:
+	     страницу открывают затем, чтобы во что-то сыграть, а не затем, чтобы
+	     посмотреть на своё имя и разбивку по тематикам. Списки должны быть под
+	     рукой сразу, всё остальное — рядом, но не поперёк дороги. -->
 	<main class="profile">
-		<section class="profile__head">
-			<div class="profile__who">
-				<div class="profile__avatar" id="avatar">?</div>
-				<div class="profile__who-text">
-					<h1 class="profile__name" id="userName">Гость</h1>
-					<p class="hint" id="userHint"></p>
-					<div class="profile__account" id="account"></div>
+		<div class="profile__main">
+			<!-- Запланированное и сыгранное — две вкладки, а не два списка подряд:
+			     вместе они на пару тысяч карточек, и вторая половина всё равно
+			     жила за пределами экрана. Запланированное открыто по умолчанию —
+			     сыгранное это архив, а планы это сегодняшний вечер. -->
+			<div class="tabs" role="tablist" aria-label="Что показывать">
+				<button class="tab" id="tabPlanned" type="button" role="tab" aria-controls="plannedBlock">
+					<span>Запланировано</span>
+					<span class="tab__count" id="tabPlannedCount">0</span>
+				</button>
+				<button class="tab" id="tabPlayed" type="button" role="tab" aria-controls="playedBlock">
+					<span>Сыграно</span>
+					<span class="tab__count" id="tabPlayedCount">0</span>
+				</button>
+			</div>
+
+			<!-- Полоса времени: сколько часов стоит за сыгранным. Считается грубо —
+			     по 15 секунд на вопрос, — и об этом сказано в подсказке у подписи:
+			     число здесь не мерка, а порядок величины. -->
+			<section class="timeline" id="timeline">
+				<div class="timeline__head">
+					<span class="timeline__title" id="timeTitle">Время за паками</span>
+					<span class="timeline__value" id="timeValue"></span>
 				</div>
-			</div>
 
-			<div class="profile__numbers" id="numbers"></div>
-		</section>
+				<div class="timeline__bar" id="timeBar"></div>
+				<div class="timeline__marks" id="timeMarks"></div>
+			</section>
 
-		<!-- Чёрный список живёт только здесь: в колонке фильтров библиотеки он
-		     занимал место рядом с тем, чем пользуются каждый раз, а сам нужен
-		     редко — ровно тогда, когда спрятанное надо вернуть. -->
-		<section class="profile__block" id="blacklistBlock" hidden>
-			<h2 class="filters__title">Чёрный список</h2>
-			<div class="profile__chips" id="blacklist"></div>
-			<p class="hint">Спрятанные паки и авторы не попадают в выдачу библиотеки. Вернуть их можно только отсюда.
-				Добавляют в список красным знаком запрета: пак — кнопкой в ряду действий карточки,
-				автор — знаком у его имени.</p>
-		</section>
+			<section class="profile__block" id="plannedBlock" role="tabpanel" aria-labelledby="tabPlanned">
+				<div class="content__head">
+					<div id="plannedInfo" class="result-info"></div>
+				</div>
 
-		<section class="profile__block">
-			<h2 class="filters__title">Сыграно по сложности</h2>
-			<div class="profile__chips" id="levels"></div>
-		</section>
+				<div id="plannedGrid" class="grid"></div>
+			</section>
 
-		<section class="profile__block">
-			<h2 class="filters__title">Сыграно по типу пака</h2>
-			<div class="profile__chips" id="topics"></div>
-		</section>
+			<section class="profile__block" id="playedBlock" role="tabpanel" aria-labelledby="tabPlayed" hidden>
+				<div class="content__head">
+					<div id="resultInfo" class="result-info"></div>
+				</div>
 
-		<section class="profile__block" id="authorsBlock" hidden>
-			<h2 class="filters__title">Авторы, к которым возвращаешься</h2>
-			<div class="profile__chips" id="authors"></div>
-		</section>
+				<div id="grid" class="grid"></div>
+			</section>
+		</div>
 
-		<!-- Запланированное стоит ВЫШЕ сыгранного нарочно: сыгранное — это архив,
-		     в него заглядывают из любопытства, а запланированное открывают затем,
-		     чтобы сегодня во что-то сыграть. Отвечать на этот вопрос страница
-		     должна первым делом, а не после прокрутки мимо всего сыгранного. -->
-		<section class="profile__block" id="plannedBlock">
-			<div class="content__head">
-				<h2 class="filters__title">Запланировано</h2>
-				<div id="plannedInfo" class="result-info"></div>
-			</div>
+		<aside class="profile__side">
+			<section class="profile__head">
+				<div class="profile__who">
+					<div class="profile__avatar" id="avatar">?</div>
+					<div class="profile__who-text">
+						<h1 class="profile__name" id="userName">Гость</h1>
+					</div>
+				</div>
 
-			<div id="plannedGrid" class="grid"></div>
-		</section>
+				<p class="hint" id="userHint"></p>
+				<div class="profile__account" id="account"></div>
+				<div class="profile__numbers" id="numbers"></div>
+			</section>
 
-		<section class="profile__block">
-			<div class="content__head">
-				<h2 class="filters__title">Библиотека сыгранного</h2>
-				<div id="resultInfo" class="result-info"></div>
-			</div>
+			<!-- Чёрный список живёт только здесь: в колонке фильтров библиотеки он
+			     занимал место рядом с тем, чем пользуются каждый раз, а сам нужен
+			     редко — ровно тогда, когда спрятанное надо вернуть. -->
+			<section class="profile__block" id="blacklistBlock" hidden>
+				<h2 class="filters__title">Чёрный список</h2>
+				<div class="profile__chips" id="blacklist"></div>
+				<p class="hint">Спрятанные паки и авторы не попадают в выдачу библиотеки. Вернуть их можно только отсюда.
+					Добавляют в список красным знаком запрета: пак — кнопкой в ряду действий карточки,
+					автор — знаком у его имени.</p>
+			</section>
 
-			<div id="grid" class="grid"></div>
-		</section>
+			<section class="profile__block">
+				<h2 class="filters__title">Сыграно по сложности</h2>
+				<div class="profile__chips" id="levels"></div>
+			</section>
+
+			<section class="profile__block">
+				<h2 class="filters__title">Сыграно по типу пака</h2>
+				<div class="profile__chips" id="topics"></div>
+			</section>
+
+			<section class="profile__block" id="authorsBlock" hidden>
+				<h2 class="filters__title">Авторы, к которым возвращаешься</h2>
+				<div class="profile__chips" id="authors"></div>
+			</section>
+		</aside>
 	</main>
 
 	<script src="/common.js"></script>

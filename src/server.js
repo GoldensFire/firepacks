@@ -490,6 +490,11 @@ function listPackages(query, userId) {
 		// из указателя (status, vk_ts), и дальше первых двух десятков строк
 		// база не читает вовсе.
 		orderBy = `${SORTS.added} ${direction} NULLS LAST`;
+	} else if (sortKey === 'relevance') {
+		// Порядок задаёт сам поиск (см. ниже), а внутри одной ступени совпадения
+		// паки идут как обычно — сначала новые. Без поиска сортировать не по чему:
+		// «по совпадению с запросом» без запроса — это и есть выдача как есть.
+		orderBy = `${SORTS.added} DESC NULLS LAST`;
 	} else if (sortKey === 'difficulty') {
 		// Сложность — это доля вопросов, на которые решились ответить: чем она ниже, тем пак труднее
 		orderBy = `s.take_percent ${direction === 'DESC' ? 'ASC' : 'DESC'} NULLS LAST`;
@@ -499,8 +504,13 @@ function listPackages(query, userId) {
 
 	// Паки, найденные с прощённой опечаткой, идут после точных попаданий,
 	// а внутри каждой группы сохраняется выбранная сортировка.
+	//
+	// «По совпадению с запросом» добавляет к этому ступень названия: пак, который
+	// так и называется, стоит выше пака, у которого те же слова попались в описании
+	// (см. rankEntry в src/fuzzy.js). Любая другая сортировка ступень не смотрит —
+	// выбрав «по числу вопросов», человек просит именно его.
 	if (searching) {
-		orderBy = `h.tier, ${orderBy}`;
+		orderBy = sortKey === 'relevance' ? `h.hit_rank, h.tier, ${orderBy}` : `h.tier, ${orderBy}`;
 	}
 
 	const pageSize = Math.min(Math.max(parseInt(query.get('pageSize') ?? '24', 10) || 24, 1), 100);
@@ -1440,7 +1450,13 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
-		const pages = { '/update': '/update.html', '/profile': '/profile.html', '/authors': '/authors.html' };
+		const pages = {
+			'/update': '/update.html',
+			'/profile': '/profile.html',
+			'/authors': '/authors.html',
+			'/top': '/top.html',
+		};
+
 		sendStatic(response, pages[url.pathname] ?? url.pathname, request);
 	} catch (error) {
 		console.error(error);

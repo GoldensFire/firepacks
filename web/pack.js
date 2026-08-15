@@ -53,16 +53,7 @@ function renderAccount() {
 		return;
 	}
 
-	if (user.avatar) {
-		const avatar = element('img', 'account__avatar');
-		avatar.src = user.avatar;
-		avatar.alt = '';
-		avatar.width = 24;
-		avatar.height = 24;
-		box.append(avatar);
-	}
-
-	box.append(element('span', 'account__name', user.name));
+	box.append(createAccountLink(user));
 
 	const out = element('button', 'button button--ghost', 'Выйти');
 	out.type = 'button';

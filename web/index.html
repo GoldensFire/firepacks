@@ -41,12 +41,36 @@
 				<span class="brand__text">FirePacks</span>
 			</a>
 
-			<input id="search" class="search" type="search" placeholder="Поиск по названию, автору, тегам, описанию и тексту сообщения" autocomplete="off">
+			<!-- Поиск ищет по нажатию, а не по каждой набранной букве. Пока он искал
+			     на ходу, выдача успевала перерисоваться на «бол», «больш», «больша» —
+			     три ходки до сервера и три разных списка под руками у того, кто
+			     ещё не дописал слово. Форма настоящая, а не для вида: Enter в поле
+			     ввода — это её отправка, и отдельно его ловить не приходится. -->
+			<form id="searchBox" class="search-box" role="search">
+				<input id="search" class="search" type="search" placeholder="Поиск по названию, автору, тегам, описанию и тексту сообщения" autocomplete="off">
+				<!-- Значок нарисован прямо здесь, а не взят из icons.js: тот рисует
+				     значки скриптом, а кнопка поиска стоит в шапке и нужна с первого
+				     мига — до того, как скрипты вообще загрузились. Чертёж тот же
+				     самый: обводка в квадрате 24×24, цвет и размер от текста.
+
+				     На телефоне от кнопки остаётся один значок: в строке с ней стоят
+				     и поле ввода, и уголок входа, и слово «Найти» отнимает у поля
+				     последние сантиметры. Подпись при этом никуда не девается —
+				     она просто перестаёт быть видимой, и голосом читается по-прежнему. -->
+				<button class="button search-box__button" type="submit" title="Найти">
+					<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+						<circle cx="10.6" cy="10.6" r="6.6"/>
+						<path d="m15.4 15.4 4.6 4.6"/>
+					</svg>
+					<span class="search-box__label">Найти</span>
+				</button>
+			</form>
 
 			<div class="counters" id="counters"></div>
 
-			<a class="topbar__link" href="/authors">Топ авторов →</a>
-			<a class="topbar__link" href="/profile">Профиль →</a>
+			<a class="topbar__link" href="/top">Топ пакетов</a>
+			<a class="topbar__link" href="/authors">Топ авторов</a>
+			<a class="topbar__link" href="/profile">Профиль</a>
 			<!-- Спрятана, пока не пришёл ответ /api/facets: собирать базу можно
 			     только дома, а на общем сайте этой кнопки нет вовсе — и узнаётся
 			     это оттуда. Раньше она стояла в вёрстке открытой и на хостинге
@@ -56,7 +80,7 @@
 
 			     Кнопки «Задеплоить» рядом больше нет: обновление базы и есть
 			     обновление сайта, выбирать между ними нечего (см. src/updater.js). -->
-			<a class="topbar__link" id="updateLink" href="/update" hidden>Обновить базу →</a>
+			<a class="topbar__link" id="updateLink" href="/update" hidden>Обновить базу</a>
 
 			<div class="account" id="account"></div>
 		</div>
@@ -90,6 +114,12 @@
 				     не видит содержимое списка, остались aria-label. -->
 				<label class="toolbar__field">
 					<select id="sort" class="select" aria-label="Сортировка">
+						<!-- Стоит первой и включается сама, когда что-нибудь ищут:
+						     набрав «Большая солянка», человек ждёт сверху пак
+						     с таким названием. Выбрать другую сортировку он
+						     по-прежнему может — эта тогда и остаётся выбранной
+						     до конца поиска (см. web/app.js). -->
+						<option value="relevance">По совпадению с запросом</option>
 						<option value="added">Сначала новые</option>
 						<option value="popular_week">Популярные за неделю</option>
 						<option value="popular_month">Популярные за месяц</option>

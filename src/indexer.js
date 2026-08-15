@@ -67,7 +67,7 @@ import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi
 import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
-import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useModel, activeModel } from './gemini.js';
+import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useModel, activeModel, tokensLine } from './gemini.js';
 import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
 import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds, computeGenres } from './topics.js';
 
@@ -733,6 +733,7 @@ async function scanVk() {
 	let skipped = 0;
 	let broken = 0;
 	let unreadable = 0;
+	let gaps = 0;
 
 	for (const topic of config.vkTopics) {
 		const topicUrl = topic.url;
@@ -757,6 +758,16 @@ async function scanVk() {
 				onSkip: at => {
 					unreadable++;
 					say('vk', `сообщение на месте ${at} прочитать нечем: ВК отвечает внутренней ошибкой. Иду дальше.`);
+				},
+
+				// Кусок темы, который ВК так и не отдал (пустой ответ и после
+				// повторов). Тему это не обрывает — обход шагает дальше, — но
+				// до сотни сообщений остались непрочитанными, и хоронить по такому
+				// обходу пропавшие файлы нельзя: см. ниже, где считается applied.
+				onGap: (at, size) => {
+					gaps++;
+					console.error(`[ВК] кусок темы с места ${at} (до ${size} сообщений) ВК не отдал даже после повторов. `
+						+ 'Перешагиваю; непрочитанное подберётся следующим обходом.');
 				},
 				onPage: page => {
 					// Сколько сообщений в теме, ВК называет сразу — с этого и растёт
@@ -816,17 +827,20 @@ async function scanVk() {
 
 	// Недочитанный обход не имеет права никого хоронить: «файла в сообщении нет»
 	// и «до сообщения не дошли» выглядят одинаково, а разница в цене — целая база
-	const applied = broken > 0
+	const incomplete = broken > 0 || gaps > 0;
+
+	const applied = incomplete
 		? { replaced: 0, gone: 0, refused: tally.pending.length }
 		: applyPending(tally.pending, known);
 
-	if (broken > 0 && tally.pending.length > 0) {
+	if (incomplete && tally.pending.length > 0) {
 		say('vk', `подмен и пропаж отложено: ${tally.pending.length}. Обход был неполным, и верить им нельзя.`);
 	}
 
 	say('vk', `просмотрено сообщений с файлами: ${comments}`
 		+ `${skipped ? ` (после отсечки не считали ${skipped})` : ''}. Новых паков: ${tally.added}.`
-		+ `${unreadable ? ` Сообщений, которые ВК не отдал: ${unreadable}.` : ''}`);
+		+ `${unreadable ? ` Сообщений, которые ВК не отдал: ${unreadable}.` : ''}`
+		+ `${gaps ? ` Кусков темы, которые ВК не отдал: ${gaps}.` : ''}`);
 	say('vk', `изменений в прежних: файл заменён у ${applied.replaced}, `
 		+ `переписано сообщений ${tally.edited}, убрано файлов ${applied.gone}, вернулось ${tally.back}.`);
 
@@ -1574,7 +1588,7 @@ async function refreshSummaries() {
 	const target = targetSql();
 	const priority = priorityOrderSql();
 	const pending = db.prepare(`
-		SELECT p.id, p.name, p.tags, p.rounds FROM packages p
+		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text FROM packages p
 		WHERE p.status = 'ok' ${condition}${target.where}
 		ORDER BY ${priority.order}
 	`);
@@ -1601,6 +1615,7 @@ async function refreshSummaries() {
 				const { summary, audience } = await describePack({
 					name: row.name ?? '',
 					tags: jsonOrDefault(row.tags, []),
+					about: row.comment_text ?? '',
 					themes,
 				});
 
@@ -1629,41 +1644,75 @@ async function refreshSummaries() {
 }
 
 /**
- * Сколько тем в паке — по сохранённым раундам, не разбирая их в темы целиком.
- * Нужно только затем, чтобы набрать пачку по размеру (см. groupForAnalysis).
+ * Сколько вопросов в теме, у которой это число не записано.
+ *
+ * Такие темы остались от старого разбора (в базе у них questions = 0), а размер
+ * пачки без них считался бы неверно: пак из тридцати «пустых» тем выглядел бы
+ * невесомым и уезжал бы к модели вместе с десятком таких же. Пять с небольшим —
+ * среднее по всей базе (480 тысяч вопросов на 88 тысяч тем).
  */
-function themeCount(row) {
-	return normalizeRounds(row.rounds).reduce((sum, round) => sum + round.themes.length, 0);
+const QUESTIONS_PER_THEME = 5;
+
+/**
+ * Чем пак тяжёл для модели: сколько в нём тем и сколько вопросов.
+ * Считается по сохранённым раундам, не разбирая их в темы целиком, — нужно это
+ * только затем, чтобы набрать пачку по размеру (см. groupForAnalysis).
+ */
+function packWeight(row) {
+	let themes = 0;
+	let questions = 0;
+
+	for (const round of normalizeRounds(row.rounds)) {
+		for (const theme of round.themes) {
+			themes++;
+			questions += theme.questions > 0 ? theme.questions : QUESTIONS_PER_THEME;
+		}
+	}
+
+	return { themes, questions };
 }
 
 /**
  * Делит очередь на пачки, которые уедут к модели одним запросом.
  *
- * Пачка набирается по двум числам сразу: сколько паков (analyzePackBatch)
- * и сколько всего тем (analyzeThemeBatch). Первое — про суточный лимит, который
- * считает запросы; второе — про предел длины ответа, который считает как раз
- * темы. Что кончится раньше, то и закрывает пачку. Пак, который один перебирает
- * предел по темам, едет один: разрезать пак между запросами нельзя — описание
- * и аудиторию модель называет по всему списку сразу.
+ * Главное число здесь — вопросы (analyzeQuestionBatch): цена запроса это цена
+ * содержимого, а содержимое темы тем длиннее, чем больше в ней вопросов. Паками
+ * мерить нельзя вовсе — пак бывает и на тридцать вопросов, и на тысячу двести,
+ * и «пять паков» означало то восемь тысяч токенов, то шестьдесят.
+ *
+ * Рядом стоят два предохранителя: сколько паков (analyzePackBatch — тысяча
+ * вопросов может набраться и двумя десятками крошечных) и сколько тем
+ * (analyzeThemeBatch — в ответе по объекту на тему, и его длину считают темы).
+ * Что кончится раньше, то и закрывает пачку.
+ *
+ * Пак, который один перебирает любой из пределов, едет один: разрезать пак между
+ * запросами нельзя — описание и аудиторию модель называет по всему списку сразу.
  */
 function groupForAnalysis(rows) {
 	const maxPacks = Math.max(1, config.analyzePackBatch);
 	const maxThemes = Math.max(1, config.analyzeThemeBatch);
+	const maxQuestions = Math.max(1, config.analyzeQuestionBatch);
 	const groups = [];
 	let current = [];
 	let themes = 0;
+	let questions = 0;
 
 	for (const row of rows) {
-		const count = themeCount(row);
+		const weight = packWeight(row);
+		const full = current.length >= maxPacks
+			|| themes + weight.themes > maxThemes
+			|| questions + weight.questions > maxQuestions;
 
-		if (current.length > 0 && (current.length >= maxPacks || themes + count > maxThemes)) {
+		if (current.length > 0 && full) {
 			groups.push(current);
 			current = [];
 			themes = 0;
+			questions = 0;
 		}
 
 		current.push(row);
-		themes += count;
+		themes += weight.themes;
+		questions += weight.questions;
 	}
 
 	if (current.length > 0) {
@@ -1706,8 +1755,12 @@ async function refreshAnalysis() {
 	const target = targetSql();
 	const priority = priorityOrderSql();
 
+	// comment_text — это то, что автор написал под паком в обсуждении: единственное
+	// место, где сказано, что он задумывал. Модели оно уходит подсказкой, а не
+	// истиной: в описании бывает «чистое аниме» у пака, где треть тем про игры
+	// (см. PACK_CONTEXT в gemini.js)
 	const pending = db.prepare(`
-		SELECT p.id, p.name, p.tags, p.rounds FROM packages p
+		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text FROM packages p
 		WHERE p.status = 'ok' AND (${needTopics} OR ${needSummary})${target.where}
 		ORDER BY ${priority.order}
 	`);
@@ -1721,7 +1774,8 @@ async function refreshAnalysis() {
 
 	say('analyze', `через ${activeModel()}${queueNote()}: паков без разметки или описания ${pending.all(...params).length}`
 		+ `${upgrade ? ' (считая размеченные моделью послабее)' : ''}. `
-		+ `Спрашиваю всё о ${config.analyzePackBatch} паках одним запросом. `
+		+ `Спрашиваю одним запросом про ${config.analyzeQuestionBatch} вопросов сразу `
+		+ `(это сколько паков придётся — от одного до ${config.analyzePackBatch}). `
 		+ usageLine(activeModel()));
 
 	const tally = { labelled: 0, mixed: 0, repeats: 0 };
@@ -1747,6 +1801,7 @@ async function refreshAnalysis() {
 				const answers = await analyzePacks(packs.map(pack => ({
 					name: pack.row.name ?? '',
 					tags: jsonOrDefault(pack.row.tags, []),
+					about: pack.row.comment_text ?? '',
 					themes: pack.themes,
 				})));
 
@@ -1804,7 +1859,8 @@ async function refreshAnalysis() {
 	say('analyze', `ярлык получили ${tally.labelled} паков, солянок ${tally.mixed}, `
 		+ `с повторами франшиз ${tally.repeats}; описание получили ${described}`
 		+ `${silent ? `, сказать нечего про ${silent}` : ''}`
-		+ `${split ? `. Двумя запросами пришлось спросить про ${split}` : ''}. ${usageLine(activeModel())}`);
+		+ `${split ? `. Двумя запросами пришлось спросить про ${split}` : ''}. `
+		+ `${usageLine(activeModel())}; ${tokensLine()}`);
 }
 
 /** Пересчитывает уровни по уже сохранённым числам — нужен после правки порогов в настройках. */

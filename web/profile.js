@@ -22,8 +22,43 @@ const EXTRA_TOPICS = {
 /** Как человек себя назвал. Ничего, кроме подписи, за этим именем не стоит. */
 const NAME_KEY = 'firepacks.profile.name';
 
+/**
+ * По столько секунд считается каждый вопрос сыгранного пака. Число взято не
+ * из статистики, а из здравого смысла: вопрос читают, думают над ним и отвечают,
+ * и на круг это выходит примерно четверть минуты. Настоящей длительности игры
+ * сайт не знает и знать не может — он видит только файлы паков.
+ */
+const SECONDS_PER_QUESTION = 15;
+
+/**
+ * Ступени полосы времени. Стоят они на равном расстоянии друг от друга, а не
+ * по-настоящему: между «1 час» и «1 месяц» семисоткратная разница, и на честной
+ * шкале первые четыре отметки слиплись бы в одну точку у левого края. Полоса
+ * здесь не измеряет, а показывает, куда человек продвинулся.
+ */
+const TIME_MARKS = [
+	{ label: '1 час', seconds: 3600 },
+	{ label: '6 часов', seconds: 6 * 3600 },
+	{ label: '1 день', seconds: 24 * 3600 },
+	{ label: '3 дня', seconds: 3 * 24 * 3600 },
+	{ label: '1 неделя', seconds: 7 * 24 * 3600 },
+	{ label: '1 месяц', seconds: 30 * 24 * 3600 },
+];
+
+/** Единицы для подписи «2 дня и 4 часа». Сверху вниз, от крупных к мелким. */
+const DURATION_UNITS = [
+	{ seconds: 30 * 24 * 3600, one: 'месяц', few: 'месяца', many: 'месяцев' },
+	{ seconds: 7 * 24 * 3600, one: 'неделя', few: 'недели', many: 'недель' },
+	{ seconds: 24 * 3600, one: 'день', few: 'дня', many: 'дней' },
+	{ seconds: 3600, one: 'час', few: 'часа', many: 'часов' },
+	{ seconds: 60, one: 'минута', few: 'минуты', many: 'минут' },
+];
+
 let facets = null;
 let profile = null;
+
+/** Какая вкладка открыта: 'planned' или 'played'. Переживает перерисовку страницы. */
+let tab = 'planned';
 
 const topicInfo = key => facets.topicNames[key] ?? EXTRA_TOPICS[key] ?? { name: key, packName: key };
 
@@ -175,13 +210,138 @@ function renderNumbers() {
 	add(formatNumber(profile.questions), plural(profile.questions, 'вопрос', 'вопроса', 'вопросов'),
 		'Столько вопросов лежит в сыгранных паках — не столько прозвучало за столом');
 
-	const planned = profile.planned?.length ?? 0;
+	// Числа «в планах» здесь больше нет: оно стоит прямо на вкладке
+	// «Запланировано» и повторять его в колонке незачем
+}
 
-	// Пустого «0 паков в планах» здесь нет: это число про то, чего человек
-	// ни разу не делал, а объясняет это сам список ниже
-	if (planned > 0) {
-		add(formatNumber(planned), plural(planned, 'пак в планах', 'пака в планах', 'паков в планах'),
-			'Отложено на будущее — список ниже');
+/**
+ * Подпись длительности: две старшие непустые единицы, «2 дня и 4 часа».
+ * Одной мало (между «1 днём» и «2 днями» помещается почти сутки), трёх много —
+ * минуты рядом с месяцами уже ничего не добавляют.
+ */
+function formatDuration(seconds) {
+	let rest = Math.max(0, Math.round(seconds));
+	const parts = [];
+
+	for (const unit of DURATION_UNITS) {
+		const count = Math.floor(rest / unit.seconds);
+
+		// Нули впереди пропускаем, ноль после первой единицы кончает разбор:
+		// «2 дня» лучше, чем «2 дня и 0 часов»
+		if (count === 0) {
+			if (parts.length === 0) {
+				continue;
+			}
+
+			break;
+		}
+
+		parts.push(`${formatNumber(count)} ${plural(count, unit.one, unit.few, unit.many)}`);
+		rest -= count * unit.seconds;
+
+		if (parts.length === 2) {
+			break;
+		}
+	}
+
+	return parts.length > 0 ? parts.join(' и ') : 'меньше минуты';
+}
+
+/**
+ * Полоса времени: во сколько часов обошлось сыгранное. Устроена как шкала
+ * с отметками — пройденные помечены галочкой, — и заполняется по отрезкам:
+ * внутри отрезка заливка идёт ровно, а сами отрезки одной ширины (см. TIME_MARKS).
+ *
+ * Считается это всё по 15 секунд на вопрос, и число получается заведомо
+ * приблизительное. Поэтому у подписи есть подсказка, где расчёт назван прямо:
+ * человек должен видеть, что перед ним прикидка, а не показания секундомера.
+ */
+function renderTime() {
+	const questions = profile.questions;
+
+	// Пустая полоса у того, кто ещё ничего не отметил, — обещание без содержания:
+	// показывать ему шкалу от часа до месяца незачем
+	$('timeline').hidden = questions === 0;
+
+	if (questions === 0) {
+		return;
+	}
+
+	const seconds = questions * SECONDS_PER_QUESTION;
+	const total = formatDuration(seconds);
+
+	$('timeValue').textContent = total;
+
+	const explain = `Расчёт простой: каждый вопрос в сыгранных паках считается за ${SECONDS_PER_QUESTION} секунд. `
+		+ `${formatNumber(questions)} ${plural(questions, 'вопрос', 'вопроса', 'вопросов')} × ${SECONDS_PER_QUESTION} с — `
+		+ `это ${total}. Сколько игра шла на самом деле, сайт не знает: он видит только сами паки.`;
+
+	$('timeTitle').title = explain;
+	$('timeValue').title = explain;
+
+	const bar = $('timeBar');
+	const marks = $('timeMarks');
+
+	bar.textContent = '';
+	marks.textContent = '';
+
+	let low = 0;
+
+	for (const mark of TIME_MARKS) {
+		const passed = seconds >= mark.seconds;
+		const filled = Math.min(1, Math.max(0, (seconds - low) / (mark.seconds - low)));
+
+		const segment = element('div', 'timeline__segment');
+		const fill = element('div', 'timeline__fill');
+		fill.style.width = `${filled * 100}%`;
+		segment.append(fill);
+		bar.append(segment);
+
+		const label = element('div', passed ? 'timeline__mark timeline__mark--passed' : 'timeline__mark');
+
+		if (passed) {
+			label.append(icon('check'));
+		}
+
+		label.append(element('span', null, mark.label));
+		label.title = `${mark.label} игры — это примерно ${formatNumber(Math.round(mark.seconds / SECONDS_PER_QUESTION))} вопросов`;
+		marks.append(label);
+
+		low = mark.seconds;
+	}
+}
+
+/**
+ * Вкладки «Запланировано» и «Сыграно». Списки эти нужны порознь: вместе они
+ * на всю библиотеку длиной, и второй всё равно оказывался за краем экрана.
+ */
+function renderTabs() {
+	const counts = {
+		planned: profile?.planned?.length ?? 0,
+		played: profile?.packages.length ?? 0,
+	};
+
+	$('tabPlannedCount').textContent = formatNumber(counts.planned);
+	$('tabPlayedCount').textContent = formatNumber(counts.played);
+
+	for (const [key, button, panel] of [
+		['planned', $('tabPlanned'), $('plannedBlock')],
+		['played', $('tabPlayed'), $('playedBlock')],
+	]) {
+		const active = key === tab;
+
+		button.classList.toggle('tab--active', active);
+		button.setAttribute('aria-selected', String(active));
+		panel.hidden = !active;
+	}
+}
+
+function bindTabs() {
+	for (const [key, button] of [['planned', $('tabPlanned')], ['played', $('tabPlayed')]]) {
+		button.addEventListener('click', () => {
+			tab = key;
+			renderTabs();
+		});
 	}
 }
 
@@ -465,6 +625,8 @@ async function start() {
 
 	renderWho();
 	renderNumbers();
+	renderTime();
+	renderTabs();
 
 	renderBreakdown('levels', LEVEL_ORDER, profile.levels,
 		key => ({ name: facets.levelNames[key].name, className: `level--${facets.levelNames[key].key}` }),
@@ -486,4 +648,6 @@ async function start() {
 // с пустой шапки, и ещё раз в start(), когда станет известно, вошёл ли кто-нибудь
 renderWho();
 bindWho();
+bindTabs();
+renderTabs();
 start();

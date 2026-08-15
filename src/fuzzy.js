@@ -127,13 +127,43 @@ export function buildEntry(row) {
 	const blob = buildBlob(row);
 	const spaced = ` ${blob} `;
 	const latin = toLatin(blob);
+	const name = normalizeText(row.name);
 
 	return {
 		id: row.id,
 		blob: spaced,
 		latin: latin === blob ? spaced : ` ${latin} `,
 		words: [...new Set(blob.split(' '))].filter(Boolean),
+		// Отдельно от blob: по названию пак ставится в выдаче выше, чем по описанию
+		// или тексту сообщения (см. rankEntry)
+		name,
+		nameLatin: toLatin(name),
+		nameWords: [...new Set(name.split(' '))].filter(Boolean),
 	};
+}
+
+/** Нашлось ли слово запроса среди слов пака с допуском на опечатки. */
+function fuzzyInWords(words, token) {
+	const limit = allowedErrors(token.length);
+
+	if (limit === 0) {
+		return false;
+	}
+
+	const anywhere = token.length >= INFIX_LENGTH;
+
+	for (const word of words) {
+		// Слово пака короче запроса больше, чем на допуск: столько букв не дописать
+		if (token.length - word.length > limit) {
+			continue;
+		}
+
+		if (wordDistance(token, word, limit, anywhere) <= limit) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 /**
@@ -153,26 +183,7 @@ export function matchToken(entry, token) {
 		return 'exact';
 	}
 
-	const limit = allowedErrors(token.length);
-
-	if (limit === 0) {
-		return null;
-	}
-
-	const anywhere = token.length >= INFIX_LENGTH;
-
-	for (const word of entry.words) {
-		// Слово пака короче запроса больше, чем на допуск: столько букв не дописать
-		if (token.length - word.length > limit) {
-			continue;
-		}
-
-		if (wordDistance(token, word, limit, anywhere) <= limit) {
-			return 'fuzzy';
-		}
-	}
-
-	return null;
+	return fuzzyInWords(entry.words, token) ? 'fuzzy' : null;
 }
 
 /**
@@ -196,6 +207,91 @@ export function matchEntry(entry, tokens) {
 	}
 
 	return tier;
+}
+
+/**
+ * Насколько попадание похоже на «то самое»: 0 — название пака и есть запрос,
+ * дальше по убыванию, RANK_REST — нашлось где-то ещё: в описании, в тегах,
+ * в тексте сообщения, у автора.
+ *
+ * Ради этого счёта и заведена сортировка «по совпадению с запросом»: набрав
+ * «Большая солянка», человек ждёт сверху пак с таким названием, а не пак,
+ * у которого эти два слова случайно встретились в описании. Прежде выдача
+ * шла по времени сообщения, и пак с точным названием мог оказаться на третьей
+ * странице просто потому, что он старый.
+ *
+ * Ступени такие:
+ *   0 — название и есть запрос;
+ *   1 — с запроса название начинается;
+ *   2 — запрос стоит где-то внутри названия;
+ *   3 — все слова запроса нашлись в названии порознь;
+ *   4 — то же, но с прощёнными опечатками: «гари потер» — это «Гарри Поттер»;
+ *   5 — в названии нашлась только часть слов запроса;
+ *   6 — в названии нет ничего, пак нашёлся не по нему.
+ *
+ * Они нарочно грубые: внутри одной ступени порядок задаёт обычная сортировка
+ * (по умолчанию — сначала новые), и дробить их мельче значило бы выдумывать
+ * точность там, где её нет.
+ */
+export const RANK_REST = 6;
+
+/** Название целиком: 0 — оно и есть запрос, 1 — с него начинается, 2 — где-то внутри. */
+function wholeNameRank(name, query) {
+	if (!name || !query) {
+		return null;
+	}
+
+	if (name === query) {
+		return 0;
+	}
+
+	if (name.startsWith(query)) {
+		return 1;
+	}
+
+	return name.includes(query) ? 2 : null;
+}
+
+/**
+ * Ступень пака для сортировки по совпадению. Раскладка учитывается так же, как
+ * и в самом поиске: «vedmak» находит «Ведьмака» — и наверх его ставит тоже.
+ */
+export function rankEntry(entry, tokens, query) {
+	const normalized = normalizeText(query);
+
+	if (!normalized) {
+		return RANK_REST;
+	}
+
+	const whole = Math.min(
+		wholeNameRank(entry.name, normalized) ?? RANK_REST,
+		wholeNameRank(entry.nameLatin, toLatin(normalized)) ?? RANK_REST,
+	);
+
+	if (whole < RANK_REST) {
+		return whole;
+	}
+
+	// Слова запроса порознь: «солянка большая» — это тот же пак, что и «большая
+	// солянка», хотя целиком строка в название не попадает
+	const spaced = ` ${entry.name} `;
+	const spacedLatin = ` ${entry.nameLatin} `;
+	const inName = token => spaced.includes(token) || spacedLatin.includes(toLatin(token));
+
+	if (tokens.every(inName)) {
+		return 3;
+	}
+
+	// Прощённая опечатка в названии — это всё ещё попадание по названию, и стоять
+	// оно должно выше точного попадания в чужом описании: «гари потер» ищут пак
+	// про Гарри Поттера, а не пак, где он упомянут в перечислении тем
+	const nearName = token => inName(token) || fuzzyInWords(entry.nameWords, token);
+
+	if (tokens.every(nearName)) {
+		return 4;
+	}
+
+	return tokens.some(nearName) ? 5 : RANK_REST;
 }
 
 /** Поля, которых хватает buildEntry. Обе половины сайта спрашивают базу одинаково. */

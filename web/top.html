@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Топ пакетов для «Своей игры» за 3 месяца — FirePacks</title>
+	<meta name="description" content="Самые играемые паки SIGame за последние три месяца: по десятке в каждой категории — солянки, аниме-паки, игропаки, кинопаки, мультпаки, музпаки и всё остальное.">
+	<link rel="canonical" href="/top">
+	<meta property="og:type" content="website">
+	<meta property="og:site_name" content="FirePacks">
+	<meta property="og:locale" content="ru_RU">
+	<meta property="og:title" content="Топ пакетов для «Своей игры» за 3 месяца">
+	<meta property="og:description" content="По десять самых играемых паков в каждой категории: солянки, аниме, игры, кино, мультики, музыка и остальное.">
+	<link rel="icon" href="/favicon.ico" sizes="any">
+	<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+	<header class="topbar">
+		<div class="topbar__inner">
+			<a class="brand" href="/" title="На главную страницу библиотеки">
+				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
+				<span class="brand__text">FirePacks</span>
+			</a>
+
+			<a class="topbar__link" href="/">К библиотеке</a>
+			<a class="topbar__link" href="/authors">Топ авторов</a>
+			<a class="topbar__link" href="/profile">Профиль</a>
+
+			<div class="account" id="account"></div>
+		</div>
+	</header>
+
+	<main class="top">
+		<div class="top__head">
+			<h1 class="top__heading">Топ пакетов за 3 месяца</h1>
+			<p class="hint" id="hint">Загрузка…</p>
+		</div>
+
+		<!-- Быстрый выбор категории. Это и есть вся страница: нажали на категорию —
+		     под ней десятка самых играемых паков этой категории. Кнопки рисует
+		     скрипт (см. web/top.js), потому что цвет и значок у каждой категории
+		     свои, те же самые, что у типов паков в библиотеке. -->
+		<nav class="top-tabs" id="tabs" aria-label="Категории"></nav>
+
+		<div id="list" class="grid top-list"></div>
+	</main>
+
+	<script src="/common.js"></script>
+	<script src="/icons.js"></script>
+	<script src="/card.js"></script>
+	<script src="/top.js"></script>
+</body>
+</html>

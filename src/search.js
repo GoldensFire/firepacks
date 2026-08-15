@@ -11,7 +11,7 @@
 // одним SQL-запросом.
 
 import { db } from './db.js';
-import { normalizeText, buildEntry, matchEntry, SEARCH_FIELDS } from './fuzzy.js';
+import { normalizeText, buildEntry, matchEntry, rankEntry, SEARCH_FIELDS } from './fuzzy.js';
 
 export { normalizeText };
 
@@ -77,10 +77,12 @@ export function warmSearch() {
 	getIndex();
 }
 
-db.exec('CREATE TEMP TABLE IF NOT EXISTS search_hits (package_id INTEGER PRIMARY KEY, tier INTEGER NOT NULL)');
+// hit_rank, а не rank: RANK — это оконная функция SQLite, и колонка с таким
+// именем читается в запросе через раз.
+db.exec('CREATE TEMP TABLE IF NOT EXISTS search_hits (package_id INTEGER PRIMARY KEY, tier INTEGER NOT NULL, hit_rank INTEGER NOT NULL)');
 
 const clearHits = db.prepare('DELETE FROM search_hits');
-const addHit = db.prepare('INSERT INTO search_hits (package_id, tier) VALUES (?, ?)');
+const addHit = db.prepare('INSERT INTO search_hits (package_id, tier, hit_rank) VALUES (?, ?, ?)');
 
 /**
  * Что сейчас лежит в search_hits. Один запрос выдачи спрашивает отбор дважды —
@@ -96,6 +98,9 @@ let hitsFor = null;
  * Складывает найденное во временную таблицу search_hits. Рядом с паком пишется
  * tier: 0 — все слова нашлись как есть, 1 — где-то потребовалось простить опечатку.
  * Выдача сортируется сначала по нему, чтобы точные попадания не тонули среди похожих.
+ *
+ * Там же hit_rank — насколько попадание пришлось на само название пака (см.
+ * rankEntry в src/fuzzy.js). Им сортирует «по совпадению с запросом».
  *
  * @returns был ли поиск вообще (пустой запрос ничего не сужает)
  */
@@ -130,7 +135,7 @@ export function runSearch(text) {
 			const tier = matchEntry(entry, tokens);
 
 			if (tier >= 0) {
-				addHit.run(entry.id, tier);
+				addHit.run(entry.id, tier, rankEntry(entry, tokens, text));
 			}
 		}
 

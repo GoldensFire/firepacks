@@ -5,7 +5,7 @@
 //
 // Сам счёт — в src/fuzzy.js, общий с домашним сайтом.
 
-import { normalizeText, buildEntry, matchEntry, SEARCH_FIELDS } from '../../src/fuzzy.js';
+import { normalizeText, buildEntry, matchEntry, rankEntry, RANK_REST, SEARCH_FIELDS } from '../../src/fuzzy.js';
 
 /**
  * Список слов всех паков. Живёт в изоляте: Cloudflare держит его между
@@ -38,7 +38,12 @@ async function getIndex(db) {
  * Номера подошедших паков, разложенные по точности попадания. Пустой запрос
  * ничего не сужает — тогда null, и выдача идёт как есть.
  *
- * @returns {Promise<{exact: number[], fuzzy: number[]} | null>}
+ * Рядом — те же номера, разложенные по ступеням совпадения с названием (см.
+ * rankEntry в src/fuzzy.js): по ним сортирует «по совпадению с запросом».
+ * Ступеней шесть, и хранятся они списками номеров, а не числом при паке:
+ * временных таблиц у D1 нет, и порядок приходится складывать прямо в SQL.
+ *
+ * @returns {Promise<{exact: number[], fuzzy: number[], ranks: number[][]} | null>}
  */
 export async function findHits(db, text) {
 	const tokens = normalizeText(text).split(' ').filter(Boolean);
@@ -49,18 +54,39 @@ export async function findHits(db, text) {
 
 	const exact = [];
 	const fuzzy = [];
+	const ranks = Array.from({ length: RANK_REST + 1 }, () => []);
 
 	for (const entry of await getIndex(db)) {
 		const tier = matchEntry(entry, tokens);
 
+		if (tier < 0) {
+			continue;
+		}
+
 		if (tier === 0) {
 			exact.push(entry.id);
-		} else if (tier === 1) {
+		} else {
 			fuzzy.push(entry.id);
 		}
+
+		ranks[rankEntry(entry, tokens, text)].push(entry.id);
 	}
 
-	return { exact, fuzzy };
+	return { exact, fuzzy, ranks };
+}
+
+/**
+ * Ступень совпадения выражением SQL: «сначала те, чьё название и есть запрос,
+ * потом те, у кого он в начале названия, и так далее». Последняя ступень отдельным
+ * условием не нужна — всё, что не попало в предыдущие, и есть она.
+ */
+export function rankOrder(hits) {
+	const cases = hits.ranks
+		.slice(0, -1)
+		.map((ids, rank) => (ids.length > 0 ? `WHEN p.id IN (${idList(ids)}) THEN ${rank}` : ''))
+		.filter(Boolean);
+
+	return cases.length > 0 ? `(CASE ${cases.join(' ')} ELSE ${hits.ranks.length - 1} END)` : null;
 }
 
 /**

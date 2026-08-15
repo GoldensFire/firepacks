@@ -16,6 +16,13 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const CALL_ATTEMPTS = 5;
 
 /**
+ * Сколько раз перечитывать окно, которое пришло пустым посреди темы. Ошибки
+ * в таком ответе нет, повторять его на уровне вызова не за что — а вот на уровне
+ * обхода стоит: заминка проходит за секунду-другую (см. readTopic).
+ */
+const WINDOW_ATTEMPTS = 3;
+
+/**
  * Вызов метода API. Ошибка 6 — «слишком часто», её повторяем;
  * остальные означают, что дальше идти бессмысленно.
  *
@@ -218,8 +225,19 @@ async function readWindow(groupId, topicId, offset, count, onSkip) {
  * сообщений в теме. Смещение при этом двигается на столько, сколько пришло,
  * а не на сотню, — короткая страница в середине больше ничего не пропускает.
  *
+ * Пустое окно посреди темы. Ответ без единого сообщения раньше значил «тема
+ * кончилась» — и этого хватило, чтобы ночь с 14 на 15 августа прочитала 10400
+ * сообщений из 26289 и объявила обход неполным. Ответ был удачным, ошибки в нём
+ * не было, просто список пришёл пустой; повторный запрос того же куска через
+ * минуту отдал все сто сообщений. Теперь пустому окну верят только в конце темы:
+ * пока ВК обещает больше сообщений, чем прочитано, окно перечитывается, а если
+ * оно так и не даётся — обход перешагивает его и идёт дальше, сказав об этом
+ * вслух (onGap). Пропущенное окно — не конец темы, и молчать о нём нельзя:
+ * в нём могло лежать до сотни сообщений с паками.
+ *
  * @param {string} topicUrl ссылка на тему
- * @param {object} options maxPages — сколько страниц пройти, onPage — колбэк прогресса
+ * @param {object} options maxPages — сколько страниц пройти, onPage — колбэк прогресса,
+ *   onSkip — нечитаемое сообщение, onGap — перешагнутое окно
  */
 export async function* readTopic(topicUrl, options = {}) {
 	const maxPages = options.maxPages ?? Infinity;
@@ -231,6 +249,7 @@ export async function* readTopic(topicUrl, options = {}) {
 	let total = null;
 	let lastSeenId = null;
 	let skipped = 0;
+	let retries = 0;
 
 	while (page < maxPages) {
 		const response = await readWindow(groupId, topicId, offset, PAGE_SIZE, (at, error) => {
@@ -244,15 +263,48 @@ export async function* readTopic(topicUrl, options = {}) {
 			total = response.total;
 		}
 
-		if (items.length === 0 && response.consumed === 0) {
-			return;
+		// Обещал ли ВК больше, чем мы уже прочитали. Пока обещает — ни пустое
+		// окно, ни повторившееся не означают конца темы
+		const promisedMore = total !== null && offset < total;
+
+		// Окно пустое, либо в нём ровно то же, что в прошлом: продвинуться по нему
+		// нельзя, а цикл с бесконечным maxPages без этой проверки крутился бы вечно
+		const stuck = (items.length === 0 && response.consumed === 0)
+			|| (items.length > 0 && items.at(-1).id === lastSeenId);
+
+		if (stuck) {
+			if (!promisedMore) {
+				return;
+			}
+
+			// Сначала — просто перечитать: пустое окно посреди темы почти всегда
+			// оказывается заминкой на стороне ВК и проходит само
+			if (retries < WINDOW_ATTEMPTS) {
+				retries++;
+				await sleep(config.vkDelayMs * retries * 2);
+				continue;
+			}
+
+			// Не далось и с третьего раза — перешагиваем окно целиком. Место
+			// в теме оно занимает, поэтому смещение двигается на полную страницу
+			retries = 0;
+			options.onGap?.(offset, PAGE_SIZE);
+			offset += PAGE_SIZE;
+
+			// Перешагнутое окно — тоже пройденные места в теме, и счётчик
+			// прочитанного должен их учесть: иначе обход, шагнувший через конец
+			// темы, сам себя объявит недочитанным (см. scanVk)
+			options.onPage?.({ page, offset, found: 0, read: offset, total, skipped });
+
+			if (offset >= total) {
+				return;
+			}
+
+			await sleep(config.vkDelayMs);
+			continue;
 		}
 
-		// Страница вернула то же, что и прошлая: дальше идти некуда, а цикл
-		// с бесконечным maxPages без этой проверки крутился бы вечно
-		if (items.length > 0 && items.at(-1).id === lastSeenId) {
-			return;
-		}
+		retries = 0;
 
 		if (items.length > 0) {
 			lastSeenId = items.at(-1).id;

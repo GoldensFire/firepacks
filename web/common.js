@@ -265,6 +265,37 @@ function createRating(pack, options) {
 	return box;
 }
 
+/**
+ * Вошедший в шапке: значок и имя одной кнопкой, ведущей в профиль.
+ *
+ * Раньше это были два отдельных куска — картинка и текст рядом с ней, — и ни один
+ * никуда не вёл: в профиль ходили соседней ссылкой «Профиль». Целиться в своё имя
+ * при этом пробовали все, и попадание в него не делало ровно ничего. Теперь
+ * значок с именем — одна мишень, и промахнуться мимо неё между ними нельзя.
+ *
+ * Зовётся из тех страниц, где уголок входа рисуется сам (см. renderAccount
+ * в app.js и pack.js): вёрстка у него везде одна, и расходиться ей незачем.
+ *
+ * @param {object} account вошедший: имя и, если есть, значок
+ */
+function createAccountLink(account) {
+	const link = element('a', 'account__user');
+	link.href = '/profile';
+	link.title = `Профиль: отметки, оценки и чёрный список ${account.name}`;
+
+	if (account.avatar) {
+		const avatar = element('img', 'account__avatar');
+		avatar.src = account.avatar;
+		avatar.alt = '';
+		avatar.width = 24;
+		avatar.height = 24;
+		link.append(avatar);
+	}
+
+	link.append(element('span', 'account__name', account.name));
+	return link;
+}
+
 /** Ссылка «Играть» на официальный движок с уже подставленным паком. */
 function createPlayLink(pack, playerUri) {
 	const play = element('a', 'button button--primary', 'Играть');

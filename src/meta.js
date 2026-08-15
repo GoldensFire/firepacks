@@ -283,6 +283,9 @@ export function buildSitemap(rows, origin) {
 			+ (newest ? `<lastmod>${day(newest)}</lastmod>` : '')
 			+ `<changefreq>daily</changefreq><priority>1.0</priority></url>`,
 		`\t<url><loc>${escapeHtml(origin)}/authors</loc><changefreq>weekly</changefreq><priority>0.6</priority></url>`,
+		// Топ пакетов меняется чаще топа авторов: он считается за три месяца,
+		// и каждая новая неделя выбрасывает из него верхнюю строчку
+		`\t<url><loc>${escapeHtml(origin)}/top</loc><changefreq>weekly</changefreq><priority>0.7</priority></url>`,
 	];
 
 	for (const row of rows) {

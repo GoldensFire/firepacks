@@ -530,6 +530,17 @@ function renderSortHint() {
 		return;
 	}
 
+	// «По совпадению с запросом» без самого запроса не сортирует ничего, и об этом
+	// честнее сказать, чем оставить человека гадать, почему список не шелохнулся
+	if (state.sort === 'relevance') {
+		hint.textContent = state.search
+			? 'Сначала паки, которые так и называются, потом те, у кого запрос в начале названия, '
+				+ 'и только потом найденные по описанию, темам или тексту сообщения. '
+				+ 'Внутри каждой ступени — сначала новые.'
+			: 'Сортировать по совпадению не с чем: строка поиска пуста. Паки идут как обычно — сначала новые.';
+		return;
+	}
+
 	if (state.sort === 'rating') {
 		hint.textContent = `Средняя оценка игроков по десятибалльной шкале. `
 			+ `Паки, которых оценили меньше ${facets.minRatings} раз, идут в конце: `
@@ -628,16 +639,7 @@ function renderAccount() {
 		return;
 	}
 
-	if (user.avatar) {
-		const avatar = element('img', 'account__avatar');
-		avatar.src = user.avatar;
-		avatar.alt = '';
-		avatar.width = 24;
-		avatar.height = 24;
-		box.append(avatar);
-	}
-
-	box.append(element('span', 'account__name', user.name));
+	box.append(createAccountLink(user));
 
 	const out = element('button', 'button button--ghost', 'Выйти');
 	out.type = 'button';
@@ -649,6 +651,17 @@ function renderAccount() {
 	box.append(out);
 }
 
+/**
+ * Счётчики в шапке. Разделены не точками, а промежутком: точку между «Паков: 11 480»
+ * и «Сыграно: 12» глаз читает как знак препинания внутри одного предложения, хотя
+ * это отдельные числа про разное. Промежуток держит сама строка (см. .counters
+ * в style.css) — оттого каждый счётчик и стоит отдельным элементом, а не куском
+ * одной строки.
+ *
+ * «С оценкой» здесь больше нет: сколько паков в базе кто-то оценил — это про базу,
+ * а не про того, кто на неё смотрит, и решению «во что играть» оно не помогает
+ * ничем. Оценка каждого пака по-прежнему стоит на его карточке.
+ */
 function renderCounters() {
 	// Без входа сыгранное считается по отметкам самого браузера: сервер о них
 	// не знает и присылает ноль, а на счётчике должно стоять то же число, что
@@ -656,13 +669,23 @@ function renderCounters() {
 	const played = serverMarks() ? facets.played : localPlayed.size;
 	const planned = serverMarks() ? (facets.planned ?? 0) : localPlanned.size;
 
-	$('counters').innerHTML =
-		`Паков: <b>${facets.total}</b>` +
-		` · С оценкой: <b>${facets.rated}</b>` +
-		` · Сыграно: <b id="playedCount">${played}</b>` +
-		// Запланированное показывается, только когда оно есть: пустой счётчик
-		// в шапке — это строка про то, чего человек ни разу не делал
-		(planned > 0 ? ` · В планах: <b id="plannedCount">${planned}</b>` : '');
+	const box = $('counters');
+	box.textContent = '';
+
+	const add = (label, value) => {
+		const item = element('span', 'counters__item', `${label}: `);
+		item.append(element('b', null, formatNumber(value)));
+		box.append(item);
+	};
+
+	add('Паков', facets.total);
+	add('Сыграно', played);
+
+	// Запланированное показывается, только когда оно есть: пустой счётчик
+	// в шапке — это строка про то, чего человек ни разу не делал
+	if (planned > 0) {
+		add('В планах', planned);
+	}
 }
 
 /** Плашки поверх выдачи: показывают, что список сужен, и снимают фильтр по клику. */
@@ -938,16 +961,63 @@ async function load(started = null) {
 	renderPager(data.total);
 }
 
-function bind() {
-	let searchTimer = null;
+/**
+ * Начать поиск тем, что набрано в поле. Зовётся по нажатию «Найти» и по Enter,
+ * а не на каждую букву: см. форму поиска в index.html.
+ *
+ * Новый поиск сам переключает сортировку на «по совпадению с запросом» — но
+ * только начатый с пустого места. Выбрал человек «по числу вопросов» и уточнил
+ * запрос — сортировка остаётся его: переключать её под руками на каждом нажатии
+ * значило бы спорить с только что сделанным выбором. Опустевшее поле возвращает
+ * сортировку обратно к «сначала новые»: сортировать по запросу, которого нет,
+ * не по чему.
+ */
+function submitSearch() {
+	const text = $('search').value.trim();
 
-	$('search').addEventListener('input', event => {
-		clearTimeout(searchTimer);
-		searchTimer = setTimeout(() => {
-			state.search = event.target.value.trim();
-			state.page = 1;
-			load();
-		}, 250);
+	if (text === state.search) {
+		return;
+	}
+
+	const started = text !== '' && state.search === '';
+
+	state.search = text;
+
+	if (started) {
+		state.sort = 'relevance';
+	} else if (text === '' && state.sort === 'relevance') {
+		state.sort = 'added';
+	}
+
+	$('sort').value = state.sort;
+	renderSortDirection();
+	renderSortHint();
+
+	state.page = 1;
+	load();
+}
+
+/**
+ * Порядок «по возрастанию/по убыванию» у сортировки по совпадению не спрашивают:
+ * снизу там то, что подошло меньше всего, и показывать это первым незачем.
+ */
+function renderSortDirection() {
+	$('dir').disabled = state.sort === 'relevance';
+}
+
+function bind() {
+	$('searchBox').addEventListener('submit', event => {
+		event.preventDefault();
+		submitSearch();
+	});
+
+	// Крестик внутри поля (type="search") очищает его молча, без Enter, — и поиск
+	// после этого сбрасывается сам: оставлять выдачу отобранной по запросу,
+	// которого в поле уже нет, значит врать про неё
+	$('search').addEventListener('search', () => {
+		if ($('search').value.trim() === '') {
+			submitSearch();
+		}
 	});
 
 	$('unrated').addEventListener('change', event => {
@@ -1005,6 +1075,7 @@ function bind() {
 	$('sort').addEventListener('change', event => {
 		state.sort = event.target.value;
 		state.page = 1;
+		renderSortDirection();
 		renderSortHint();
 		load();
 	});
@@ -1075,6 +1146,7 @@ function resetFilters() {
 	renderLanguages();
 	renderTags();
 	renderActiveFilters();
+	renderSortDirection();
 	renderSortHint();
 	load();
 }
@@ -1122,19 +1194,25 @@ function readUrlState() {
 	// не оставляют ни одного пака.
 	state.hidePlayed = !state.onlyPlayed && query.get('hidePlayed') !== '0';
 
+	// Сортировка из адреса сильнее: ссылку с ней прислали нарочно. А вот адрес
+	// с одним только поиском (/?search=…) открывается так же, как открылся бы
+	// поиск, набранный руками, — сначала самое подходящее
 	if (query.get('sort')) {
 		state.sort = query.get('sort');
+	} else if (state.search) {
+		state.sort = 'relevance';
 	}
 
 	$('search').value = state.search;
 	$('sort').value = state.sort;
+	renderSortDirection();
 	$('onlyPlanned').checked = state.onlyPlanned;
 	$('onlyPlayed').checked = state.onlyPlayed;
 	$('hidePlayed').checked = state.hidePlayed;
 }
 
 /**
- * «Обновить базу →» с уже названным автором, когда выдача отобрана по нему.
+ * «Обновить базу» с уже названным автором, когда выдача отобрана по нему.
  *
  * Обновлять базу целиком ради одного человека незачем: паков у автора десяток,
  * а в базе их тысячи. Поэтому ссылка ведёт на ту же страницу обновления, но
@@ -1150,7 +1228,7 @@ function aimUpdateLink() {
 
 	link.href = state.author ? `/update?authors=${encodeURIComponent(state.author)}` : '/update';
 	link.title = state.author ? `Обновить паки автора «${state.author}»` : '';
-	link.textContent = state.author ? 'Обновить паки автора →' : 'Обновить базу →';
+	link.textContent = state.author ? 'Обновить паки автора' : 'Обновить базу';
 }
 
 // Кнопки выкладки здесь больше нет. Она стояла в библиотеке ради решения

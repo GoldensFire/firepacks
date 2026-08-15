@@ -17,7 +17,7 @@ import {
 import { jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
 import { packSlug } from '../../src/slug.js';
 import { groupSubjects, subjectMatches } from '../../src/subject.js';
-import { findHits, idList } from './search.js';
+import { findHits, idList, rankOrder } from './search.js';
 
 /**
  * «Самые популярные за период» — это паки, появившиеся в обсуждении не раньше
@@ -516,6 +516,10 @@ export async function listPackages(db, query, userId) {
 		// В D1 такие строки не просто время — они считаются по тарифу, и главная
 		// страница на пятнадцати тысячах паков читала бы их все при каждом открытии.
 		orderBy = `${SORTS.added} ${direction} NULLS LAST`;
+	} else if (sortKey === 'relevance') {
+		// Порядок задаёт сам поиск (см. ниже), а внутри одной ступени совпадения
+		// паки идут как обычно — сначала новые. Без поиска сортировать не по чему.
+		orderBy = `${SORTS.added} DESC NULLS LAST`;
 	} else if (sortKey === 'difficulty') {
 		// Сложность — это доля вопросов, на которые решились ответить: чем она ниже, тем пак труднее
 		orderBy = `s.take_percent ${direction === 'DESC' ? 'ASC' : 'DESC'} NULLS LAST`;
@@ -525,8 +529,15 @@ export async function listPackages(db, query, userId) {
 
 	// Паки, найденные с прощённой опечаткой, идут после точных попаданий,
 	// а внутри каждой группы сохраняется выбранная сортировка.
+	//
+	// «По совпадению с запросом» добавляет к этому ступень названия: пак, который
+	// так и называется, стоит выше пака, у которого те же слова попались в описании
+	// (см. rankEntry в src/fuzzy.js). Любая другая сортировка ступень не смотрит.
 	if (hits) {
-		orderBy = `(CASE WHEN p.id IN (${idList(hits.exact)}) THEN 0 ELSE 1 END), ${orderBy}`;
+		const exactFirst = `(CASE WHEN p.id IN (${idList(hits.exact)}) THEN 0 ELSE 1 END)`;
+		const byName = sortKey === 'relevance' ? rankOrder(hits) : null;
+
+		orderBy = byName ? `${byName}, ${exactFirst}, ${orderBy}` : `${exactFirst}, ${orderBy}`;
 	}
 
 	const pageSize = Math.min(Math.max(parseInt(query.get('pageSize') ?? '24', 10) || 24, 1), 100);

@@ -78,6 +78,32 @@ const ANALYTICS = `<!-- Cloudflare Web Analytics -->`
 	+ `<!-- End Cloudflare Web Analytics -->`;
 
 /**
+ * Второй счётчик — Google Analytics 4. Стоит рядом с первым и по той же причине
+ * приписывается сборкой, а не вёрсткой: домашний сайт открывают столько же раз,
+ * сколько настоящий, и попади этот кусок в web/*.html — половина статистики
+ * оказалась бы про localhost.
+ *
+ * Счётчики друг другу не мешают: у Cloudflare свой скрипт и свой сбор, у Google
+ * свой, общего между ними нет ничего. Номер (G-…) — не секрет, он открытым
+ * текстом лежит в каждой странице любого сайта с этим счётчиком.
+ *
+ * Официальный кусок Google даётся без изменений — ни async, ни порядок строк
+ * трогать не надо: gtag.js подгружается сам, а очередь событий (dataLayer)
+ * заводится до него и переживает загрузку.
+ */
+const GOOGLE_TAG_ID = 'G-B4T1NVCDBB';
+
+const GOOGLE_ANALYTICS = `<!-- Google tag (gtag.js) -->`
+	+ `<script async src="https://www.googletagmanager.com/gtag/js?id=${GOOGLE_TAG_ID}"></script>`
+	+ `<script>`
+	+ `window.dataLayer = window.dataLayer || [];`
+	+ `function gtag(){dataLayer.push(arguments);}`
+	+ `gtag('js', new Date());`
+	+ `gtag('config', '${GOOGLE_TAG_ID}');`
+	+ `</script>`
+	+ `<!-- End Google tag -->`;
+
+/**
  * Скрипты и стили, к которым дописывается отпечаток содержимого. Ссылки на них
  * стоят в вёрстке, и сборка их переписывает: /app.js → /app.js?v=1a2b3c4d.
  */
@@ -209,10 +235,10 @@ async function main() {
 			html = html.replaceAll(`"/${asset}"`, `"/${asset}?v=${stamp}"`);
 		}
 
-		// Счётчик посещений — последним, перед самым закрытием страницы: грузится
-		// он со стороны и к тому, что показано, отношения не имеет, поэтому ждать
-		// его вёрстке незачем
-		html = html.replace('</body>', `${ANALYTICS}\n</body>`);
+		// Счётчики посещений — последними, перед самым закрытием страницы: грузятся
+		// они со стороны и к тому, что показано, отношения не имеют, поэтому ждать
+		// их вёрстке незачем
+		html = html.replace('</body>', `${ANALYTICS}\n${GOOGLE_ANALYTICS}\n</body>`);
 
 		fs.writeFileSync(file, html, 'utf8');
 	}
@@ -275,7 +301,7 @@ async function main() {
 	const weigh = directory => fs.readdirSync(directory)
 		.reduce((sum, name) => sum + fs.statSync(path.join(directory, name)).size, 0);
 
-	console.log(`  вёрстка: ${pages} файл(ов), со счётчиком посещений`);
+	console.log(`  вёрстка: ${pages} файл(ов), со счётчиками посещений`);
 	console.log(`  обложки: ${reused} готовых, ${resized} уменьшено, ${failed.length} не вышло, ${missing} не нашлось`
 		+ `${swept > 0 ? `, ${swept} лишних убрано со склада` : ''}`);
 	console.log(`Собрано в cf/public, обложки весят ${(weigh(thumbsPath) / 1024 / 1024).toFixed(1)} МБ.`);

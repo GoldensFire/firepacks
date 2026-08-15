@@ -1,6 +1,6 @@
 // Доли тематик в паке. Категорию каждой темы определяет Gemini, здесь только арифметика.
 
-import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES } from './config.js';
+import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES, isNotableGenre } from './config.js';
 import { Names, nameKey, isFormatMarker, mergeRelated } from './franchise.js';
 
 /** Устойчивый ключ темы: по нему ответ модели возвращается на своё место. */
@@ -171,11 +171,19 @@ export function computeGenres(themes, marks, topic) {
 		return [];
 	}
 
-	return [...weights.entries()]
+	const passed = [...weights.entries()]
 		.map(([key, questions]) => ({ key, questions, share: Math.round((questions / total) * 1000) / 1000 }))
 		.filter(genre => genre.share >= config.genreShare)
-		.sort((a, b) => b.questions - a.questions)
-		.slice(0, config.genreLimit);
+		.sort((a, b) => b.questions - a.questions);
+
+	// Обрезка по числу — про то, что список не резиновый, а не про то, что
+	// отсечённого в паке нет. Меха и махо-сёдзё через эту обрезку проходят
+	// всегда: взяли свою десятую часть — значит, будут названы, сколько бы
+	// жанров ни стояло выше (см. NOTABLE_GENRES в settings.js)
+	const shown = passed.slice(0, config.genreLimit);
+	const notable = passed.slice(config.genreLimit).filter(genre => isNotableGenre(topic, genre.key));
+
+	return [...shown, ...notable];
 }
 
 /**
@@ -189,8 +197,28 @@ export function computeGenres(themes, marks, topic) {
  * то «Атака Титанов: Финал», и без сведения пак с двадцатью темами про титанов
  * не получал ни одного повтора.
  *
+ * ————— почему считается не по предмету темы —————
+ *
+ * Сначала повтор искали по одному только предмету темы (поля f и fe) — по тому,
+ * чему тема посвящена ЦЕЛИКОМ. На живых паках это находило почти ничего.
+ * Аниме-пак устроен темами-угадайками: «Опенинги», «Женщины», «Силуэты
+ * персонажей», «Эдиты», — и ни одна из них целиком ничему не посвящена, предмета
+ * у неё нет и быть не должно. Пак от deeathyy #5, где ДжоДжо всплывает в пяти
+ * темах подряд, получал ровно ноль повторов: тема про стенды ДжоДжо была одна,
+ * а остальные четыре упоминания прятались в ответах.
+ *
+ * Поэтому модель называет ещё и список произведений, прозвучавших в ответах темы
+ * (поле w, см. gemini.js), и повтор считается по нему. Вес темы делится поровну
+ * между названными в ней произведениями: тема на шесть вопросов, где названо
+ * шесть разных тайтлов, — это по одному вопросу на каждый, а не шесть вопросов
+ * каждому. Тема же, у которой есть предмет, так и остаётся целиком за ним.
+ *
+ * Тема считается за повтор один раз на произведение, сколько бы раз оно в ней
+ * ни прозвучало: три вопроса про ДжоДжо в одной теме — это одна тема про ДжоДжо,
+ * а не три.
+ *
  * @param {Array} themes темы из listThemes
- * @param {Map<string, {category: string, music: boolean, franchise: string, franchiseEn: string}>} marks
+ * @param {Map<string, {category: string, music: boolean, franchise: string, franchiseEn: string, works: string[]}>} marks
  * @returns {Array<{name: string, themes: number, questions: number, share: number}>}
  *   от частых к редким, только те, что встретились не реже franchiseMinThemes
  */
@@ -200,41 +228,72 @@ export function computeFranchises(themes, marks) {
 	const found = [];
 	let total = 0;
 
-	for (const theme of themes) {
+	themes.forEach((theme, index) => {
 		const weight = theme.questions > 0 ? theme.questions : 1;
 		total += weight;
 
 		const mark = marks.get(theme.key);
+
+		// Формат и площадка произведением не являются: «Опенинги» у каждой
+		// второй темы склеили бы пак-угадайку в одну выдуманную франшизу
+		const real = name => Boolean(name) && !isFormatMarker(name);
 
 		// Оба написания — одна сущность: «Атака титанов» и «Shingeki no Kyojin»
 		// пришли из одной темы, значит это одно произведение, и тема, где названо
 		// только английское имя, сойдётся с той, где названо только русское.
 		const spellings = [mark?.franchise, mark?.franchiseEn]
 			.map(name => String(name ?? '').trim())
-			// Формат и площадка произведением не являются: «Опенинги» у каждой
-			// второй темы склеили бы пак-угадайку в одну выдуманную франшизу
-			.filter(name => name && !isFormatMarker(name));
+			.filter(real);
 
-		if (spellings.length === 0) {
-			continue;
-		}
+		/** Разные произведения этой темы: по ним и делится её вес. */
+		const canons = new Set();
 
-		const canon = names.addEntity(spellings);
-
-		if (!canon) {
-			continue;
-		}
-
-		for (const raw of spellings) {
+		const remember = (raw, canon) => {
 			const key = nameKey(raw);
 
 			if (key) {
 				entries.push({ key, raw, canon });
 			}
+		};
+
+		if (spellings.length > 0) {
+			const canon = names.addEntity(spellings);
+
+			if (canon) {
+				canons.add(canon);
+
+				for (const raw of spellings) {
+					remember(raw, canon);
+				}
+			}
 		}
 
-		found.push({ canon, weight });
-	}
+		// Названное в ответах. Каждое имя — своя сущность: связывать их между собой
+		// нельзя, это разные произведения, случайно оказавшиеся в одной теме
+		for (const raw of (mark?.works ?? []).map(name => String(name ?? '').trim()).filter(real)) {
+			const key = nameKey(raw);
+
+			if (!key) {
+				continue;
+			}
+
+			const canon = names.add(key, raw);
+			canons.add(canon);
+			remember(raw, canon);
+		}
+
+		if (canons.size === 0) {
+			return;
+		}
+
+		// Вес темы делится поровну: шесть вопросов про шесть разных тайтлов —
+		// это по вопросу на тайтл. Тема с одним предметом достаётся ему целиком
+		const share = weight / canons.size;
+
+		for (const canon of canons) {
+			found.push({ theme: index, canon, weight: share });
+		}
+	});
 
 	if (total === 0 || found.length === 0) {
 		return [];
@@ -245,29 +304,32 @@ export function computeFranchises(themes, marks) {
 
 	const groups = new Map();
 
-	for (const { canon, weight } of found) {
+	for (const { theme, canon, weight } of found) {
 		// Канон берём заново: mergeRelated мог переподчинить его другому корню
 		const root = names.find(canon);
 		let group = groups.get(root);
 
 		if (!group) {
-			group = { themes: 0, questions: 0 };
+			// Темы считаем множеством, а не счётчиком: два названия одной темы
+			// могли после слияния оказаться одним произведением («Наруто»
+			// и «Наруто Шиппуден»), и тогда это одна тема, а не две
+			group = { themes: new Set(), questions: 0 };
 			groups.set(root, group);
 		}
 
-		group.themes++;
+		group.themes.add(theme);
 		group.questions += weight;
 	}
 
 	return [...groups.entries()]
-		.filter(([, group]) => group.themes >= config.franchiseMinThemes)
+		.filter(([, group]) => group.themes.size >= config.franchiseMinThemes)
 		.map(([root, group]) => ({
 			name: names.display(root),
-			themes: group.themes,
-			questions: group.questions,
+			themes: group.themes.size,
+			questions: Math.round(group.questions),
 			share: Math.round((group.questions / total) * 1000) / 1000,
 		}))
-		.sort((a, b) => b.questions - a.questions || b.themes - a.themes)
+		.sort((a, b) => b.share - a.share || b.themes - a.themes)
 		.slice(0, config.franchiseLimit);
 }
 

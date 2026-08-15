@@ -8,6 +8,7 @@ import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER
 import {
 	db, jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
 } from './db.js';
+import { readPackList, matchPackList, askedNames, chunk, NAME_KEY_SQL } from './packlist.js';
 import { runSearch, warmSearch } from './search.js';
 import { groupSubjects, subjectMatches } from './subject.js';
 import { packSlug, packIdFromPath } from './slug.js';
@@ -844,14 +845,20 @@ function setPlanned(id, planned) {
 	return ids.length;
 }
 
-/** То же по общему ключу: этим переезжают отметки, сделанные до входа. */
-function setPlannedKeys(keys, planned) {
+/**
+ * То же по общему ключу: этим переезжают отметки, сделанные до входа, — и этим
+ * же приезжает список из файла.
+ *
+ * `times` — необязательная карта «ключ → когда»: у отметок из файла своё время,
+ * и ставить им сегодняшнее значило бы стереть, когда в пак на самом деле играли.
+ */
+function setPlannedKeys(keys, planned, times = {}) {
 	let affected = 0;
 
 	for (const key of new Set((keys ?? []).map(value => String(value ?? '').trim()).filter(Boolean))) {
 		for (const row of packagesByKey.all(key)) {
 			if (planned) {
-				markPlanned.run(row.id, Date.now());
+				markPlanned.run(row.id, times[key] ?? Date.now());
 			} else {
 				unmarkPlanned.run(row.id);
 			}
@@ -872,13 +879,13 @@ const packagesByKey = db.prepare(`SELECT p.id FROM packages p WHERE ${PACK_KEY_S
  * (см. web/app.js), а номера строк для этого не годятся — они меняются при
  * каждой пересборке базы, ключ же считается из самого файла.
  */
-function setPlayedKeys(keys, played) {
+function setPlayedKeys(keys, played, times = {}) {
 	let affected = 0;
 
 	for (const key of new Set((keys ?? []).map(value => String(value ?? '').trim()).filter(Boolean))) {
 		for (const row of packagesByKey.all(key)) {
 			if (played) {
-				markPlayed.run(row.id, Date.now());
+				markPlayed.run(row.id, times[key] ?? Date.now());
 			} else {
 				unmarkPlayed.run(row.id);
 			}
@@ -888,6 +895,54 @@ function setPlayedKeys(keys, played) {
 	}
 
 	return affected;
+}
+
+// ————— список паков файлом —————
+
+/**
+ * Что из файла нашлось в базе. Записи там названы по-человечески — названием
+ * и авторами (см. src/packlist.js), — и превратить их в ключи паков может
+ * только сервер: он один знает, что в базе лежит.
+ *
+ * Спрашивается всё одним запросом на две сотни названий, а не запросом
+ * на запись: список приносят целиком, и двести походов в базу подряд —
+ * это ровно та работа, которую SQL умеет делать за один.
+ */
+const packsByNames = names => db.prepare(`
+	SELECT p.id, p.name, p.authors, p.pack_id
+	FROM packages p
+	WHERE p.status = 'ok' AND ${NAME_KEY_SQL} IN (${names.map(() => '?').join(',')})
+`).all(...names);
+
+function matchList(data) {
+	const entries = readPackList(data);
+	const names = askedNames(entries);
+	const rows = chunk(names).flatMap(part => (part.length > 0 ? packsByNames(part) : []));
+
+	return { total: entries.length, ...matchPackList(entries, rows) };
+}
+
+/**
+ * Обратный ход: по ключам паков — их названия и авторы. Нужен вывозу списка
+ * оттуда, где отметки лежат в самом браузере: там от пака известен один ключ,
+ * а в файл идёт то, что человек прочитает.
+ */
+const packsByKeys = keys => db.prepare(`
+	SELECT p.name, p.authors, MIN(p.id) AS id, ${PACK_KEY_SQL} AS pack_key
+	FROM packages p
+	WHERE p.status = 'ok' AND ${PACK_KEY_SQL} IN (${keys.map(() => '?').join(',')})
+	GROUP BY pack_key
+`).all(...keys);
+
+function namePacks(keys) {
+	const wanted = [...new Set((keys ?? []).map(value => String(value ?? '')).filter(Boolean))];
+	const rows = chunk(wanted).flatMap(part => (part.length > 0 ? packsByKeys(part) : []));
+
+	return rows.map(row => ({
+		key: row.pack_key,
+		name: row.name,
+		authors: jsonOrDefault(row.authors, []),
+	}));
 }
 
 /**
@@ -1270,14 +1325,14 @@ const server = http.createServer(async (request, response) => {
 		}
 
 		if (url.pathname === '/api/played' && request.method === 'POST') {
-			const { id, packKeys, played } = JSON.parse(await readBody(request));
+			const { id, packKeys, played, markedAt } = JSON.parse(await readBody(request));
 
 			// Списком ключей приезжают отметки, сделанные до входа: на хостинге
 			// они до этого мига лежали в самом браузере (см. web/app.js). Дома
 			// такого не бывает — отметки тут и без входа принадлежат установке, —
 			// но метод один на обе половины, и отвечать он должен одинаково.
 			if (Array.isArray(packKeys)) {
-				sendJson(response, { played: !!played, affected: setPlayedKeys(packKeys, played) });
+				sendJson(response, { played: !!played, affected: setPlayedKeys(packKeys, played, markedAt) });
 				return;
 			}
 
@@ -1291,14 +1346,32 @@ const server = http.createServer(async (request, response) => {
 		// это две разные отметки, и снимать одну, ставя другую, сайт не должен
 		// (см. таблицу planned). Отвечает он тем же, чем и сыгранное.
 		if (url.pathname === '/api/planned' && request.method === 'POST') {
-			const { id, packKeys, planned } = JSON.parse(await readBody(request));
+			const { id, packKeys, planned, markedAt } = JSON.parse(await readBody(request));
 
 			if (Array.isArray(packKeys)) {
-				sendJson(response, { planned: !!planned, affected: setPlannedKeys(packKeys, planned) });
+				sendJson(response, { planned: !!planned, affected: setPlannedKeys(packKeys, planned, markedAt) });
 				return;
 			}
 
 			sendJson(response, { id, planned: !!planned, affected: setPlanned(id, planned) });
+			return;
+		}
+
+		// Список паков файлом — только опознание, без единой отметки. Кто нашёлся,
+		// тот и отмечается обычными /api/played и /api/planned, и правила у отметок
+		// остаются прежними: дома они принадлежат установке, на хостинге —
+		// вошедшему, а до входа живут в самом браузере (см. web/card.js).
+		if (url.pathname === '/api/list' && request.method === 'POST') {
+			const body = JSON.parse(await readBody(request));
+
+			// Ключами спрашивают в другую сторону — как называются вот эти паки:
+			// этим вывозится список из браузера, где имён у отметок нет
+			if (Array.isArray(body.keys)) {
+				sendJson(response, { packages: namePacks(body.keys) });
+				return;
+			}
+
+			sendJson(response, matchList(body));
 			return;
 		}
 

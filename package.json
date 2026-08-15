@@ -26,6 +26,6 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "wrangler": "^4.121.0"
+    "wrangler": "^4.123.0"
   }
 }

@@ -103,6 +103,12 @@ const OPTIONS = {
 	force: '--force',
 };
 
+/**
+ * Порядок очереди: чем шаги начинают, когда работы больше, чем влезает в ночь.
+ * Те же ключи, что у --first= в индексаторе (см. ORDERS там).
+ */
+const ORDERS = ['fresh', 'virgin', 'oldest'];
+
 /** Сколько строк вывода держим, чтобы показать их вкладке, открытой посреди работы. */
 const LOG_LIMIT = 3000;
 
@@ -291,6 +297,13 @@ export function startUpdate(request) {
 		if (options[name]) {
 			args.push(flag);
 		}
+	}
+
+	// Чем начинать очередь. Ключ уходит только тогда, когда выбрано не обычное:
+	// очередь и без него идёт со свежих, и лишний ключ в строке запуска
+	// говорил бы о выборе, которого не делали
+	if (ORDERS.includes(options.first) && options.first !== 'fresh') {
+		args.push(`--first=${options.first}`);
 	}
 
 	const limit = positive(options.limit);

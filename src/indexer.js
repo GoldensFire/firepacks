@@ -23,6 +23,9 @@
 //   node src/indexer.js --jobs=8        сколько паков разбирать одновременно
 //   node src/indexer.js --packs=12,34   работать только с этими паками (номера из адреса /pack/N)
 //   node src/indexer.js --authors=А,Б   работать только с паками этих авторов
+//   node src/indexer.js --fresh=3       только паки, выложенные за последние трое суток
+//   node src/indexer.js --first=virgin  чем начинать очередь: fresh (свежие, по умолчанию),
+//                                       virgin (совсем неразобранные), oldest (самые давние)
 //   node src/indexer.js --force         не пропускать уже сделанное: всё заново
 //   node src/indexer.js --retry         попробовать заново паки с ошибками
 //   node src/indexer.js --serial        по-старому: шаги друг за другом, а не разом
@@ -145,6 +148,28 @@ const priorityAuthors = (config.priorityAuthors ?? []).map(name => buildAuthorKe
 const targeted = onlyPacks.length > 0 || onlyAuthors.length > 0;
 
 /**
+ * Только недавно выложенное: `--fresh=3` — паки, появившиеся в обсуждении
+ * за последние трое суток.
+ *
+ * Ради ночного обхода (см. scripts/nightly.js). Ночь идёт двумя проходами:
+ * сперва короткий — обойти обсуждения и разобрать всеми средствами то, что
+ * выложили на днях, — и лишь потом длинный, по всей остальной базе. Разница
+ * не в объёме работы, а в том, что случится, когда её прервут: суточный лимит
+ * Gemini кончается посреди ночи всегда, и без этого прохода сегодняшний пак мог
+ * упереться в него наравне с трёхлетним. Теперь свежее сделано ещё до того, как
+ * начато остальное.
+ *
+ * От `--packs` отличается тем, что не отменяет обход ВК: новые паки в базе
+ * берутся именно оттуда, и в первом проходе обход и есть главное.
+ *
+ * Свежесть меряется по дате сообщения (vk_ts), а не по времени попадания в базу:
+ * пак, найденный сегодня в старой теме, новым не является — он просто не попадался
+ * раньше, и разбирать его вне очереди незачем.
+ */
+const freshDays = value('fresh', 0);
+const freshSince = freshDays > 0 ? Date.now() - freshDays * 86_400_000 : null;
+
+/**
  * Кусок WHERE, сужающий шаг до названных паков. Общий для всех шагов, работающих
  * с паками: и разбора, и статистики, и модели — иначе «обнови вот этот пак»
  * означало бы обновить у него одну только разметку.
@@ -154,6 +179,14 @@ const targeted = onlyPacks.length > 0 || onlyAuthors.length > 0;
 function targetSql(alias = 'p') {
 	const parts = [];
 	const params = [];
+
+	// Отсечка по свежести стоит отдельным условием, а не в общем ИЛИ ниже:
+	// «свежие» — это сужение, а не ещё один способ назвать паки. Вместе
+	// с `--packs` она означала бы «названные, и притом свежие», но вместе их
+	// никто не задаёт, а разбирать этот случай отдельно незачем
+	const fresh = freshSince === null
+		? ''
+		: ` AND ${alias}.vk_ts IS NOT NULL AND ${alias}.vk_ts >= ${freshSince}`;
 
 	if (onlyPacks.length > 0) {
 		parts.push(`${alias}.id IN (${onlyPacks.map(() => '?').join(',')})`);
@@ -170,7 +203,7 @@ function targetSql(alias = 'p') {
 	// Пересечение здесь почти всегда пусто: номера выписывают из одного места,
 	// имена вспоминают из другого, и «обнови вот эти три пака и заодно всё
 	// вот этого автора» — единственное, чем такая пара бывает на самом деле
-	return { where: parts.length > 0 ? ` AND (${parts.join(' OR ')})` : '', params };
+	return { where: (parts.length > 0 ? ` AND (${parts.join(' OR ')})` : '') + fresh, params };
 }
 
 /**
@@ -192,18 +225,63 @@ function targetSql(alias = 'p') {
  */
 const NEWEST_FIRST = 'p.vk_ts IS NULL, p.vk_ts DESC, p.id DESC';
 
+/** То же самое с другого конца: сначала самое давнее. */
+const OLDEST_FIRST = 'p.vk_ts IS NULL, p.vk_ts ASC, p.id ASC';
+
+/**
+ * Про кого база не знает вообще ничего.
+ *
+ * Ноль у пака, которого не касались ни разу: ни разметки, ни описания,
+ * ни найденной статистики. Единица у всех остальных. Отсюда и «сначала пустые»
+ * — обычным ASC.
+ *
+ * Зачем такой порядок нужен рядом с «сначала свежие». Очередь до конца
+ * не проходится никогда: суточного лимита хватает на несколько сотен паков,
+ * а нерасмеченных бывают тысячи. Свежесть — хороший порядок, пока база
+ * догоняет сегодняшний день, но у неё есть и хвост: паки, до которых очередь
+ * не дошла ни разу за всё время, и на карточке у них пусто совершенно — ни
+ * процентов, ни описания, ни уровня сложности. Такой пак на сайте выглядит
+ * не «пока не размеченным», а сломанным, и одна ночь этим порядком закрывает
+ * их сотнями.
+ */
+const NOTHING_KNOWN = `(CASE WHEN p.topics_at IS NULL AND p.summary_at IS NULL
+	AND NOT EXISTS (SELECT 1 FROM stats s WHERE s.package_id = p.id AND s.found = 1)
+	THEN 0 ELSE 1 END)`;
+
+/**
+ * Чем начинать очередь: `--first=fresh|virgin|oldest`.
+ *
+ * Порядок решает всё, потому что очередь не проходится до конца (см. NEWEST_FIRST):
+ * вопрос не в том, что будет сделано, а в том, что останется несделанным.
+ */
+const ORDERS = {
+	fresh: NEWEST_FIRST,
+	virgin: `${NOTHING_KNOWN}, ${NEWEST_FIRST}`,
+	oldest: OLDEST_FIRST,
+};
+
+const ORDER_NAMES = {
+	fresh: 'сначала свежие',
+	virgin: 'сначала совсем неразобранные',
+	oldest: 'сначала самые давние',
+};
+
+const firstOrder = Object.hasOwn(ORDERS, text('first')) ? text('first') : 'fresh';
+
 /**
  * То же самое, но постоянно избранные авторы идут впереди всех (см. priorityAuthors).
- * Внутри избранных порядок такой же: сначала свежее.
+ * Внутри избранных порядок такой же, какой выбран ключом --first.
  */
 function priorityOrderSql() {
+	const order = ORDERS[firstOrder];
+
 	if (priorityAuthors.length === 0) {
-		return { order: NEWEST_FIRST, params: [] };
+		return { order, params: [] };
 	}
 
 	return {
 		order: `(SELECT 1 FROM pack_authors a WHERE a.package_id = p.id
-			AND a.author_key IN (${priorityAuthors.map(() => '?').join(',')})) IS NULL, ${NEWEST_FIRST}`,
+			AND a.author_key IN (${priorityAuthors.map(() => '?').join(',')})) IS NULL, ${order}`,
 		params: [...priorityAuthors],
 	};
 }
@@ -220,8 +298,18 @@ function queueNote(withPriority = true) {
 		parts.push(`только авторы: ${text('authors')}`);
 	}
 
+	if (freshSince !== null) {
+		parts.push(`только выложенное за ${freshDays} ${freshDays === 1 ? 'сутки' : 'суток'}`);
+	}
+
 	if (withPriority && priorityAuthors.length > 0) {
 		parts.push(`сначала ${config.priorityAuthors.join(', ')}`);
+	}
+
+	// Порядок очереди называется всегда, кроме обычного: по логу должно быть
+	// видно, почему шаг взялся не за сегодняшние паки
+	if (withPriority && firstOrder !== 'fresh') {
+		parts.push(ORDER_NAMES[firstOrder]);
 	}
 
 	return parts.length > 0 ? ` (${parts.join('; ')})` : '';

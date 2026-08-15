@@ -15,6 +15,7 @@ import {
 	settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
 } from '../../src/settings.js';
 import { jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import { readPackList, matchPackList, askedNames, chunk, NAME_KEY_SQL } from '../../src/packlist.js';
 import { packSlug } from '../../src/slug.js';
 import { groupSubjects, subjectMatches } from '../../src/subject.js';
 import { findHits, idList, rankOrder } from './search.js';
@@ -856,6 +857,59 @@ export async function getTopAuthors(db, query) {
  * его копии. Дома то же самое делалось перебором копий (twinPackages);
  * здесь достаточно не искать копии вовсе.
  */
+// ————— список паков файлом —————
+//
+// Двойник matchList/namePacks из src/server.js. Разбор файла и выбор пака среди
+// однофамильцев там и тут общие (см. src/packlist.js) — разное только то, как
+// спрашивается база: у D1 всё асинхронно и запросы идут пачкой.
+
+/**
+ * Что из принесённого файла нашлось в базе. Отвечает ключами паков — отмечает
+ * потом обычный /api/played, по тем же правилам, что и всегда.
+ */
+export async function matchList(db, data) {
+	const entries = readPackList(data);
+	const names = askedNames(entries);
+
+	if (names.length === 0) {
+		return { total: 0, played: [], planned: [], missed: [] };
+	}
+
+	const parts = chunk(names);
+
+	const results = await db.batch(parts.map(part => db.prepare(`
+		SELECT p.id, p.name, p.authors, p.pack_id
+		FROM packages p
+		WHERE p.status = 'ok' AND ${NAME_KEY_SQL} IN (${part.map(() => '?').join(',')})
+	`).bind(...part)));
+
+	const rows = results.flatMap(result => result.results ?? []);
+
+	return { total: entries.length, ...matchPackList(entries, rows) };
+}
+
+/** Обратный ход: по ключам паков — их названия и авторы, для вывоза списка в файл. */
+export async function namePacks(db, keys) {
+	const wanted = [...new Set((keys ?? []).map(value => String(value ?? '')).filter(Boolean))].slice(0, 5000);
+
+	if (wanted.length === 0) {
+		return [];
+	}
+
+	const results = await db.batch(chunk(wanted).map(part => db.prepare(`
+		SELECT p.name, p.authors, ${PACK_KEY_SQL} AS pack_key
+		FROM packages p
+		WHERE p.status = 'ok' AND ${PACK_KEY_SQL} IN (${part.map(() => '?').join(',')})
+		GROUP BY pack_key
+	`).bind(...part)));
+
+	return results.flatMap(result => result.results ?? []).map(row => ({
+		key: row.pack_key,
+		name: row.name,
+		authors: jsonOrDefault(row.authors, []),
+	}));
+}
+
 export async function setPlayed(db, userId, id, played) {
 	const row = await db.prepare(`SELECT ${PACK_KEY_SQL} AS pack_key FROM packages p WHERE p.id = ?`)
 		.bind(id).first();
@@ -887,8 +941,12 @@ export async function setPlayed(db, userId, id, played) {
  *
  * Номера строк для этого не годятся: браузер помнит паки по общему ключу,
  * а номера меняются при каждой заливке базы.
+ *
+ * Этим же приезжает список из файла, и у него есть своё время: `times` —
+ * карта «ключ → когда». Отметке из файла сегодняшнее время не подходит —
+ * иначе накопленное за годы оказывалось бы поставленным всё разом сегодня.
  */
-export async function setPlayedKeys(db, userId, keys, played) {
+export async function setPlayedKeys(db, userId, keys, played, times = {}) {
 	const list = [...new Set((keys ?? []).map(key => String(key ?? '').trim()).filter(Boolean))].slice(0, 2000);
 
 	if (list.length === 0) {
@@ -899,7 +957,7 @@ export async function setPlayedKeys(db, userId, keys, played) {
 
 	const statements = played
 		? list.map(key => db.prepare('INSERT OR REPLACE INTO played (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
-			.bind(userId, key, now))
+			.bind(userId, key, times[key] ?? now))
 		: list.map(key => db.prepare('DELETE FROM played WHERE user_id = ? AND pack_key = ?').bind(userId, key));
 
 	await db.batch(statements);
@@ -965,8 +1023,11 @@ export async function setPlanned(db, userId, id, planned) {
 	return { id, planned: Boolean(planned), affected: 1 };
 }
 
-/** То же самое сразу по ключам: этим переезжают отметки, сделанные до входа. */
-export async function setPlannedKeys(db, userId, keys, planned) {
+/**
+ * То же самое сразу по ключам: этим переезжают отметки, сделанные до входа,
+ * и этим же приезжает список из файла (см. markedAt в setPlayedKeys).
+ */
+export async function setPlannedKeys(db, userId, keys, planned, times = {}) {
 	const list = [...new Set((keys ?? []).map(key => String(key ?? '').trim()).filter(Boolean))].slice(0, 2000);
 
 	if (list.length === 0) {
@@ -977,7 +1038,7 @@ export async function setPlannedKeys(db, userId, keys, planned) {
 
 	const statements = planned
 		? list.map(key => db.prepare('INSERT OR REPLACE INTO planned (user_id, pack_key, marked_at) VALUES (?, ?, ?)')
-			.bind(userId, key, now))
+			.bind(userId, key, times[key] ?? now))
 		: list.map(key => db.prepare('DELETE FROM planned WHERE user_id = ? AND pack_key = ?').bind(userId, key));
 
 	await db.batch(statements);

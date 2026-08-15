@@ -16,6 +16,7 @@ import {
 	listPackages, getPackage, getFacets, getTopAuthors, getProfile, listSitemap,
 	setPlayed, setPlayedKeys, isPlayedPack, playedCount,
 	setPlanned, setPlannedKeys, plannedCount,
+	matchList, namePacks,
 } from './library.js';
 
 import { packIdFromPath } from '../../src/slug.js';
@@ -236,10 +237,10 @@ export default {
 					return json({ error: 'Отмечать паки сыгранными можно, только войдя через Discord' }, 401);
 				}
 
-				const { id, packKeys, played } = await readJson(request) ?? {};
+				const { id, packKeys, played, markedAt } = await readJson(request) ?? {};
 
 				if (Array.isArray(packKeys)) {
-					return json(await setPlayedKeys(env.DB, userId, packKeys, played));
+					return json(await setPlayedKeys(env.DB, userId, packKeys, played, markedAt));
 				}
 
 				const result = await setPlayed(env.DB, userId, id, played);
@@ -255,15 +256,29 @@ export default {
 					return json({ error: 'Планировать паки можно, только войдя через Discord' }, 401);
 				}
 
-				const { id, packKeys, planned } = await readJson(request) ?? {};
+				const { id, packKeys, planned, markedAt } = await readJson(request) ?? {};
 
 				if (Array.isArray(packKeys)) {
-					return json(await setPlannedKeys(env.DB, userId, packKeys, planned));
+					return json(await setPlannedKeys(env.DB, userId, packKeys, planned, markedAt));
 				}
 
 				const result = await setPlanned(env.DB, userId, id, planned);
 
 				return json(result, result.error ? 404 : 200);
+			}
+
+			// Список паков файлом. Входа не требует нарочно: здесь ничего не
+			// отмечается — только опознаются паки, названные в файле по имени.
+			// Отмечает потом /api/played, и до входа отметки, как и всегда,
+			// остаются в самом браузере (см. web/card.js).
+			if (url.pathname === '/api/list' && request.method === 'POST') {
+				const body = await readJson(request) ?? {};
+
+				if (Array.isArray(body.keys)) {
+					return json({ packages: await namePacks(env.DB, body.keys) });
+				}
+
+				return json(await matchList(env.DB, body));
 			}
 
 			// Обновлять тут нечего: индексатора нет, а Gemini и ВК с чужого адреса

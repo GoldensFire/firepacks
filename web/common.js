@@ -304,3 +304,155 @@ function createPlayLink(pack, playerUri) {
 	play.rel = 'noreferrer noopener';
 	return play;
 }
+
+/**
+ * Хранит ли отметки «сыграно» сервер. Дома хозяин отметки — сама установка,
+ * и отмечать можно без входа; на общем сайте хозяина без входа нет, и отметка
+ * одного человека зажигалась бы у всех сразу.
+ *
+ * Опирается на общие для всех страниц `user` и `facets`: их заводит скрипт
+ * самой страницы (см. card.js и profile.js), а спрашивать их приходится и там,
+ * и там.
+ */
+const serverMarks = () => Boolean(user) || facets?.localBlacklist === true;
+
+// ————— отметки «сыграно» без входа —————
+//
+// Раньше кнопка «Отметить сыгранным» на общем сайте просто не нажималась, и это
+// выглядело придиркой: человек честно сыграл пак и хочет это где-то отметить,
+// а сайт отвечает «сначала заведите учётную запись». Хранить-то отметку и правда
+// негде — но негде на СЕРВЕРЕ, а браузер помнит не хуже.
+//
+// Поэтому до входа отметки живут прямо здесь, в самом браузере. Живут честно:
+// это тот же список, только он знает про один этот браузер, и об этом кнопка
+// прямо говорит. А в тот миг, когда человек всё же входит, весь список разом
+// переезжает в учётную запись (см. uploadLocalPlayed) — ничего не теряется,
+// и заново отмечать сыгранное не приходится.
+//
+// Паки помнятся по общему ключу, а не по номеру строки: номера меняются при
+// каждой заливке базы, ключ считается из самого файла (см. src/keys.js).
+
+const LOCAL_PLAYED_KEY = 'firepacks.played';
+
+/** Отметки этого браузера. Пустое множество, пока сайтом не пользовались. */
+let localPlayed = new Set();
+
+function loadLocalPlayed() {
+	try {
+		const saved = JSON.parse(window.localStorage.getItem(LOCAL_PLAYED_KEY) ?? '[]');
+		localPlayed = new Set(Array.isArray(saved) ? saved.filter(key => typeof key === 'string') : []);
+	} catch {
+		// Хранилище может быть закрыто настройками браузера — тогда отметок
+		// просто не будет, и это не повод ронять всю страницу
+		localPlayed = new Set();
+	}
+}
+
+function saveLocalPlayed() {
+	try {
+		window.localStorage.setItem(LOCAL_PLAYED_KEY, JSON.stringify([...localPlayed]));
+	} catch {
+		// Некуда сохранять — отметка проживёт до обновления страницы
+	}
+}
+
+/** Отмечен ли пак сыгранным: сервером или этим браузером. */
+const isPlayed = pack => pack.played || localPlayed.has(pack.packKey);
+
+/**
+ * Переносит отметки браузера в учётную запись. Вызывается один раз при загрузке
+ * страницы вошедшим: пока хозяина не было, отметки копились здесь, и первое, что
+ * человек ждёт после входа, — увидеть их на месте.
+ */
+async function uploadLocalPlayed() {
+	if (localPlayed.size === 0) {
+		return;
+	}
+
+	const keys = [...localPlayed];
+
+	const response = await fetch('/api/played', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ packKeys: keys, played: true }),
+	});
+
+	const result = await response.json().catch(() => ({ error: 'не удалось' }));
+
+	if (result.error) {
+		// Не вышло — список остаётся в браузере и попробует переехать в другой раз
+		return;
+	}
+
+	localPlayed.clear();
+	saveLocalPlayed();
+}
+
+// ————— запланированное —————
+//
+// «Отметить сыгранным» отвечает на вопрос про прошлое, а перед игрой стоит другой:
+// вот пак, играть в него сегодня некогда, но сесть за него хочется — и запомнить
+// это было негде. Приходилось либо держать название в голове, либо складывать
+// ссылки в заметки на стороне.
+//
+// Устроено ровно как «сыграно», вплоть до жизни в браузере до входа: это тот же
+// список отметок, только про будущее. Пак бывает и сыгранным, и запланированным
+// сразу — сыграли, хотим ещё раз, — поэтому список свой, а не признак у того.
+
+const LOCAL_PLANNED_KEY = 'firepacks.planned';
+
+let localPlanned = new Set();
+
+function loadLocalPlanned() {
+	try {
+		const saved = JSON.parse(window.localStorage.getItem(LOCAL_PLANNED_KEY) ?? '[]');
+		localPlanned = new Set(Array.isArray(saved) ? saved.filter(key => typeof key === 'string') : []);
+	} catch {
+		localPlanned = new Set();
+	}
+}
+
+function saveLocalPlanned() {
+	try {
+		window.localStorage.setItem(LOCAL_PLANNED_KEY, JSON.stringify([...localPlanned]));
+	} catch {
+		// Некуда сохранять — отметка проживёт до обновления страницы
+	}
+}
+
+/** Отобран ли пак на будущее: сервером или этим браузером. */
+const isPlanned = pack => pack.planned || localPlanned.has(pack.packKey);
+
+/** Переносит запланированное браузера в учётную запись — вместе с сыгранным. */
+async function uploadLocalPlanned() {
+	if (localPlanned.size === 0) {
+		return;
+	}
+
+	const response = await fetch('/api/planned', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ packKeys: [...localPlanned], planned: true }),
+	});
+
+	const result = await response.json().catch(() => ({ error: 'не удалось' }));
+
+	if (result.error) {
+		return;
+	}
+
+	localPlanned.clear();
+	saveLocalPlanned();
+}
+
+/** Обе стопки местных отметок разом: их читают и переносят всегда вместе. */
+function loadLocalMarks() {
+	loadLocalPlayed();
+	loadLocalPlanned();
+}
+
+const localMarks = () => localPlayed.size + localPlanned.size;
+
+async function uploadLocalMarks() {
+	await Promise.all([uploadLocalPlayed(), uploadLocalPlanned()]);
+}

@@ -156,7 +156,7 @@ function renderStatus(state) {
 	$('deploy').disabled = running;
 
 	for (const id of ['reparse', 'retry', 'retopics', 'resummary', 'upgrade', 'serial', 'limit', 'pages', 'model',
-		'packs', 'authors', 'force']) {
+		'first', 'packs', 'authors', 'force']) {
 		$(id).disabled = running;
 	}
 
@@ -338,6 +338,9 @@ async function start() {
 			upgrade: $('upgrade').checked,
 			serial: $('serial').checked,
 			model: $('model').value,
+			// Чем начинать очередь: до конца она всё равно не проходится,
+			// и это выбор, что останется недоделанным (см. --first в indexer.js)
+			first: $('first').value,
 			limit: $('limit').value,
 			pages: $('pages').value,
 			packs: $('packs').value,
@@ -405,6 +408,85 @@ async function stop() {
 	await fetch('/api/update/stop', { method: 'POST' });
 }
 
+/**
+ * Два листочка — общий для всех знак «скопировать»: лист поверх листа, то есть
+ * «сделать второй такой же». Нарисован линиями, как и остальные значки сайта
+ * (см. web/icons.js), и цвет берёт у текста кнопки.
+ */
+const COPY_ICON = '<rect x="9" y="9" width="11.5" height="12.5" rx="2"/>'
+	+ '<path d="M15.5 5.5V5a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2H6"/>';
+
+/** Галочка на месте листочков: нажатие, после которого ничего не изменилось, читается как несработавшее. */
+const DONE_ICON = '<path d="m4.8 12.6 4.9 4.9L19.2 7"/>';
+
+function setCopyIcon(paths) {
+	$('copyLog').innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" class="icon">${paths}</svg>`;
+}
+
+/**
+ * Кладёт строку в буфер обмена. Нынешний способ работает только на защищённом
+ * соединении, а домашний сайт открывают по http с соседней машины — там остаётся
+ * старый, через невидимое поле ввода (то же самое делает web/card.js).
+ */
+async function copyText(text) {
+	try {
+		if (navigator.clipboard && window.isSecureContext) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch {
+		// Не вышло — пробуем по-старому
+	}
+
+	try {
+		const field = element('textarea');
+		field.value = text;
+		field.setAttribute('readonly', '');
+		field.style.position = 'fixed';
+		field.style.opacity = '0';
+		document.body.append(field);
+		field.select();
+
+		const done = document.execCommand('copy');
+		field.remove();
+		return done;
+	} catch {
+		return false;
+	}
+}
+
+let copyTimer = null;
+
+/**
+ * Забрать лог целиком.
+ *
+ * Выделять его мышью бесполезно: строк в нём тысячи, он прокручивается сам,
+ * пока идёт работа, и уезжает из-под курсора. А нужен он целиком — чтобы
+ * показать, на чём всё споткнулось.
+ */
+async function copyLog() {
+	const text = $('log').textContent;
+
+	if (!text.trim()) {
+		return;
+	}
+
+	const done = await copyText(text);
+	const button = $('copyLog');
+
+	button.title = done
+		? `Скопировано: ${text.split('\n').length} строк`
+		: 'Скопировать не вышло: браузер не дал доступа к буферу';
+
+	setCopyIcon(done ? DONE_ICON : COPY_ICON);
+	clearTimeout(copyTimer);
+
+	copyTimer = setTimeout(() => {
+		setCopyIcon(COPY_ICON);
+		button.title = 'Скопировать весь лог';
+	}, 1800);
+}
+
 async function init() {
 	// Кнопки оживают первыми. Всё остальное здесь ходит по сети, а любая заминка
 	// там оставляла страницу с нарисованной, но мёртвой кнопкой «Запустить»
@@ -412,6 +494,9 @@ async function init() {
 	$('stop').addEventListener('click', stop);
 	$('deploy').addEventListener('click', deploy);
 	$('model').addEventListener('change', () => loadModels());
+
+	setCopyIcon(COPY_ICON);
+	$('copyLog').addEventListener('click', copyLog);
 
 	// Страница пака и страница автора приводят сюда с уже названными паками:
 	// «обнови вот этот». Заполняем поля из адреса, а запускает человек сам —

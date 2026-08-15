@@ -615,6 +615,210 @@ function renderLibrary() {
 	$('resultInfo').textContent = `Всего ${profile.packages.length}, сначала недавние`;
 }
 
+// ————— список файлом —————
+//
+// Формат описан там, где его читает сервер (см. src/packlist.js).
+// Здесь только два конца: собрать файл из того, что показано на странице,
+// и отдать принесённый файл серверу — опознать паки по названиям.
+
+const LIST_FORMAT = 'sigame-pack-list';
+const LIST_VERSION = 1;
+
+/** Как назвать скачиваемый файл: с датой, чтобы вчерашний не затирался сегодняшним. */
+const listFileName = () => `firepacks-${new Date().toISOString().slice(0, 10)}.json`;
+
+/**
+ * Записи файла из того, что знает страница. Порядок тот же, что в списках:
+ * сначала недавнее — файл читают глазами, и сверху должно стоять то же самое,
+ * что стоит сверху на странице.
+ */
+function buildList(played, planned) {
+	const entry = (pack, kind) => ({
+		name: pack.name ?? pack.fileName ?? '',
+		authors: pack.authors ?? [],
+		list: kind,
+		...(pack.markedAt ? { markedAt: new Date(pack.markedAt).toISOString() } : {}),
+	});
+
+	return {
+		format: LIST_FORMAT,
+		version: LIST_VERSION,
+		exportedAt: new Date().toISOString(),
+		source: 'firepacks',
+		packages: [
+			...played.map(pack => entry(pack, 'played')),
+			...planned.map(pack => entry(pack, 'planned')),
+		],
+	};
+}
+
+/**
+ * Что вывозить. У вошедшего (и дома, где отметки принадлежат установке) списки
+ * уже на странице; до входа на общем сайте они лежат в браузере одними ключами,
+ * и названия к ним приходится спрашивать у сервера — в файл идёт то, что человек
+ * прочитает, а не «b88b8a6e…\nАниме пак № 5».
+ */
+async function collectList() {
+	if (serverMarks()) {
+		return buildList(profile.packages, profile.planned ?? []);
+	}
+
+	loadLocalMarks();
+
+	const keys = [...new Set([...localPlayed, ...localPlanned])];
+
+	if (keys.length === 0) {
+		return buildList([], []);
+	}
+
+	const named = await fetch('/api/list', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ keys }),
+	}).then(r => r.json());
+
+	const byKey = new Map((named.packages ?? []).map(pack => [pack.key, pack]));
+	const pick = set => [...set].map(key => byKey.get(key)).filter(Boolean);
+
+	return buildList(pick(localPlayed), pick(localPlanned));
+}
+
+/**
+ * Разбор принесённого файла. JSON — свой; всё остальное считается простым
+ * списком названий по строке на пак: такой список человек и сам наберёт
+ * в блокноте, и отказывать ему было бы придиркой.
+ */
+function parseList(text) {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return {
+			packages: text.split(/\r?\n/)
+				.map(line => line.trim())
+				.filter(line => line && !line.startsWith('#'))
+				.map(name => ({ name })),
+		};
+	}
+}
+
+function saveFile(name, text) {
+	const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+	const link = element('a');
+
+	link.href = url;
+	link.download = name;
+	link.click();
+
+	URL.revokeObjectURL(url);
+}
+
+/**
+ * Отметить найденное. Сервер только опознаёт паки (см. /api/list), а отмечаются
+ * они как всегда — тем же способом, каким отмечает кнопка на карточке: у кого
+ * отметки хранит сервер, тому на сервер, остальным в браузер.
+ */
+async function applyMatched(matched) {
+	if (!serverMarks()) {
+		loadLocalMarks();
+
+		for (const key of matched.played) {
+			localPlayed.add(key);
+		}
+
+		for (const key of matched.planned) {
+			localPlanned.add(key);
+		}
+
+		saveLocalPlayed();
+		saveLocalPlanned();
+		return;
+	}
+
+	const send = (url, body) => fetch(url, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+
+	// Даты отметок идут вместе с ключами: в файле у каждого пака своё время,
+	// и проставить всем сегодняшнее значило бы стереть, когда в них играли
+	const { markedAt } = matched;
+
+	// Сыгранное — первым: отметка «сыграно» убирает пак из планов (см. setPlayed
+	// на сервере), и порядок наоборот вычёркивал бы только что отмеченное
+	if (matched.played.length > 0) {
+		await send('/api/played', { packKeys: matched.played, played: true, markedAt });
+	}
+
+	if (matched.planned.length > 0) {
+		await send('/api/planned', { packKeys: matched.planned, planned: true, markedAt });
+	}
+}
+
+function bindList() {
+	const hint = $('listHint');
+	const file = $('listFile');
+
+	$('listExport').addEventListener('click', async () => {
+		const list = await collectList();
+
+		if (list.packages.length === 0) {
+			hint.textContent = 'Вывозить нечего: ни одного пака пока не отмечено.';
+			return;
+		}
+
+		// С отступами и без \u-экранирования: файл должен читаться глазами
+		saveFile(listFileName(), JSON.stringify(list, null, '\t'));
+
+		hint.textContent = `В файле ${list.packages.length} `
+			+ `${plural(list.packages.length, 'пак', 'пака', 'паков')}: название, авторы и дата отметки.`;
+	});
+
+	$('listImport').addEventListener('click', () => file.click());
+
+	file.addEventListener('change', async () => {
+		const chosen = file.files?.[0];
+
+		if (!chosen) {
+			return;
+		}
+
+		hint.textContent = 'Читаем файл…';
+
+		try {
+			const matched = await fetch('/api/list', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(parseList(await chosen.text())),
+			}).then(r => r.json());
+
+			if (matched.error) {
+				hint.textContent = matched.error;
+				return;
+			}
+
+			await applyMatched(matched);
+
+			const found = matched.played.length + matched.planned.length;
+
+			// Про ненайденное говорим прямо и с примерами: пак мог называться иначе
+			// или его может не быть в этой библиотеке вовсе, и молчать об этом нельзя
+			hint.textContent = `Отмечено ${found} из ${matched.total}.`
+				+ (matched.missed.length > 0
+					? ` Не нашлось ${matched.missed.length}: ${matched.missed.slice(0, 3).join(', ')}`
+						+ `${matched.missed.length > 3 ? ' и другие' : ''}.`
+					: '');
+
+			await start();
+		} catch {
+			hint.textContent = 'Файл прочитать не вышло: ждём JSON или список названий по строке на пак.';
+		} finally {
+			// Иначе тот же файл второй раз выбрать нельзя: событие не повторится
+			file.value = '';
+		}
+	});
+}
+
 async function start() {
 	[facets, profile] = await Promise.all([
 		fetch('/api/facets').then(r => r.json()),
@@ -649,5 +853,6 @@ async function start() {
 renderWho();
 bindWho();
 bindTabs();
+bindList();
 renderTabs();
 start();

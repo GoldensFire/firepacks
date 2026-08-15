@@ -25,7 +25,8 @@
 //   node src/indexer.js --authors=А,Б   работать только с паками этих авторов
 //   node src/indexer.js --fresh=3       только паки, выложенные за последние трое суток
 //   node src/indexer.js --first=virgin  чем начинать очередь: fresh (свежие, по умолчанию),
-//                                       virgin (совсем неразобранные), oldest (самые давние)
+//                                       virgin (совсем неразобранные, потом самые давние),
+//                                       oldest (самые давние)
 //   node src/indexer.js --force         не пропускать уже сделанное: всё заново
 //   node src/indexer.js --retry         попробовать заново паки с ошибками
 //   node src/indexer.js --serial        по-старому: шаги друг за другом, а не разом
@@ -243,6 +244,15 @@ const OLDEST_FIRST = 'p.vk_ts IS NULL, p.vk_ts ASC, p.id ASC';
  * процентов, ни описания, ни уровня сложности. Такой пак на сайте выглядит
  * не «пока не размеченным», а сломанным, и одна ночь этим порядком закрывает
  * их сотнями.
+ *
+ * Внутри и пустых, и остальных порядок дальше идёт от давнего к свежему,
+ * и это не мелочь второго ключа, а суть этого порядка. Раньше вторым ключом
+ * стояла свежесть, и очередь на каждой пачке начиналась заново с новых паков:
+ * очередь перебирается не один раз, а на каждой пачке заново (см. drain),
+ * а обход ВК в это же время подносит только что выложенное — и каждый такой
+ * пак приходил в самое начало пустых, отодвигая хвост, ради которого порядок
+ * и выбирают. Со свежими и так есть кому разобраться: это обычный порядок,
+ * стоящий первым в списке.
  */
 const NOTHING_KNOWN = `(CASE WHEN p.topics_at IS NULL AND p.summary_at IS NULL
 	AND NOT EXISTS (SELECT 1 FROM stats s WHERE s.package_id = p.id AND s.found = 1)
@@ -256,13 +266,13 @@ const NOTHING_KNOWN = `(CASE WHEN p.topics_at IS NULL AND p.summary_at IS NULL
  */
 const ORDERS = {
 	fresh: NEWEST_FIRST,
-	virgin: `${NOTHING_KNOWN}, ${NEWEST_FIRST}`,
+	virgin: `${NOTHING_KNOWN}, ${OLDEST_FIRST}`,
 	oldest: OLDEST_FIRST,
 };
 
 const ORDER_NAMES = {
 	fresh: 'сначала свежие',
-	virgin: 'сначала совсем неразобранные',
+	virgin: 'сначала совсем неразобранные, потом самые давние',
 	oldest: 'сначала самые давние',
 };
 

@@ -3,7 +3,8 @@
 // Страница обновления базы: галочки превращаются во флаги индексатора,
 // а его вывод приходит обратно потоком событий.
 
-const $ = id => document.getElementById(id);
+// $, element и шапка живут в common.js: шапка на этой странице та же, что и на
+// всех остальных, а два одинаковых element() расходятся при первой же правке.
 
 /** Шаги, отмеченные при первом открытии: обычный полный проход без служебных. */
 const DEFAULT_STEPS = new Set(['vk', 'parse', 'stats', 'topics', 'summary']);
@@ -12,20 +13,6 @@ const selected = new Set();
 let steps = [];
 let running = false;
 let logAtBottom = true;
-
-function element(tag, className, text) {
-	const node = document.createElement(tag);
-
-	if (className) {
-		node.className = className;
-	}
-
-	if (text !== undefined && text !== null) {
-		node.textContent = text;
-	}
-
-	return node;
-}
 
 function renderSteps() {
 	const box = $('steps');
@@ -553,6 +540,10 @@ async function init() {
 	applyState(state);
 	listen();
 }
+
+// Шапка здесь та же, что и на всех остальных страницах сайта, и ждать ради неё
+// нечего: со своей работой страница обновления справляется сама
+initTopbar();
 
 // Молча оборваться посреди подготовки страница не должна: кнопки к этому времени
 // уже работают, и человеку надо сказать, чего именно не хватило

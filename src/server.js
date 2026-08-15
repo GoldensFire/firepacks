@@ -945,6 +945,106 @@ function namePacks(keys) {
 	}));
 }
 
+// ————— профиль —————
+//
+// Списки профиля ходят страницами, как и выдача библиотеки, и по той же самой
+// причине. Пара сотен отметок — это пара сотен полных паков в одном ответе:
+// описания, раунды, темы, обложки, — и страница «во что я играл» открывалась
+// заметно дольше, чем страница со всей библиотекой сразу. Считается при этом
+// по-прежнему всё: разбивка по сложностям, тематикам и авторам смотрит на весь
+// список целиком, просто смотрит она на четыре поля строки, а не на строку.
+
+/** Сколько паков на странице профиля. Столько же, сколько в библиотеке. */
+const PROFILE_PAGE_SIZE = 24;
+
+/**
+ * Откуда берётся список. Сыгранное и запланированное отличаются только этим:
+ * таблицей отметок и тем, что у запланированного пак бывает заодно и сыгранным
+ * (сыграли, хотим ещё раз), — а у сыгранного признак «сыграно» стоит по самому
+ * его происхождению.
+ */
+const PROFILE_LISTS = {
+	played: {
+		mark: 'pl',
+		from: 'FROM played pl JOIN packages p ON p.id = pl.package_id',
+		flags: '1 AS played',
+	},
+	planned: {
+		mark: 'pn',
+		from: 'FROM planned pn JOIN packages p ON p.id = pn.package_id LEFT JOIN played pl ON pl.package_id = p.id',
+		flags: '1 AS planned, CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played',
+	},
+};
+
+/**
+ * Страница списка. MIN(marked_at) здесь не только выбирает время, но и решает,
+ * какую из копий пака показать: SQLite берёт остальные поля из той же строки,
+ * на которой сошёлся минимум. Копии сливаются по идентификатору из самого файла —
+ * так же, как их сливает отметка «сыграно» (см. twinPackages).
+ */
+function profilePage(list, userId, page) {
+	const { mark, from, flags } = PROFILE_LISTS[list];
+	const offset = (page - 1) * PROFILE_PAGE_SIZE;
+
+	return db.prepare(`
+		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
+			s.found AS stats_found, ${flags}, MIN(${mark}.marked_at) AS marked_at,
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		${from}
+		LEFT JOIN stats s ON s.package_id = p.id
+		LEFT JOIN (
+			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
+			FROM ratings GROUP BY pack_key
+		) r ON r.pack_key = ${PACK_KEY_SQL}
+		WHERE p.status = 'ok'
+		GROUP BY ${PACK_KEY_SQL}
+		ORDER BY marked_at DESC
+		LIMIT ? OFFSET ?
+	`).all(userId ?? null, PROFILE_PAGE_SIZE, offset)
+		.map(row => ({ ...toPackage(row), markedAt: row.marked_at }));
+}
+
+/**
+ * Четыре поля с каждого сыгранного пака — всё, из чего складываются числа
+ * профиля. Строка целиком для этого не нужна, а весит она в сотню раз больше.
+ */
+function profileFacts(list) {
+	const { mark, from } = PROFILE_LISTS[list];
+
+	return db.prepare(`
+		SELECT p.question_count, p.authors, p.primary_topic, s.level, MIN(${mark}.marked_at) AS marked_at
+		${from}
+		LEFT JOIN stats s ON s.package_id = p.id
+		WHERE p.status = 'ok'
+		GROUP BY ${PACK_KEY_SQL}
+	`).all();
+}
+
+/**
+ * Списки под вывоз файлом: название, авторы и дата отметки — ровно то, что
+ * попадает в файл (см. web/profile.js). Полные паки для этого не нужны, а страниц
+ * у вывоза нет: файл собирают целиком, иначе он врёт про то, во что играли.
+ */
+function profileNames(list) {
+	const { mark, from } = PROFILE_LISTS[list];
+
+	return db.prepare(`
+		SELECT p.name, p.file_name, p.authors, MIN(${mark}.marked_at) AS marked_at
+		${from}
+		WHERE p.status = 'ok'
+		GROUP BY ${PACK_KEY_SQL}
+		ORDER BY marked_at DESC
+	`).all().map(row => ({
+		name: row.name,
+		fileName: row.file_name,
+		authors: splitAuthors(jsonOrDefault(row.authors, [])),
+		markedAt: row.marked_at,
+	}));
+}
+
+/** Номер страницы из адреса: меньше первой не бывает, буквы считаются за первую. */
+const profilePageNumber = value => Math.max(1, parseInt(value ?? '1', 10) || 1);
+
 /**
  * Профиль: всё, что известно про сыгранное. Копии одного пака считаются за один —
  * отметка ставится сразу на все, и в библиотеке они иначе двоились бы.
@@ -953,79 +1053,50 @@ function namePacks(keys) {
  * и чёрного списка, хозяина нет. На хостинге это заметно — отмеченное одним
  * видят все, — и следующим шагом стоит привязать их к тому же user_id.
  */
-function getProfile(userId) {
-	// MIN(marked_at) здесь не только выбирает время, но и решает, какую из копий
-	// пака показать: SQLite берёт остальные поля из той же строки, на которой
-	// сошёлся минимум. Копии сливаются по идентификатору из самого файла — так же,
-	// как их сливает отметка «сыграно» (см. twinPackages).
-	const rows = db.prepare(`
-		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
-			s.found AS stats_found, 1 AS played, MIN(pl.marked_at) AS marked_at,
-			r.rating_count, r.rating_average, ${MY_SCORE}
-		FROM played pl
-		JOIN packages p ON p.id = pl.package_id
-		LEFT JOIN stats s ON s.package_id = p.id
-		LEFT JOIN (
-			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
-			FROM ratings GROUP BY pack_key
-		) r ON r.pack_key = ${PACK_KEY_SQL}
-		WHERE p.status = 'ok'
-		GROUP BY ${PACK_KEY_SQL}
-		ORDER BY marked_at DESC
-	`).all(userId ?? null);
+function getProfile(userId, query = new URLSearchParams()) {
+	// Вывоз файлом спрашивает то же самое, но целиком и в двух полях: страницами
+	// список сыгранного не вывезешь
+	if (query.get('export') === '1') {
+		return { packages: profileNames('played'), planned: profileNames('planned') };
+	}
 
-	const packages = rows.map(row => ({ ...toPackage(row), markedAt: row.marked_at }));
+	const facts = profileFacts('played');
 
 	const levels = {};
 	const topics = {};
 	const authors = new Map();
 	let questions = 0;
 
-	for (const pack of packages) {
-		questions += pack.questionCount ?? 0;
+	for (const row of facts) {
+		questions += row.question_count ?? 0;
 
-		const level = pack.stats?.level;
-
-		if (level) {
-			levels[level] = (levels[level] ?? 0) + 1;
+		if (row.level) {
+			levels[row.level] = (levels[row.level] ?? 0) + 1;
 		}
 
-		const topic = pack.primaryTopic ?? 'unknown';
+		const topic = row.primary_topic ?? 'unknown';
 		topics[topic] = (topics[topic] ?? 0) + 1;
 
-		for (const author of pack.authors) {
+		for (const author of splitAuthors(jsonOrDefault(row.authors, []))) {
 			authors.set(author, (authors.get(author) ?? 0) + 1);
 		}
 	}
 
-	// Запланированное. Тот же запрос, только по другой таблице и в обратную
-	// сторону по смыслу: сыгранное — что уже было, запланированное — что впереди.
-	// Сортировка тоже своя: сначала недавно отложенное — то, о чём человек
-	// думал последним.
-	const plannedRows = db.prepare(`
-		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
-			s.found AS stats_found, 1 AS planned,
-			CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played, MIN(pn.marked_at) AS marked_at,
-			r.rating_count, r.rating_average, ${MY_SCORE}
-		FROM planned pn
-		JOIN packages p ON p.id = pn.package_id
-		LEFT JOIN stats s ON s.package_id = p.id
-		LEFT JOIN played pl ON pl.package_id = p.id
-		LEFT JOIN (
-			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
-			FROM ratings GROUP BY pack_key
-		) r ON r.pack_key = ${PACK_KEY_SQL}
-		WHERE p.status = 'ok'
-		GROUP BY ${PACK_KEY_SQL}
-		ORDER BY marked_at DESC
-	`).all(userId ?? null);
+	const playedPage = profilePageNumber(query.get('playedPage'));
+	const plannedPage = profilePageNumber(query.get('plannedPage'));
 
 	return {
-		total: packages.length,
+		total: facts.length,
+		// Запланированное считается отдельно: числа профиля — про сыгранное,
+		// а число на вкладке нужно и до того, как её открыли
+		plannedTotal: profileFacts('planned').length,
 		questions,
 		levels,
 		topics,
-		planned: plannedRows.map(row => ({ ...toPackage(row), markedAt: row.marked_at })),
+		pageSize: PROFILE_PAGE_SIZE,
+		playedPage,
+		plannedPage,
+		planned: profilePage('planned', userId, plannedPage),
 		// Личный чёрный список: показать его больше негде, а снимать оттуда
 		// как-то надо — на карточках спрятанного по определению не видно
 		blacklist: userId ? listBlacklist(userId) : [],
@@ -1035,7 +1106,7 @@ function getProfile(userId) {
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, 12)
 			.map(([name, count]) => ({ name, count })),
-		packages,
+		packages: profilePage('played', userId, playedPage),
 	};
 }
 
@@ -1320,7 +1391,7 @@ const server = http.createServer(async (request, response) => {
 		}
 
 		if (url.pathname === '/api/profile') {
-			sendJson(response, getProfile(blacklistOwner(user)));
+			sendJson(response, getProfile(blacklistOwner(user), url.searchParams));
 			return;
 		}
 

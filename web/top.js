@@ -87,34 +87,8 @@ function pickFilter(kind, value) {
 function onPlayedChange() {}
 function onPlannedChange() {}
 
-/** Уголок входа. Тот же, что на странице пака: пояснения здесь не к месту. */
-function renderAccount() {
-	const box = $('account');
-	box.textContent = '';
-
-	if (!facets.hasDiscord) {
-		return;
-	}
-
-	if (!user) {
-		const login = element('a', 'button button--discord', 'Войти через Discord');
-		login.href = '/auth/discord';
-		login.title = 'Оценки паков и личный чёрный список появляются после входа';
-		box.append(login);
-		return;
-	}
-
-	box.append(createAccountLink(user));
-
-	const out = element('button', 'button button--ghost', 'Выйти');
-	out.type = 'button';
-	out.addEventListener('click', async () => {
-		await fetch('/auth/logout', { method: 'POST' });
-		window.location.reload();
-	});
-
-	box.append(out);
-}
+// Уголок входа и счётчики шапки живут в common.js: шапка одна на весь сайт,
+// и наполняется она везде одинаково (см. renderTopbar).
 
 /** Начало периода: «за 3 месяца» — это паки, выложенные после этой даты. */
 function periodStart() {
@@ -255,6 +229,7 @@ window.addEventListener('resize', () => {
 
 async function start() {
 	loadLocalMarks();
+	bindTopbarSearch();
 
 	// Обе ходки уходят разом: десятке настройки не нужны, чтобы быть запрошенной
 	const packages = fetch(`/api/packages?${buildQuery(current)}`);
@@ -262,7 +237,7 @@ async function start() {
 	facets = await (await fetch('/api/facets')).json();
 	user = facets.user ?? null;
 
-	renderAccount();
+	renderTopbar(facets);
 	renderTabs();
 	renderHint();
 

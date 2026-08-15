@@ -123,7 +123,7 @@ function onPlayedChange(pack) {
 		facets.played += pack.played ? 1 : -1;
 	}
 
-	renderCounters();
+	renderTopbarCounters(facets);
 
 	// Прятать сыгранное умеет только сервер: отбор идёт по базе, и местных
 	// отметок он не видит. Пока их не перенесли, карточка просто остаётся
@@ -148,7 +148,7 @@ function onPlannedChange(pack) {
 		facets.planned = Math.max(0, (facets.planned ?? 0) + (pack.planned ? 1 : -1));
 	}
 
-	renderCounters();
+	renderTopbarCounters(facets);
 }
 
 function buildQuery() {
@@ -612,81 +612,8 @@ function normalize(text) {
 	return (text ?? '').toLowerCase().replace(/ё/g, 'е').trim();
 }
 
-/**
- * Уголок входа. Пока ключи Discord не заведены, вместо кнопки стоит пояснение:
- * кнопка, ведущая в «вход не настроен», хуже её отсутствия, но и молчание
- * оставляло сайт без ответа на вопрос «почему я не могу поставить оценку».
- */
-function renderAccount() {
-	const box = $('account');
-	box.textContent = '';
-
-	if (!facets.hasDiscord) {
-		const note = element('span', 'account__note', 'Вход не настроен');
-		note.title = 'Оценки паков появляются после входа через Discord (чёрный список работает и без него). '
-			+ 'Чтобы его включить, заведите приложение на discord.com/developers/applications '
-			+ 'и положите его ключи в data/discord-client-id.txt и data/discord-client-secret.txt — '
-			+ 'подробности в README, раздел «Вход через Discord»';
-		box.append(note);
-		return;
-	}
-
-	if (!user) {
-		const login = element('a', 'button button--discord', 'Войти через Discord');
-		login.href = '/auth/discord';
-		login.title = 'Оценки паков и личный чёрный список появляются после входа';
-		box.append(login);
-		return;
-	}
-
-	box.append(createAccountLink(user));
-
-	const out = element('button', 'button button--ghost', 'Выйти');
-	out.type = 'button';
-	out.addEventListener('click', async () => {
-		await fetch('/auth/logout', { method: 'POST' });
-		window.location.reload();
-	});
-
-	box.append(out);
-}
-
-/**
- * Счётчики в шапке. Разделены не точками, а промежутком: точку между «Паков: 11 480»
- * и «Сыграно: 12» глаз читает как знак препинания внутри одного предложения, хотя
- * это отдельные числа про разное. Промежуток держит сама строка (см. .counters
- * в style.css) — оттого каждый счётчик и стоит отдельным элементом, а не куском
- * одной строки.
- *
- * «С оценкой» здесь больше нет: сколько паков в базе кто-то оценил — это про базу,
- * а не про того, кто на неё смотрит, и решению «во что играть» оно не помогает
- * ничем. Оценка каждого пака по-прежнему стоит на его карточке.
- */
-function renderCounters() {
-	// Без входа сыгранное считается по отметкам самого браузера: сервер о них
-	// не знает и присылает ноль, а на счётчике должно стоять то же число, что
-	// человек видит на карточках
-	const played = serverMarks() ? facets.played : localPlayed.size;
-	const planned = serverMarks() ? (facets.planned ?? 0) : localPlanned.size;
-
-	const box = $('counters');
-	box.textContent = '';
-
-	const add = (label, value) => {
-		const item = element('span', 'counters__item', `${label}: `);
-		item.append(element('b', null, formatNumber(value)));
-		box.append(item);
-	};
-
-	add('Паков', facets.total);
-	add('Сыграно', played);
-
-	// Запланированное показывается, только когда оно есть: пустой счётчик
-	// в шапке — это строка про то, чего человек ни разу не делал
-	if (planned > 0) {
-		add('В планах', planned);
-	}
-}
+// Уголок входа и счётчики шапки живут в common.js: шапка одна на весь сайт,
+// и наполняется она везде одинаково (см. renderTopbar).
 
 /** Плашки поверх выдачи: показывают, что список сужен, и снимают фильтр по клику. */
 function renderActiveFilters() {
@@ -795,125 +722,17 @@ function selectAuthor(author) {
 	window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+/** Кнопки страниц под выдачей. Сами кнопки — общие для всего сайта (см. common.js). */
 function renderPager(total) {
-	const pager = $('pager');
-	pager.textContent = '';
-
-	const pageCount = Math.ceil(total / state.pageSize);
-
-	if (pageCount <= 1) {
-		return;
-	}
-
-	const addButton = (label, page, disabled, current) => {
-		const button = element('button', null, label);
-		button.type = 'button';
-		button.disabled = !!disabled;
-
-		if (current) {
-			button.setAttribute('aria-current', 'true');
-		}
-
-		if (!disabled && !current) {
-			button.addEventListener('click', () => {
-				state.page = page;
-				load();
-				window.scrollTo({ top: 0, behavior: 'smooth' });
-			});
-		}
-
-		pager.append(button);
-	};
-
-	addButton('‹', state.page - 1, state.page === 1);
-
-	const pages = new Set([1, pageCount, state.page]);
-
-	for (let offset = 1; offset <= 2; offset++) {
-		pages.add(state.page - offset);
-		pages.add(state.page + offset);
-	}
-
-	const visible = [...pages].filter(p => p >= 1 && p <= pageCount).sort((a, b) => a - b);
-	let previous = 0;
-
-	for (const page of visible) {
-		if (page - previous > 1) {
-			const gap = element('button', null, '…');
-			gap.disabled = true;
-			pager.append(gap);
-		}
-
-		addButton(String(page), page, false, page === state.page);
-		previous = page;
-	}
-
-	addButton('›', state.page + 1, state.page === pageCount);
-
-	// Многоточие между кнопками — это не только пропуск, но и тупик: со страницы
-	// второй на сороковую приходилось идти вручную, по пять номеров за нажатие,
-	// потому что кнопки показывают только соседей. Поле рядом с ними эту дорогу
-	// и сокращает: номер — и сразу туда.
-	//
-	// Заводится только там, где ему есть что делать: на трёх страницах номера
-	// и так все на виду.
-	if (pageCount > 5) {
-		pager.append(createPageJump(pageCount));
-	}
-}
-
-/** Поле «перейти к странице»: номер и переход по Enter или по кнопке. */
-function createPageJump(pageCount) {
-	const box = element('form', 'pager__jump');
-
-	const input = element('input', 'pager__jump-input');
-	input.type = 'number';
-	input.min = '1';
-	input.max = String(pageCount);
-	input.step = '1';
-	input.inputMode = 'numeric';
-	input.placeholder = String(state.page);
-	input.setAttribute('aria-label', `Перейти к странице от 1 до ${pageCount}`);
-	input.title = `Введите номер страницы от 1 до ${pageCount}`;
-
-	const go = element('button', 'pager__jump-go', 'Перейти');
-	go.type = 'submit';
-	go.title = 'Открыть страницу с этим номером';
-
-	box.append(
-		element('span', 'pager__jump-label', `из ${pageCount}:`),
-		input,
-		go,
-	);
-
-	box.addEventListener('submit', event => {
-		// Форма здесь ради одного только Enter: без неё нажатие Enter в поле
-		// не значило бы ничего, а тянуться мышью до кнопки ради номера страницы —
-		// ровно та работа, от которой поле и избавляет.
-		event.preventDefault();
-
-		const asked = parseInt(input.value, 10);
-
-		if (!Number.isFinite(asked)) {
-			return;
-		}
-
-		// Номер за пределами списка прижимаем к краю, а не отвергаем: «999»
-		// в поле означает «в самый конец», и отвечать на это молчанием незачем.
-		const page = Math.min(Math.max(asked, 1), pageCount);
-
-		input.value = '';
-
-		if (page === state.page) {
-			return;
-		}
-
-		state.page = page;
-		load();
-		window.scrollTo({ top: 0, behavior: 'smooth' });
+	renderPages($('pager'), {
+		page: state.page,
+		pageSize: state.pageSize,
+		total,
+		onGo: page => {
+			state.page = page;
+			load();
+		},
 	});
-
-	return box;
 }
 
 /**
@@ -1269,20 +1088,6 @@ async function start() {
 	// в них стояло, осталось в подсказках при наведении — там, где оно и нужно:
 	// на самих уровнях сложности и ярлыках тематик.
 
-	// На хостинге собирать базу нечем, и ссылки на страницу обновления там быть
-	// не должно: обновлять самого себя оттуда некуда и нечем.
-	//
-	// В вёрстке она спрятана, и здесь только показывается — не наоборот. Раньше
-	// её убирали отсюда же, но стояла она открытой, и на хостинге была видна
-	// всё время, пока идёт первый запрос: «Обновить базу» успевало помигать
-	// на общем сайте у каждого, кто его открыл.
-	if (facets.readOnly) {
-		$('updateLink').remove();
-	} else {
-		$('updateLink').hidden = false;
-		aimUpdateLink();
-	}
-
 	// Вход состоялся, а в браузере ещё лежат отметки, сделанные до него: самое
 	// время им переехать. Делается это до выдачи нарочно — иначе первая же
 	// страница показала бы паки неотмеченными, и человек решил бы, что отметки
@@ -1296,7 +1101,12 @@ async function start() {
 		facets = await (await fetch('/api/facets')).json();
 	}
 
-	renderAccount();
+	// Шапка тут та же, что и на всех остальных страницах, и наполняется она общим
+	// кодом (см. renderTopbar в common.js). Своё в ней ровно одно: «Обновить базу»
+	// целится в выбранного автора, когда выдача отобрана по нему
+	renderTopbar(facets);
+	aimUpdateLink();
+
 	renderLevels();
 	renderUnrated();
 	renderPlayedFilters();
@@ -1304,7 +1114,6 @@ async function start() {
 	renderSubjects();
 	renderLanguages();
 	renderTags();
-	renderCounters();
 	renderSortHint();
 	bind();
 	await load(packages);

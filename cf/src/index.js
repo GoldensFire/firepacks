@@ -224,7 +224,7 @@ export default {
 			}
 
 			if (url.pathname === '/api/profile') {
-				return json(await getProfile(env.DB, userId, await listBlacklist(env.DB, userId)));
+				return json(await getProfile(env.DB, userId, await listBlacklist(env.DB, userId), url.searchParams));
 			}
 
 			if (url.pathname === '/api/played' && request.method === 'POST') {

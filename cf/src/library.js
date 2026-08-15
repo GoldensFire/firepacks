@@ -1046,86 +1046,196 @@ export async function setPlannedKeys(db, userId, keys, planned, times = {}) {
 	return { affected: list.length, planned: Boolean(planned) };
 }
 
+// ————— профиль —————
+//
+// Списки профиля ходят страницами, как и выдача библиотеки, и по той же самой
+// причине. Пара сотен отметок — это пара сотен полных паков в одном ответе:
+// описания, раунды, темы, — и страница «во что я играл» открывалась заметно
+// дольше, чем страница со всей библиотекой сразу. Здесь у этого есть и вторая
+// цена: у D1 прочитанные строки считаны по тарифу, а разбивке по сложностям
+// и тематикам от строки нужно четыре поля, а не вся она.
+
+/** Сколько паков на странице профиля. Столько же, сколько в библиотеке. */
+const PROFILE_PAGE_SIZE = 24;
+
+/**
+ * Откуда берётся список. Сыгранное и запланированное отличаются только этим:
+ * таблицей отметок и тем, что у запланированного пак бывает заодно и сыгранным
+ * (сыграли, хотим ещё раз), — а у сыгранного признак «сыграно» стоит по самому
+ * его происхождению.
+ */
+const PROFILE_LISTS = {
+	played: {
+		mark: 'pl',
+		from: 'FROM played pl JOIN packages p ON ${KEY} = pl.pack_key',
+		flags: '1 AS played',
+	},
+	planned: {
+		mark: 'pn',
+		from: 'FROM planned pn JOIN packages p ON ${KEY} = pn.pack_key'
+			+ ' LEFT JOIN played pl ON pl.pack_key = pn.pack_key AND pl.user_id = pn.user_id',
+		flags: '1 AS planned, CASE WHEN pl.pack_key IS NULL THEN 0 ELSE 1 END AS played',
+	},
+};
+
+const profileFrom = list => PROFILE_LISTS[list].from.replace('${KEY}', PACK_KEY_SQL);
+
+/** Номер страницы из адреса: меньше первой не бывает, буквы считаются за первую. */
+const profilePageNumber = value => Math.max(1, parseInt(value ?? '1', 10) || 1);
+
+/**
+ * Страница списка. Пак, выложенный в обсуждение дважды, лежит в базе двумя
+ * строками, а отметка у него одна на обе: показать надо одну карточку, а не две
+ * одинаковых. Этим и занят MIN(p.id) — он не просто выбирает номер, а решает,
+ * из какой строки взять остальные поля: SQLite берёт их с той строки, на которой
+ * сошёлся минимум.
+ */
+async function profilePage(db, list, userId, page, counts) {
+	const { mark, flags } = PROFILE_LISTS[list];
+
+	const { results } = await db.prepare(`
+		SELECT p.*, ${STATS_FIELDS}, ${flags}, ${mark}.marked_at AS marked_at, MIN(p.id) AS chosen_id,
+			r.rating_count, r.rating_average, ${MY_SCORE}
+		${profileFrom(list)}
+		LEFT JOIN stats s ON s.package_id = p.id
+		LEFT JOIN (
+			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
+			FROM ratings GROUP BY pack_key
+		) r ON r.pack_key = ${mark}.pack_key
+		WHERE p.status = 'ok' AND ${mark}.user_id = ?
+		GROUP BY ${mark}.pack_key
+		ORDER BY ${mark}.marked_at DESC
+		LIMIT ? OFFSET ?
+	`).bind(userId, userId, PROFILE_PAGE_SIZE, (page - 1) * PROFILE_PAGE_SIZE).all();
+
+	return results.map(row => ({ ...toPackage(row, counts), markedAt: row.marked_at }));
+}
+
+/**
+ * Четыре поля с каждого сыгранного пака — всё, из чего складываются числа
+ * профиля. Строка целиком для этого не нужна, а весит она в сотню раз больше.
+ */
+async function profileFacts(db, list, userId) {
+	const { mark } = PROFILE_LISTS[list];
+
+	const { results } = await db.prepare(`
+		SELECT p.question_count, p.authors, p.primary_topic, s.level, MIN(p.id) AS chosen_id
+		${profileFrom(list)}
+		LEFT JOIN stats s ON s.package_id = p.id
+		WHERE p.status = 'ok' AND ${mark}.user_id = ?
+		GROUP BY ${mark}.pack_key
+	`).bind(userId).all();
+
+	return results;
+}
+
+/** Сколько паков в списке. Нужно вкладке — число на ней стоит до того, как её открыли. */
+async function profileCount(db, list, userId) {
+	const { mark } = PROFILE_LISTS[list];
+
+	const row = await db.prepare(`
+		SELECT COUNT(DISTINCT ${mark}.pack_key) AS total
+		${profileFrom(list)}
+		WHERE p.status = 'ok' AND ${mark}.user_id = ?
+	`).bind(userId).first();
+
+	return row?.total ?? 0;
+}
+
+/**
+ * Списки под вывоз файлом: название, авторы и дата отметки — ровно то, что
+ * попадает в файл (см. web/profile.js). Полные паки для этого не нужны, а страниц
+ * у вывоза нет: файл собирают целиком, иначе он врёт про то, во что играли.
+ */
+async function profileNames(db, list, userId) {
+	const { mark } = PROFILE_LISTS[list];
+
+	const { results } = await db.prepare(`
+		SELECT p.name, p.file_name, p.authors, ${mark}.marked_at AS marked_at, MIN(p.id) AS chosen_id
+		${profileFrom(list)}
+		WHERE p.status = 'ok' AND ${mark}.user_id = ?
+		GROUP BY ${mark}.pack_key
+		ORDER BY ${mark}.marked_at DESC
+	`).bind(userId).all();
+
+	return results.map(row => ({
+		name: row.name,
+		fileName: row.file_name,
+		authors: splitAuthors(jsonOrDefault(row.authors, [])),
+		markedAt: row.marked_at,
+	}));
+}
+
 /**
  * Профиль: всё, что известно про сыгранное. Копии одного пака считаются за один —
  * отметка ставится сразу на все, и в библиотеке они иначе двоились бы.
  */
-export async function getProfile(db, userId, blacklist) {
+export async function getProfile(db, userId, blacklist, query = new URLSearchParams()) {
+	const empty = query.get('export') === '1'
+		? { packages: [], planned: [] }
+		: {
+			total: 0, plannedTotal: 0, questions: 0, levels: {}, topics: {},
+			pageSize: PROFILE_PAGE_SIZE, playedPage: 1, plannedPage: 1,
+			planned: [], blacklist: [], favouriteAuthors: [], packages: [],
+		};
+
 	if (!userId) {
-		return { total: 0, questions: 0, levels: {}, topics: {}, planned: [], blacklist: [], favouriteAuthors: [], packages: [] };
+		return empty;
 	}
 
-	// Пак, выложенный в обсуждение дважды, лежит в базе двумя строками, а отметка
-	// у него одна на обе: показать надо одну карточку, а не две одинаковых.
-	// Этим и занят MIN(p.id) — он не просто выбирает номер, а решает, из какой
-	// строки взять остальные поля: SQLite берёт их с той строки, на которой
-	// сошёлся минимум. Тот же приём, что и дома, только там сходились по времени
-	// отметки, а здесь оно у копий общее.
-	const { results } = await db.prepare(`
-		SELECT p.*, ${STATS_FIELDS}, 1 AS played, pl.marked_at AS marked_at, MIN(p.id) AS chosen_id,
-			r.rating_count, r.rating_average, ${MY_SCORE}
-		FROM played pl
-		JOIN packages p ON ${PACK_KEY_SQL} = pl.pack_key
-		LEFT JOIN stats s ON s.package_id = p.id
-		LEFT JOIN (
-			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
-			FROM ratings GROUP BY pack_key
-		) r ON r.pack_key = pl.pack_key
-		WHERE p.status = 'ok' AND pl.user_id = ?
-		GROUP BY pl.pack_key
-		ORDER BY pl.marked_at DESC
-	`).bind(userId, userId).all();
+	// Вывоз файлом спрашивает то же самое, но целиком и в двух полях: страницами
+	// список сыгранного не вывезешь
+	if (query.get('export') === '1') {
+		const [packages, planned] = await Promise.all([
+			profileNames(db, 'played', userId),
+			profileNames(db, 'planned', userId),
+		]);
 
-	// Запланированное. Тот же запрос, только по другой таблице и в обратную сторону
-	// по смыслу: сыгранное — что уже было, запланированное — что впереди.
-	const plannedRows = await db.prepare(`
-		SELECT p.*, ${STATS_FIELDS}, 1 AS planned, pn.marked_at AS marked_at, MIN(p.id) AS chosen_id,
-			CASE WHEN pl.pack_key IS NULL THEN 0 ELSE 1 END AS played,
-			r.rating_count, r.rating_average, ${MY_SCORE}
-		FROM planned pn
-		JOIN packages p ON ${PACK_KEY_SQL} = pn.pack_key
-		LEFT JOIN stats s ON s.package_id = p.id
-		LEFT JOIN played pl ON pl.pack_key = pn.pack_key AND pl.user_id = pn.user_id
-		LEFT JOIN (
-			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
-			FROM ratings GROUP BY pack_key
-		) r ON r.pack_key = pn.pack_key
-		WHERE p.status = 'ok' AND pn.user_id = ?
-		GROUP BY pn.pack_key
-		ORDER BY pn.marked_at DESC
-	`).bind(userId, userId).all();
+		return { packages, planned };
+	}
+
+	const playedPage = profilePageNumber(query.get('playedPage'));
+	const plannedPage = profilePageNumber(query.get('plannedPage'));
 
 	const counts = await authorPackCounts(db);
-	const packages = results.map(row => ({ ...toPackage(row, counts), markedAt: row.marked_at }));
+
+	const [facts, plannedTotal, packages, planned] = await Promise.all([
+		profileFacts(db, 'played', userId),
+		profileCount(db, 'planned', userId),
+		profilePage(db, 'played', userId, playedPage, counts),
+		profilePage(db, 'planned', userId, plannedPage, counts),
+	]);
 
 	const levels = {};
 	const topics = {};
 	const authors = new Map();
 	let questions = 0;
 
-	for (const pack of packages) {
-		questions += pack.questionCount ?? 0;
+	for (const row of facts) {
+		questions += row.question_count ?? 0;
 
-		const level = pack.stats?.level;
-
-		if (level) {
-			levels[level] = (levels[level] ?? 0) + 1;
+		if (row.level) {
+			levels[row.level] = (levels[row.level] ?? 0) + 1;
 		}
 
-		const topic = pack.primaryTopic ?? 'unknown';
+		const topic = row.primary_topic ?? 'unknown';
 		topics[topic] = (topics[topic] ?? 0) + 1;
 
-		for (const author of pack.authors) {
+		for (const author of splitAuthors(jsonOrDefault(row.authors, []))) {
 			authors.set(author, (authors.get(author) ?? 0) + 1);
 		}
 	}
 
 	return {
-		total: packages.length,
+		total: facts.length,
+		plannedTotal,
 		questions,
 		levels,
 		topics,
-		planned: plannedRows.results.map(row => ({ ...toPackage(row, counts), markedAt: row.marked_at })),
+		pageSize: PROFILE_PAGE_SIZE,
+		playedPage,
+		plannedPage,
+		planned,
 		// Личный чёрный список: показать его больше негде, а снимать оттуда
 		// как-то надо — на карточках спрятанного по определению не видно
 		blacklist,

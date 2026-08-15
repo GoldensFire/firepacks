@@ -43,6 +43,9 @@ const TIME_MARKS = [
 	{ label: '3 дня', seconds: 3 * 24 * 3600 },
 	{ label: '1 неделя', seconds: 7 * 24 * 3600 },
 	{ label: '1 месяц', seconds: 30 * 24 * 3600 },
+	// Месяцем шкала кончаться перестала: у того, кто набрал за ней ещё столько же,
+	// последняя отметка стояла пройденной, и дальше полоса не двигалась вовсе
+	{ label: '3 месяца', seconds: 90 * 24 * 3600 },
 ];
 
 /** Единицы для подписи «2 дня и 4 часа». Сверху вниз, от крупных к мелким. */
@@ -60,6 +63,17 @@ let profile = null;
 /** Какая вкладка открыта: 'planned' или 'played'. Переживает перерисовку страницы. */
 let tab = 'planned';
 
+/**
+ * Какие страницы списков открыты. Паки приезжают по две дюжины за раз — столько
+ * же, сколько в библиотеке, — и по той же причине: две сотни отметок это две
+ * сотни полных паков в одном ответе, и страница «во что я играл» открывалась
+ * дольше, чем страница со всей библиотекой сразу.
+ *
+ * Числа профиля от этого не пострадали: сложности, тематики и авторы по-прежнему
+ * считаются по всему сыгранному — просто считает их сервер (см. getProfile).
+ */
+const pages = { played: 1, planned: 1 };
+
 const topicInfo = key => facets.topicNames[key] ?? EXTRA_TOPICS[key] ?? { name: key, packName: key };
 
 /** Кто вошёл через Discord, или null. */
@@ -73,7 +87,9 @@ let user = null;
 function renderWho() {
 	const avatar = $('avatar');
 	const name = $('userName');
-	const account = $('account');
+	// Свой, а не тот, что в шапке: там уголок входа на всех страницах одинаковый,
+	// а здесь он стоит под именем и аватаром — на своей же странице
+	const account = $('profileAccount');
 
 	avatar.textContent = '';
 	account.textContent = '';
@@ -181,7 +197,7 @@ function renderBlacklist() {
 				body: JSON.stringify({ kind: item.kind, value: item.value, blacklisted: false }),
 			});
 
-			await start();
+			await refresh();
 		});
 
 		chip.append(remove);
@@ -268,13 +284,18 @@ function renderTime() {
 	}
 
 	const seconds = questions * SECONDS_PER_QUESTION;
-	const total = formatDuration(seconds);
+
+	// Часы в скобках рядом с «2 дня и 4 часа»: дни и недели показывают порядок
+	// величины, а сравнивают всё равно часами — в них меряют и вечер за столом,
+	// и наигранное в любой другой игре
+	const hours = Math.round(seconds / 3600);
+	const total = `${formatDuration(seconds)} (${formatNumber(hours)} ${plural(hours, 'час', 'часа', 'часов')})`;
 
 	$('timeValue').textContent = total;
 
-	const explain = `Расчёт простой: каждый вопрос в сыгранных паках считается за ${SECONDS_PER_QUESTION} секунд. `
-		+ `${formatNumber(questions)} ${plural(questions, 'вопрос', 'вопроса', 'вопросов')} × ${SECONDS_PER_QUESTION} с — `
-		+ `это ${total}. Сколько игра шла на самом деле, сайт не знает: он видит только сами паки.`;
+	// Подсказка короткая нарочно: она отвечает на единственный вопрос, который
+	// к этому числу возникает, — откуда оно взялось
+	const explain = `Количество вопросов умноженное на ${SECONDS_PER_QUESTION} с`;
 
 	$('timeTitle').title = explain;
 	$('timeValue').title = explain;
@@ -317,8 +338,8 @@ function renderTime() {
  */
 function renderTabs() {
 	const counts = {
-		planned: profile?.planned?.length ?? 0,
-		played: profile?.packages.length ?? 0,
+		planned: profile?.plannedTotal ?? 0,
+		played: profile?.total ?? 0,
 	};
 
 	$('tabPlannedCount').textContent = formatNumber(counts.planned);
@@ -539,7 +560,7 @@ async function mark(button, url, body) {
 			body: JSON.stringify(body),
 		});
 
-		await start();
+		await refresh();
 	} catch {
 		button.disabled = false;
 	}
@@ -552,67 +573,100 @@ async function mark(button, url, body) {
  * Без входа на общем сайте отметок здесь нет: они лежат в самом браузере,
  * а страница показывает то, что знает сервер (то же самое, что и с сыгранным).
  */
-function renderPlanned() {
-	const grid = $('plannedGrid');
-	const packs = profile.planned ?? [];
+/**
+ * Один из двух списков профиля. Устроены они одинаково — сетка карточек, строка
+ * «показаны такие-то из стольких-то» и кнопки страниц, — и различаются только
+ * тем, что в них лежит и что написано в пустом.
+ *
+ * @param {string} list 'played' или 'planned'
+ * @param {object} nodes на чём рисовать: сетка, строка над ней, кнопки страниц
+ * @param {string} empty что написать, когда список пуст
+ * @param {Function} tail чем закончить строку над списком, если есть чем
+ */
+function renderList(list, nodes, empty, tail = null) {
+	const packs = (list === 'planned' ? profile.planned : profile.packages) ?? [];
+	const total = (list === 'planned' ? profile.plannedTotal : profile.total) ?? 0;
+	const grid = $(nodes.grid);
+	const info = $(nodes.info);
 
 	grid.textContent = '';
-
-	if (packs.length === 0) {
-		const anonymous = !user && facets.localBlacklist !== true;
-
-		grid.append(element('div', 'empty', anonymous
-			? 'Здесь собираются паки, отложенные на будущее. Пока входа нет, отметки живут '
-				+ 'в самом браузере и сюда не попадают: войдите через Discord — они переедут в учётную запись.'
-			: 'Здесь собираются паки, отложенные на будущее. Отложить можно в библиотеке — '
-				+ 'кнопкой «Запланировать» на карточке.'));
-
-		$('plannedInfo').textContent = '';
-		return;
-	}
-
-	for (const pack of packs) {
-		grid.append(createCard(pack, { planned: true }));
-	}
-
-	const info = $('plannedInfo');
 	info.textContent = '';
 
-	info.append(document.createTextNode(`Всего ${packs.length}, сначала отложенные недавно · `));
-
-	// Ссылка в библиотеку с уже выставленным отбором: здесь список целиком,
-	// а там по нему можно искать теми же фильтрами, что и по всей базе.
-	// hidePlayed=0 — чтобы список и там остался целым: отложить можно и сыгранный
-	// пак, а библиотека сыгранное по умолчанию прячет
-	const inLibrary = element('a', null, 'показать в библиотеке');
-	inLibrary.href = '/?onlyPlanned=1&hidePlayed=0';
-	info.append(inLibrary);
-}
-
-function renderLibrary() {
-	const grid = $('grid');
-	grid.textContent = '';
-
-	if (profile.packages.length === 0) {
+	if (total === 0) {
 		// Без входа отметки лежат в самом браузере и до профиля не доходят: он
 		// показывает то, что знает сервер. Сказать об этом надо здесь — иначе
 		// человек, отметивший вчера десяток паков, решит, что они пропали.
 		const anonymous = !user && facets.localBlacklist !== true;
 
 		grid.append(element('div', 'empty', anonymous
-			? 'Здесь появятся паки, отмеченные сыгранными. Пока входа нет, отметки живут '
-				+ 'в самом браузере и сюда не попадают: войдите через Discord — они переедут в учётную запись.'
-			: 'Здесь появятся паки, отмеченные сыгранными. Отметить можно в библиотеке — кнопкой на карточке.'));
+			? `${empty.what} Пока входа нет, отметки живут в самом браузере и сюда не попадают: `
+				+ 'войдите через Discord — они переедут в учётную запись.'
+			: `${empty.what} ${empty.how}`));
 
-		$('resultInfo').textContent = '';
+		$(nodes.pager).textContent = '';
 		return;
 	}
 
-	for (const pack of profile.packages) {
-		grid.append(createCard(pack));
+	const pageSize = profile.pageSize ?? packs.length;
+
+	// Последний пак со страницы могли только что убрать — тогда страницы с таким
+	// номером больше нет, и стоять на ней значит смотреть в пустоту
+	if (packs.length === 0) {
+		pages[list] = Math.max(1, Math.ceil(total / pageSize));
+		refresh();
+		return;
 	}
 
-	$('resultInfo').textContent = `Всего ${profile.packages.length}, сначала недавние`;
+	for (const pack of packs) {
+		grid.append(createCard(pack, { planned: list === 'planned' }));
+	}
+
+	const from = (pages[list] - 1) * pageSize + 1;
+
+	info.append(document.createTextNode(`Показаны ${from}–${from + packs.length - 1} из ${total}, ${empty.order}`));
+
+	if (tail) {
+		tail(info);
+	}
+
+	renderPages($(nodes.pager), {
+		page: pages[list],
+		pageSize,
+		total,
+		onGo: page => {
+			pages[list] = page;
+			refresh();
+		},
+	});
+}
+
+/**
+ * Запланированное: паки, отобранные на будущий вечер, — за этим страницу
+ * и открывают чаще всего, поэтому список стоит первой вкладкой.
+ */
+function renderPlanned() {
+	renderList('planned', { grid: 'plannedGrid', info: 'plannedInfo', pager: 'plannedPager' }, {
+		what: 'Здесь собираются паки, отложенные на будущее.',
+		how: 'Отложить можно в библиотеке — кнопкой «Запланировать» на карточке.',
+		order: 'сначала отложенные недавно',
+	}, info => {
+		// Ссылка в библиотеку с уже выставленным отбором: здесь список целиком,
+		// а там по нему можно искать теми же фильтрами, что и по всей базе.
+		// hidePlayed=0 — чтобы список и там остался целым: отложить можно и сыгранный
+		// пак, а библиотека сыгранное по умолчанию прячет
+		const inLibrary = element('a', null, 'показать в библиотеке');
+		inLibrary.href = '/?onlyPlanned=1&hidePlayed=0';
+
+		info.append(document.createTextNode(' · '), inLibrary);
+	});
+}
+
+function renderLibrary() {
+	renderList('played', { grid: 'grid', info: 'resultInfo', pager: 'pager' }, {
+		what: 'Здесь появятся паки, отмеченные сыгранными.',
+		how: 'Отметить можно в библиотеке — кнопкой на карточке.',
+		order: 'сначала недавние',
+	});
 }
 
 // ————— список файлом —————
@@ -654,13 +708,17 @@ function buildList(played, planned) {
 
 /**
  * Что вывозить. У вошедшего (и дома, где отметки принадлежат установке) списки
- * уже на странице; до входа на общем сайте они лежат в браузере одними ключами,
- * и названия к ним приходится спрашивать у сервера — в файл идёт то, что человек
- * прочитает, а не «b88b8a6e…\nАниме пак № 5».
+ * знает сервер, и спрашиваются они целиком: на странице их видно по две дюжины,
+ * а файл со страницы сыгранного врал бы про то, во что играли. До входа на общем
+ * сайте отметки лежат в браузере одними ключами, и названия к ним приходится
+ * спрашивать отдельно — в файл идёт то, что человек прочитает, а не
+ * «b88b8a6e…\nАниме пак № 5».
  */
 async function collectList() {
 	if (serverMarks()) {
-		return buildList(profile.packages, profile.planned ?? []);
+		const all = await fetch('/api/profile?export=1').then(r => r.json());
+
+		return buildList(all.packages ?? [], all.planned ?? []);
 	}
 
 	loadLocalMarks();
@@ -809,7 +867,7 @@ function bindList() {
 						+ `${matched.missed.length > 3 ? ' и другие' : ''}.`
 					: '');
 
-			await start();
+			await refresh();
 		} catch {
 			hint.textContent = 'Файл прочитать не вышло: ждём JSON или список названий по строке на пак.';
 		} finally {
@@ -819,14 +877,25 @@ function bindList() {
 	});
 }
 
-async function start() {
+/**
+ * Перечитать страницу целиком. Зовётся и при открытии, и после каждой отметки,
+ * и при переходе на другую страницу списка: ответ теперь весит две дюжины паков,
+ * и разбирать, что именно из него менять, дороже, чем перерисовать всё.
+ */
+async function refresh() {
+	const query = new URLSearchParams({
+		playedPage: String(pages.played),
+		plannedPage: String(pages.planned),
+	});
+
 	[facets, profile] = await Promise.all([
 		fetch('/api/facets').then(r => r.json()),
-		fetch('/api/profile').then(r => r.json()),
+		fetch(`/api/profile?${query}`).then(r => r.json()),
 	]);
 
 	user = facets.user ?? null;
 
+	renderTopbar(facets);
 	renderWho();
 	renderNumbers();
 	renderTime();
@@ -849,10 +918,11 @@ async function start() {
 }
 
 // Имя и аватар ставятся дважды: сразу — из localStorage, чтобы страница не начиналась
-// с пустой шапки, и ещё раз в start(), когда станет известно, вошёл ли кто-нибудь
+// с пустой шапки, и ещё раз в refresh(), когда станет известно, вошёл ли кто-нибудь
 renderWho();
 bindWho();
 bindTabs();
 bindList();
+bindTopbarSearch();
 renderTabs();
-start();
+refresh();

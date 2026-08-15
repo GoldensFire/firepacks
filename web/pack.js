@@ -33,37 +33,8 @@ function pickFilter(kind, value) {
 function onPlayedChange() {}
 function onPlannedChange() {}
 
-/**
- * Уголок входа. Тот же, что в библиотеке, но короче: заводить здесь пояснения
- * про ненастроенный Discord незачем — за этим приходят на главную.
- */
-function renderAccount() {
-	const box = $('account');
-	box.textContent = '';
-
-	if (!facets.hasDiscord) {
-		return;
-	}
-
-	if (!user) {
-		const login = element('a', 'button button--discord', 'Войти через Discord');
-		login.href = '/auth/discord';
-		login.title = 'Оценки паков и личный чёрный список появляются после входа';
-		box.append(login);
-		return;
-	}
-
-	box.append(createAccountLink(user));
-
-	const out = element('button', 'button button--ghost', 'Выйти');
-	out.type = 'button';
-	out.addEventListener('click', async () => {
-		await fetch('/auth/logout', { method: 'POST' });
-		window.location.reload();
-	});
-
-	box.append(out);
-}
+// Уголок входа и счётчики шапки живут в common.js: шапка одна на весь сайт,
+// и наполняется она везде одинаково (см. renderTopbar).
 
 /** Пака нет: номер выдуман, пак спрятан или уехал из базы. */
 function renderMissing() {
@@ -85,6 +56,7 @@ async function start() {
 	const id = packIdFromPath();
 
 	loadLocalMarks();
+	bindTopbarSearch();
 
 	// Обе ходки уходят разом: пак не зависит от настроек, а настройки — от пака
 	const [facetsResponse, packResponse] = await Promise.all([
@@ -95,7 +67,7 @@ async function start() {
 	facets = await facetsResponse.json();
 	user = facets.user ?? null;
 
-	renderAccount();
+	renderTopbar(facets);
 
 	const data = await packResponse.json();
 

@@ -296,6 +296,285 @@ function createAccountLink(account) {
 	return link;
 }
 
+// ————— страницы —————
+//
+// Разбивка на страницы нужна и библиотеке, и профилю: списки там и там на сотни
+// паков длиной, и приезжают они по две дюжины за раз. Кнопки под выдачей поэтому
+// живут здесь, а не в скрипте одной из страниц: расходиться им незачем, а разойтись
+// они успели бы на первой же правке.
+
+/**
+ * Кнопки страниц под списком.
+ *
+ * @param {HTMLElement} container куда рисовать
+ * @param {object} options
+ *   page — какая страница открыта, pageSize — по сколько на ней, total — всего
+ *   onGo — (page) => void: сходить за другой страницей
+ */
+function renderPages(container, { page, pageSize, total, onGo }) {
+	container.textContent = '';
+
+	const pageCount = Math.ceil(total / pageSize);
+
+	if (pageCount <= 1) {
+		return;
+	}
+
+	const go = target => {
+		onGo(target);
+		window.scrollTo({ top: 0, behavior: 'smooth' });
+	};
+
+	const addButton = (label, target, disabled, current) => {
+		const button = element('button', null, label);
+		button.type = 'button';
+		button.disabled = !!disabled;
+
+		if (current) {
+			button.setAttribute('aria-current', 'true');
+		}
+
+		if (!disabled && !current) {
+			button.addEventListener('click', () => go(target));
+		}
+
+		container.append(button);
+	};
+
+	addButton('‹', page - 1, page === 1);
+
+	const pages = new Set([1, pageCount, page]);
+
+	for (let offset = 1; offset <= 2; offset++) {
+		pages.add(page - offset);
+		pages.add(page + offset);
+	}
+
+	const visible = [...pages].filter(p => p >= 1 && p <= pageCount).sort((a, b) => a - b);
+	let previous = 0;
+
+	for (const number of visible) {
+		if (number - previous > 1) {
+			const gap = element('button', null, '…');
+			gap.disabled = true;
+			container.append(gap);
+		}
+
+		addButton(String(number), number, false, number === page);
+		previous = number;
+	}
+
+	addButton('›', page + 1, page === pageCount);
+
+	// Многоточие между кнопками — это не только пропуск, но и тупик: со страницы
+	// второй на сороковую приходилось идти вручную, по пять номеров за нажатие,
+	// потому что кнопки показывают только соседей. Поле рядом с ними эту дорогу
+	// и сокращает: номер — и сразу туда.
+	//
+	// Заводится только там, где ему есть что делать: на трёх страницах номера
+	// и так все на виду.
+	if (pageCount > 5) {
+		container.append(createPageJump(page, pageCount, go));
+	}
+}
+
+/** Поле «перейти к странице»: номер и переход по Enter или по кнопке. */
+function createPageJump(page, pageCount, go) {
+	const box = element('form', 'pager__jump');
+
+	const input = element('input', 'pager__jump-input');
+	input.type = 'number';
+	input.min = '1';
+	input.max = String(pageCount);
+	input.step = '1';
+	input.inputMode = 'numeric';
+	input.placeholder = String(page);
+	input.setAttribute('aria-label', `Перейти к странице от 1 до ${pageCount}`);
+	input.title = `Введите номер страницы от 1 до ${pageCount}`;
+
+	const jump = element('button', 'pager__jump-go', 'Перейти');
+	jump.type = 'submit';
+	jump.title = 'Открыть страницу с этим номером';
+
+	box.append(element('span', 'pager__jump-label', `из ${pageCount}:`), input, jump);
+
+	box.addEventListener('submit', event => {
+		// Форма здесь ради одного только Enter: без неё нажатие Enter в поле
+		// не значило бы ничего, а тянуться мышью до кнопки ради номера страницы —
+		// ровно та работа, от которой поле и избавляет.
+		event.preventDefault();
+
+		const asked = parseInt(input.value, 10);
+
+		if (!Number.isFinite(asked)) {
+			return;
+		}
+
+		// Номер за пределами списка прижимаем к краю, а не отвергаем: «999»
+		// в поле означает «в самый конец», и отвечать на это молчанием незачем.
+		const target = Math.min(Math.max(asked, 1), pageCount);
+
+		input.value = '';
+
+		if (target !== page) {
+			go(target);
+		}
+	});
+
+	return box;
+}
+
+// ————— шапка —————
+//
+// Шапка одна на весь сайт и на всех страницах одинакова — вплоть до поля поиска
+// и счётчиков. Раньше она у каждой страницы была своя: в библиотеке с поиском,
+// на топах без него, в профиле ещё и без уголка входа, — и при переходе между
+// страницами верхняя строка перекладывалась заново, будто это разные сайты.
+// Ссылка на текущую страницу из неё при этом не убирается: пропадающий пункт
+// сдвигает соседние, и целиться в них приходится каждый раз заново.
+//
+// Вёрстка у шапки общая (см. любой из web/*.html), а наполняет её это.
+
+/**
+ * Поиск из шапки на любой странице, кроме самой библиотеки: там он ищет на месте
+ * (см. web/app.js), здесь — уводит в библиотеку с уже набранным запросом.
+ */
+function bindTopbarSearch() {
+	const form = $('searchBox');
+
+	if (!form) {
+		return;
+	}
+
+	form.addEventListener('submit', event => {
+		event.preventDefault();
+
+		const text = $('search').value.trim();
+		window.location.href = text ? `/?search=${encodeURIComponent(text)}` : '/';
+	});
+}
+
+/**
+ * Шапка сама по себе — страницам, которым настройки больше ни за чем не нужны
+ * (топ авторов, обновление базы). Остальные зовут renderTopbar тем же ответом
+ * /api/facets, за которым идут и так: второй такой же запрос ради одних
+ * счётчиков был бы платой ни за что.
+ */
+async function initTopbar() {
+	bindTopbarSearch();
+	renderTopbar(await (await fetch('/api/facets')).json());
+}
+
+/**
+ * Счётчики, уголок входа и ссылка на обновление базы. Всё, что шапке нужно
+ * знать, лежит в ответе /api/facets — его и ждём.
+ *
+ * @param {object} facets ответ /api/facets вместе с полем user
+ */
+function renderTopbar(facets) {
+	renderTopbarCounters(facets);
+	renderTopbarAccount(facets);
+
+	// На хостинге собирать базу нечем, и ссылки на страницу обновления там быть
+	// не должно: обновлять самого себя оттуда некуда и нечем.
+	//
+	// В вёрстке она спрятана, и здесь только показывается — не наоборот. Стой она
+	// открытой, на общем сайте «Обновить базу» мигало бы у каждого, кто открыл
+	// страницу, всё время, пока идёт первый запрос.
+	const update = $('updateLink');
+
+	if (update) {
+		if (facets.readOnly) {
+			update.remove();
+		} else {
+			update.hidden = false;
+		}
+	}
+}
+
+/**
+ * Счётчики в шапке. Разделены не точками, а промежутком: точку между «Паков: 11 480»
+ * и «Сыграно: 12» глаз читает как знак препинания внутри одного предложения, хотя
+ * это отдельные числа про разное. Промежуток держит сама строка (см. .counters
+ * в style.css) — оттого каждый счётчик и стоит отдельным элементом, а не куском
+ * одной строки.
+ */
+function renderTopbarCounters(facets) {
+	const box = $('counters');
+
+	if (!box) {
+		return;
+	}
+
+	// Без входа сыгранное считается по отметкам самого браузера: сервер о них
+	// не знает и присылает ноль, а на счётчике должно стоять то же число, что
+	// человек видит на карточках
+	const onServer = Boolean(facets.user) || facets.localBlacklist === true;
+	const played = onServer ? facets.played : localPlayed.size;
+	const planned = onServer ? (facets.planned ?? 0) : localPlanned.size;
+
+	box.textContent = '';
+
+	const add = (label, value) => {
+		const item = element('span', 'counters__item', `${label}: `);
+		item.append(element('b', null, formatNumber(value)));
+		box.append(item);
+	};
+
+	add('Паков', facets.total);
+	add('Сыграно', played);
+
+	// Запланированное показывается, только когда оно есть: пустой счётчик
+	// в шапке — это строка про то, чего человек ни разу не делал
+	if (planned > 0) {
+		add('В планах', planned);
+	}
+}
+
+/**
+ * Уголок входа. Пока ключи Discord не заведены, вместо кнопки стоит пояснение:
+ * кнопка, ведущая в «вход не настроен», хуже её отсутствия, но и молчание
+ * оставляло сайт без ответа на вопрос «почему я не могу поставить оценку».
+ */
+function renderTopbarAccount(facets) {
+	const box = $('account');
+
+	if (!box) {
+		return;
+	}
+
+	box.textContent = '';
+
+	if (!facets.hasDiscord) {
+		const note = element('span', 'account__note', 'Вход не настроен');
+		note.title = 'Оценки паков появляются после входа через Discord (чёрный список работает и без него). '
+			+ 'Чтобы его включить, заведите приложение на discord.com/developers/applications '
+			+ 'и положите его ключи в data/discord-client-id.txt и data/discord-client-secret.txt — '
+			+ 'подробности в README, раздел «Вход через Discord»';
+		box.append(note);
+		return;
+	}
+
+	if (!facets.user) {
+		const login = element('a', 'button button--discord', 'Войти через Discord');
+		login.href = '/auth/discord';
+		login.title = 'Оценки паков и личный чёрный список появляются после входа';
+		box.append(login);
+		return;
+	}
+
+	box.append(createAccountLink(facets.user));
+
+	const out = element('button', 'button button--ghost', 'Выйти');
+	out.type = 'button';
+	out.addEventListener('click', async () => {
+		await fetch('/auth/logout', { method: 'POST' });
+		window.location.reload();
+	});
+
+	box.append(out);
+}
+
 /** Ссылка «Играть» на официальный движок с уже подставленным паком. */
 function createPlayLink(pack, playerUri) {
 	const play = element('a', 'button button--primary', 'Играть');

@@ -72,7 +72,7 @@ import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
 import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useModel, activeModel, tokensLine } from './gemini.js';
 import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
-import { listThemes, computeShares, toPrimary, computeFranchises, computeOtherKinds, computeGenres } from './topics.js';
+import { listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeOtherKinds, computeGenres } from './topics.js';
 
 const args = process.argv.slice(2);
 const has = flag => args.includes(flag);
@@ -1522,7 +1522,13 @@ function geminiReady(step) {
 function saveTopics(step, label, row, themes, marks, model, tally) {
 	const { shares, questions } = computeShares(themes, marks);
 	const { topic, share } = toPrimary(shares, questions);
-	const franchises = computeFranchises(themes, marks);
+	// Франшизы и области лежат одним списком, но означают разное: по франшизам
+	// считаются повторы, по областям пак целиком про футбол получает подпись
+	// (см. computeAreas в topics.js). Кто из них главный — решает доля: ярлык
+	// пака про Вторую мировую берётся оттуда же, откуда ярлык пака про «Наруто»
+	const repeats = computeFranchises(themes, marks);
+	const franchises = [...repeats, ...computeAreas(themes, marks)]
+		.sort((a, b) => b.share - a.share || b.themes - a.themes);
 	const top = franchises[0] ?? null;
 	const kinds = computeOtherKinds(themes, marks);
 	// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
@@ -1550,7 +1556,7 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		tally.mixed++;
 	}
 
-	if (franchises.length > 0) {
+	if (repeats.length > 0) {
 		tally.repeats++;
 	}
 
@@ -1560,15 +1566,25 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		.map(([key, v]) => `${key} ${Math.round(v * 100)}%`)
 		.join(', ');
 
-	// Повторы — вторая строка: в одну с процентами они не влезают
-	const repeated = franchises
+	// Повторы — вторая строка: в одну с процентами они не влезают. Области
+	// в неё не идут: повтором они не считаются, и место им в строке ниже
+	const repeated = repeats
 		.map(f => `${f.name} ×${f.themes}`)
+		.join(', ');
+
+	const areas = franchises
+		.filter(f => f.kind === 'area')
+		.map(f => `${f.name} ${Math.round(f.share * 100)}%`)
 		.join(', ');
 
 	say(step, `${label} «${row.name}»: ${percents || 'ничего тематического'} -> ${topic ?? 'мало вопросов'}`);
 
 	if (repeated) {
 		say(step, `      повторы: ${repeated}`);
+	}
+
+	if (areas) {
+		say(step, `      предмет: ${areas}`);
 	}
 
 	// Чем оказалось «прочее»: без этой строки в логе видно только
@@ -2046,7 +2062,8 @@ function printSummary() {
 	const withStats = db.prepare('SELECT COUNT(*) AS c FROM stats WHERE found = 1').get().c;
 	const withLogo = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE logo_state = 'ok'`).get().c;
 	const described = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE summary IS NOT NULL AND summary <> ''`).get().c;
-	const repeated = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE franchise_top IS NOT NULL`).get().c;
+	// Главный предмет — франшиза или область, что из них крупнее (см. saveTopics)
+	const withSubject = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE franchise_top IS NOT NULL`).get().c;
 	// Спецвопросы считаются при разборе: у паков, разобранных раньше, их число неизвестно
 	const specials = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'ok' AND special_count IS NULL`).get().c;
 	const levels = db.prepare('SELECT level, COUNT(*) AS c FROM stats WHERE level IS NOT NULL GROUP BY level ORDER BY level DESC').all();
@@ -2060,7 +2077,7 @@ function printSummary() {
 	console.log('=== Итого');
 	console.log(`Паков в базе: ${total} (разобрано ${parsed}, мёртвых ссылок ${deadLinks}, с ошибками ${errors}`
 		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''}${waiting > 0 ? `, ждут разбора ${waiting}` : ''})`);
-	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}. С описанием: ${described}. С повторами франшиз: ${repeated}.`);
+	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}. С описанием: ${described}. С предметом: ${withSubject}.`);
 
 	if (specials > 0) {
 		console.log(`Спецвопросы не посчитаны у ${specials} паков: они разобраны раньше, чем их научились считать.`);

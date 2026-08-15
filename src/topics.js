@@ -1,7 +1,7 @@
 // Доли тематик в паке. Категорию каждой темы определяет Gemini, здесь только арифметика.
 
 import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES, isNotableGenre } from './config.js';
-import { Names, nameKey, isFormatMarker, mergeRelated } from './franchise.js';
+import { Names, nameKey, isFormatMarker, isAreaName, mergeRelated } from './franchise.js';
 
 /** Устойчивый ключ темы: по нему ответ модели возвращается на своё место. */
 export function themeKey(packageId, roundIndex, themeIndex) {
@@ -221,9 +221,11 @@ export function computeGenres(themes, marks, topic) {
  *
  * Только произведение. Область знаний — «История», «География», «Химия»,
  * «Футбол», «Вторая мировая война» — повтором не бывает: викторина вся из них
- * и состоит, и «повтор Истории» не говорит о паке ничего. Отсеиваются они
- * дважды: модель их не называет вовсе (см. правила для f и w в gemini.js),
- * а что всё же назовёт — снимает isFormatMarker в franchise.js.
+ * и состоит, и «повтор Истории» не говорит о паке ничего. Сюда они не попадают
+ * дважды: модель называет область отдельными полями (a и ae, см. gemini.js),
+ * а что всё же придёт франшизой — снимает isFormatMarker в franchise.js.
+ * Считает области computeAreas ниже, и пропасть они не пропадают: пак
+ * целиком про футбол получает по ним свою подпись.
  *
  * У музыки самой по себе (эстрада, рок, рэп) произведения нет, и повтор там —
  * это один и тот же ИСПОЛНИТЕЛЬ: пак, где четыре темы подряд про Земфиру,
@@ -233,11 +235,63 @@ export function computeGenres(themes, marks, topic) {
  * едет произведение, и повтор у опенингов считается по нему, а не по группе.
  *
  * @param {Array} themes темы из listThemes
- * @param {Map<string, {category: string, music: boolean, franchise: string, franchiseEn: string, works: string[]}>} marks
- * @returns {Array<{name: string, themes: number, questions: number, share: number}>}
+ * @param {Map<string, {category: string, music: boolean, franchise: string, franchiseEn: string, area: string, areaEn: string, works: string[]}>} marks
+ * @returns {Array<{name: string, themes: number, questions: number, share: number, kind: string}>}
  *   от частых к редким, только те, что встретились не реже franchiseMinThemes
  */
 export function computeFranchises(themes, marks) {
+	return countNamed(themes, marks, mark => [
+		// Оба написания — одна сущность: «Атака титанов» и «Shingeki no Kyojin»
+		// пришли из одной темы, значит это одно произведение, и тема, где названо
+		// только английское имя, сойдётся с той, где названо только русское.
+		[mark?.franchise, mark?.franchiseEn],
+		// Названное в ответах. Каждое имя — своя сущность: связывать их между собой
+		// нельзя, это разные произведения, случайно оказавшиеся в одной теме
+		...(mark?.works ?? []).map(name => [name]),
+	], {
+		kind: 'work',
+		limit: config.franchiseLimit,
+		// Область произведением не является, и что бы модель ни написала
+		// в поле произведения, повтором это не станет
+		skip: isAreaName,
+	});
+}
+
+/**
+ * То же самое, но по областям: «Футбол», «Вторая мировая война», «Столицы».
+ *
+ * Считается врозь от франшиз, потому что означает другое. Повтор — это то,
+ * к чему пак возвращается снова и снова, и возвращаться можно только
+ * к произведению: пак, где есть тема про столицы и тема про реки, дважды
+ * ни к чему не вернулся — это обычная викторина, и «повтор Географии» о нём
+ * не говорит ничего.
+ *
+ * А вот подпись паку, который целиком про футбол или про Вторую мировую,
+ * область даёт — и никто, кроме неё: ярлык у такого пака «Прочее», и что
+ * за прочее, видно только отсюда (см. subjectPackShare в settings.js).
+ * Поэтому области считаются, но кучкой отдельной: показывает их сайт не рядом
+ * с повторами, а в ярлыке-мишени (см. kind в web/card.js).
+ */
+export function computeAreas(themes, marks) {
+	return countNamed(themes, marks, mark => [[mark?.area, mark?.areaEn]], {
+		kind: 'area',
+		limit: config.areaLimit,
+	});
+}
+
+/**
+ * Общий счёт названного по темам: сводит написания к одной сущности, делит вес
+ * темы между названным в ней и собирает кучки. Франшизы и области считаются
+ * им одинаково — разница только в том, какие поля разметки брать.
+ *
+ * @param {Array} themes темы из listThemes
+ * @param {Map} marks разметка по ключу темы
+ * @param {(mark: object) => Array<Array<string>>} entitiesOf сущности темы:
+ *   каждая — список написаний ОДНОГО И ТОГО ЖЕ, которые надо связать между собой
+ * @param {{kind: string, limit: number, skip?: (name: string) => boolean}} options
+ *   чем помечать найденное, сколько хранить и что не считать за название
+ */
+function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
 	const names = new Names();
 	const entries = [];
 	const found = [];
@@ -249,18 +303,12 @@ export function computeFranchises(themes, marks) {
 
 		const mark = marks.get(theme.key);
 
-		// Формат и площадка произведением не являются: «Опенинги» у каждой
-		// второй темы склеили бы пак-угадайку в одну выдуманную франшизу
-		const real = name => Boolean(name) && !isFormatMarker(name);
+		// Формат и площадка названием не являются: «Опенинги» у каждой второй темы
+		// склеили бы пак-угадайку в одну выдуманную франшизу. Что ещё не в счёт —
+		// решает тот, кто считает: повторам не годятся области (см. franchise.js)
+		const real = name => Boolean(name) && !isFormatMarker(name) && !(skip && skip(name));
 
-		// Оба написания — одна сущность: «Атака титанов» и «Shingeki no Kyojin»
-		// пришли из одной темы, значит это одно произведение, и тема, где названо
-		// только английское имя, сойдётся с той, где названо только русское.
-		const spellings = [mark?.franchise, mark?.franchiseEn]
-			.map(name => String(name ?? '').trim())
-			.filter(real);
-
-		/** Разные произведения этой темы: по ним и делится её вес. */
+		/** Разные сущности этой темы: по ним и делится её вес. */
 		const canons = new Set();
 
 		const remember = (raw, canon) => {
@@ -271,30 +319,24 @@ export function computeFranchises(themes, marks) {
 			}
 		};
 
-		if (spellings.length > 0) {
-			const canon = names.addEntity(spellings);
+		for (const entity of entitiesOf(mark ?? {})) {
+			const spellings = entity.map(name => String(name ?? '').trim()).filter(real);
 
-			if (canon) {
-				canons.add(canon);
-
-				for (const raw of spellings) {
-					remember(raw, canon);
-				}
-			}
-		}
-
-		// Названное в ответах. Каждое имя — своя сущность: связывать их между собой
-		// нельзя, это разные произведения, случайно оказавшиеся в одной теме
-		for (const raw of (mark?.works ?? []).map(name => String(name ?? '').trim()).filter(real)) {
-			const key = nameKey(raw);
-
-			if (!key) {
+			if (spellings.length === 0) {
 				continue;
 			}
 
-			const canon = names.add(key, raw);
+			const canon = names.addEntity(spellings);
+
+			if (!canon) {
+				continue;
+			}
+
 			canons.add(canon);
-			remember(raw, canon);
+
+			for (const raw of spellings) {
+				remember(raw, canon);
+			}
 		}
 
 		if (canons.size === 0) {
@@ -343,9 +385,13 @@ export function computeFranchises(themes, marks) {
 			themes: group.themes.size,
 			questions: Math.round(group.questions),
 			share: Math.round((group.questions / total) * 1000) / 1000,
+			// Произведение это или область. Хранится у каждой записи, потому что
+			// лежат они в базе одним списком, а означают разное: повторы сайт
+			// показывает только по произведениям
+			kind,
 		}))
 		.sort((a, b) => b.share - a.share || b.themes - a.themes)
-		.slice(0, config.franchiseLimit);
+		.slice(0, limit);
 }
 
 /** Музыкальный ли пак: доля музыкальных вопросов взяла свой порог. */

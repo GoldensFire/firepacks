@@ -16,6 +16,7 @@
 //   node src/indexer.js --recalc        пересчитать уровни и ярлыки по сохранённым данным, без сети
 //   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, recalc
 //   node src/indexer.js --model=имя     разово взять другую модель Gemini
+//   node src/indexer.js --fallback      кончились суточные запросы — перейти на запасную модель
 //   node src/indexer.js --gemini-models показать доступные модели Gemini
 //   node src/indexer.js --gemini-usage  показать расход запросов за сегодня
 //   node src/indexer.js --pages=5       ограничить число страниц обсуждения
@@ -72,7 +73,7 @@ import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
 import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useModel, activeModel, tokensLine } from './gemini.js';
-import { MODELS, modelRank, usage, usageLine, usageReport } from './models.js';
+import { MODELS, modelRank, usage, usageLine, usageReport, nextSpareModel } from './models.js';
 import { listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeOtherKinds, computeGenres } from './topics.js';
 
 const args = process.argv.slice(2);
@@ -119,6 +120,21 @@ const jobs = Math.max(1, value('jobs', config.parseJobs));
 if (text('model')) {
 	useModel(text('model'));
 }
+
+/**
+ * Разрешено ли посреди работы перейти на запасную модель, когда у нынешней
+ * кончились суточные запросы (см. nextSpareModel в models.js).
+ *
+ * Ключом, а не всегда, потому что случая тут два разных. Ночной обход идёт сам,
+ * смотреть за ним некому, и упереться в лимит на середине очереди для него —
+ * обычное дело: там переход на соседнюю Lite означает несколько лишних тысяч
+ * размеченных паков вместо «продолжим завтра». Запуск руками со страницы
+ * обновления — другое: там модель выбрана человеком нарочно, и подменять её
+ * молча нельзя, иначе выбор ничего не значит.
+ *
+ * Ключ ставит ночной обход сам (см. scripts/nightly.js).
+ */
+const fallback = has('--fallback');
 
 /**
  * Паки, названные поимённо: `--packs=128,340`. Номер — тот же, что в адресе
@@ -1482,6 +1498,69 @@ function isFatalGeminiError(error) {
  */
 let geminiQuotaSpent = false;
 
+/**
+ * Кончились суточные запросы: перейти на запасную модель или свернуть полосу.
+ *
+ * Зовётся оттуда, где раньше стояло просто «geminiQuotaSpent = true». Разница
+ * в одном: сперва спрашивается, есть ли чем продолжать (см. nextSpareModel
+ * в models.js), и только если нечем — ночь на этом кончается.
+ *
+ * @param {string} step от чьего имени писать в лог
+ * @param {string} model модель, которой этот запрос отказали
+ * @returns {boolean} перешли ли на другую: false — полоса сворачивается
+ */
+function switchModel(step, model) {
+	if (!fallback) {
+		return false;
+	}
+
+	// Полос две и работников в каждой несколько: отказ по одному и тому же лимиту
+	// прилетает разом с нескольких сторон. Переключает первый, кто добежал,
+	// а остальные видят, что модель уже не та, которой им отказали, — и молчат.
+	// Иначе один кончившийся лимит перебрал бы весь список запасных подряд
+	if (model !== activeModel()) {
+		return true;
+	}
+
+	const next = nextSpareModel(model);
+
+	if (!next) {
+		return false;
+	}
+
+	useModel(next);
+	say(step, `у ${model} суточные запросы кончились — перехожу на ${next}. ${usageLine(next)}`);
+
+	return true;
+}
+
+/**
+ * Что делать с ошибкой модели, прилетевшей в полосу.
+ *
+ * Обычная ошибка (сеть, оборванный ответ) полосу не трогает: следующий пак
+ * вполне может разобраться. Ошибка, после которой следующий получит то же самое,
+ * сворачивает полосу — кроме одного случая: кончившиеся суточные запросы можно
+ * пережить, перейдя на запасную модель.
+ *
+ * @param {string} step от чьего имени писать в лог
+ * @param {Error} error что пришло
+ * @param {string} model модель, которой отказали
+ */
+function noteGeminiFailure(step, error, model) {
+	if (!isFatalGeminiError(error)) {
+		return;
+	}
+
+	// Кончились сутки у этой модели, а не у ключа: если есть чем продолжать,
+	// полоса не сворачивается вовсе — просто дальше спрашивается другая
+	if (error.quota === true && switchModel(step, model)) {
+		return;
+	}
+
+	geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
+	say(step, stopReason(error));
+}
+
 /** Что написать, сворачивая полосу. Кончившиеся лимиты — не поломка. */
 function stopReason(error) {
 	return error.quota === true
@@ -1509,7 +1588,13 @@ function geminiReady(step) {
 		return false;
 	}
 
+	// Лимиты кончились ещё до начала шага — обычное дело для второго прохода ночи:
+	// первый уже выбрал сутки. Переход на запасную модель годится и здесь
 	if (left.spentOut) {
+		if (switchModel(step, activeModel())) {
+			return true;
+		}
+
 		say(step, `пропускаю: у ${activeModel()} лимиты на сегодня уже кончились (${usageLine(activeModel())})`);
 		geminiQuotaSpent = true;
 		return false;
@@ -1659,18 +1744,18 @@ async function refreshTopics() {
 				return;
 			}
 
+			const model = activeModel();
+
 			try {
-				const model = activeModel();
 				const marks = await classifyThemes(themes);
 				saveTopics('topics', label, row, themes, marks, model, tally);
 			} catch (error) {
 				say('topics', `${label} «${row.name}»: ${error.message}`);
 
-				// Ключ, модель или кончившиеся лимиты — дальше будет то же самое
-				if (isFatalGeminiError(error)) {
-					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
-					say('topics', stopReason(error));
-				}
+				// Ключ, модель или кончившиеся лимиты — дальше будет то же самое.
+				// Кроме одного случая: кончившиеся сутки переживаются переходом
+				// на запасную модель (см. noteGeminiFailure)
+				noteGeminiFailure('topics', error, model);
 			}
 		},
 	});
@@ -1724,8 +1809,9 @@ async function refreshSummaries() {
 			const themes = listThemes(row.id, normalizeRounds(row.rounds));
 			const label = bar.label();
 
+			const model = activeModel();
+
 			try {
-				const model = activeModel();
 				const { summary, audience } = await describePack({
 					name: row.name ?? '',
 					tags: jsonOrDefault(row.tags, []),
@@ -1746,10 +1832,7 @@ async function refreshSummaries() {
 			} catch (error) {
 				say('summary', `${label} «${row.name}»: ${error.message}`);
 
-				if (isFatalGeminiError(error)) {
-					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
-					say('summary', stopReason(error));
-				}
+				noteGeminiFailure('summary', error, model);
 			}
 		},
 	});
@@ -1910,8 +1993,9 @@ async function refreshAnalysis() {
 				label: bar.label(),
 			}));
 
+			const model = activeModel();
+
 			try {
-				const model = activeModel();
 				const answers = await analyzePacks(packs.map(pack => ({
 					name: pack.row.name ?? '',
 					tags: jsonOrDefault(pack.row.tags, []),
@@ -1962,10 +2046,7 @@ async function refreshAnalysis() {
 				// запросом, и отказ означает, что не разобран ни один
 				say('analyze', `${packs.map(pack => `${pack.label} «${pack.row.name}»`).join(', ')}: ${error.message}`);
 
-				if (isFatalGeminiError(error)) {
-					geminiQuotaSpent = geminiQuotaSpent || error.quota === true;
-					say('analyze', stopReason(error));
-				}
+				noteGeminiFailure('analyze', error, model);
 			}
 		},
 	});

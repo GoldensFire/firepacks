@@ -351,13 +351,20 @@ function renderTopics() {
 	const container = $('topics');
 	container.textContent = '';
 
-	for (const key of TOPIC_ORDER) {
-		const count = facets.topics[key] ?? 0;
+	// Порядок — по числу паков, от частых к редким. Раньше он был задан списком
+	// раз и навсегда (солянка, аниме, манга, игры…), и выходило, что вверху колонки
+	// стоял тип, которого в базе полторы сотни паков, а тысячи кинопаков искались
+	// глазами в середине. Отбирают же типом, которого много: список сам должен
+	// начинаться с того, ради чего в него смотрят.
+	//
+	// Порядок из TOPIC_ORDER остаётся запасным — им разнимаются равные числа,
+	// чтобы колонка не переставлялась сама собой при одинаковых счётчиках.
+	const order = TOPIC_ORDER
+		.map((key, index) => ({ key, index, count: facets.topics[key] ?? 0 }))
+		.filter(item => item.count > 0 || state.topics.has(item.key))
+		.sort((a, b) => b.count - a.count || a.index - b.index);
 
-		if (count === 0 && !state.topics.has(key)) {
-			continue;
-		}
-
+	for (const { key, count } of order) {
 		const info = topicInfo(key);
 		const button = element('button', `level-toggle topic--${key}`);
 		button.type = 'button';

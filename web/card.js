@@ -387,24 +387,43 @@ function unratedReason(pack) {
 
 /** Повторы франшиз: к чему пак возвращается снова и снова. */
 function createFranchises(pack) {
+	// Повтором не считается то, чем пак и является. У пака про Гарри Поттера
+	// «Гарри Поттер ×27» — не наблюдение, а пересказ названия числом: он на то
+	// и пак по Гарри Поттеру, чтобы тем про Гарри Поттера в нём было много.
+	// Такой предмет уже назван ярлыком в шапке — вселенной («Кинопак (Гарри
+	// Поттер)») или мишенью («Гарри Поттер 74%»), — и повторять его списком
+	// повторов значит говорить одно и то же дважды.
+	//
+	// Порог тот же самый, по которому ставится ярлык (subjectPackShare): что
+	// на карточке названо предметом пака, то из повторов и уходит. Остальные
+	// франшизы при этом остаются — у пака про Гарри Поттера с тремя темами
+	// про «Властелина колец» это настоящий повтор, и он единственное, что
+	// об этом говорит.
+	const own = facets.subjectPackShare ?? 0.5;
+
 	// В том же списке лежат области — «Футбол», «Вторая мировая война», —
 	// и повторами они не бывают: викторина вся из них и состоит, а «География ×5»
 	// не говорит о паке ничего. Своё место у них есть — ярлык-мишень «Футбол»
 	// у пака, который весь про футбол (см. mostCommon в createBadges)
-	const franchises = (pack.franchises ?? []).filter(item => item.kind !== 'area');
+	const franchises = (pack.franchises ?? []).filter(item => item.kind !== 'area' && item.share < own);
 
 	if (franchises.length === 0) {
 		return null;
 	}
 
-	// Пак про одну вселенную повторами не описывается: вселенная уже стоит в ярлыке
-	// («Кинопак (Гарри Поттер)»), а «Гарри Поттер ×27» — то же самое, сказанное числом
-	if (universeOf(pack)) {
-		return null;
-	}
-
 	const box = element('div', 'repeats');
-	box.append(iconText('repeat', 'Повторы:', 'repeats__title'));
+
+	// Число рядом с подписью — сколько всего тем пака приходится на повторы.
+	// Ярлыков в строке бывает с десяток, и «много ли тут повторов» до сих пор
+	// приходилось складывать глазами по «×3, ×2, ×2»; теперь это одно число,
+	// и по нему паки сравниваются между собой с одного взгляда.
+	const total = franchises.reduce((sum, item) => sum + item.themes, 0);
+
+	const title = iconText('repeat', 'Повторы:', 'repeats__title');
+	title.append(element('span', 'repeats__total', String(total)));
+	title.title = `Повторяющихся тем в паке: ${total} — они приходятся на `
+		+ `${franchises.length} ${plural(franchises.length, 'франшизу', 'франшизы', 'франшиз')}`;
+	box.append(title);
 
 	for (const franchise of franchises) {
 		const chip = element('button', 'repeats__item');
@@ -625,12 +644,15 @@ function createShares(pack) {
 		'О чём вопросы пака',
 	);
 
+	// Подписи над этой полоской нет нарочно: вопрос «Из чего состоит пак?» стоит
+	// теперь над полоской жанров — там, где написано «рок, поп» и «шутеры, RPG»,
+	// то есть про то, из чего пак и правда состоит. Здесь же речь про вид файлов
+	// (текст, картинки, звук), и он читается как продолжение верхних полосок
 	const contents = createShareRow(
 		CONTENT_ORDER.map(key => ({ key, name: CONTENT_NAMES[key], value: content[key] ?? 0 })),
 		'shares__bar--content',
 		'содержимого пака',
 		'Из чего сделаны вопросы',
-		'Из чего состоит пак?',
 	);
 
 	const genres = createGenres(pack);
@@ -690,7 +712,12 @@ function createGenres(pack) {
 		parts.push({ key: 'genre-rest', name: 'Остальное вперемешку', value: 1 - named });
 	}
 
-	return createShareRow(parts, 'shares__bar--genres', 'вопросов пака', list.question);
+	// Вопрос «Из чего состоит пак?» стоит именно здесь: жанры и есть ответ на него —
+	// «рок, поп», «шутеры, RPG». Раньше эта подпись висела над нижней полоской,
+	// но там перечислены текст, картинки и звук, то есть вид файлов, а не состав
+	// пака. Какой это жанр и чего именно, по-прежнему говорит подсказка полоски
+	// («Какой жанр музыки?») — над ней хватает одного вопроса
+	return createShareRow(parts, 'shares__bar--genres', 'вопросов пака', list.question, 'Из чего состоит пак?');
 }
 
 /**
@@ -1055,6 +1082,277 @@ function createShareButton(pack) {
 }
 
 /**
+ * «Скрин»: вся карточка целиком — картинкой в буфер обмена.
+ *
+ * Зачем. Паком делятся в чужом окне, и ссылка там разворачивается в лучшем случае
+ * названием: ни сложности, ни долей, ни оценки, ни состава раундов в ней не видно,
+ * а решают именно они — «смотри, тут 70% аниме и коты в мешке». Пересказывать это
+ * словами дольше, чем показать. Снимок же экрана руками захватывает соседние
+ * карточки и обрезается по нижнему краю окна, а «подробности» на нём свёрнуты.
+ *
+ * Как это сделано. Никакой сторонней библиотеки для этого нет: карточка рисуется
+ * тем же браузером, что и на экране. Её копия кладётся внутрь картинки-SVG
+ * (foreignObject), туда же целиком уезжает стиль сайта — и картинка рисуется
+ * на холсте, откуда уходит в буфер обмена уже как PNG.
+ *
+ * Из этого следуют две вещи, которые здесь и сделаны руками:
+ *
+ *   картинки внутри SVG наружу не ходят вовсе — обложка обязана быть уже внутри
+ *     файла, поэтому она заранее переводится в data:-строку (см. inlineImages);
+ *   мерка вёрстки (rem) висит на html, а в картинке никакого html нет — её
+ *     приходится назначать корню SVG, иначе снимок выходит другого размера,
+ *     чем то же самое на экране.
+ */
+const SHOT_SCALE = 2;
+
+/** Поля вокруг карточки на снимке, точки. Впритык обрезанная карточка выглядит обрывком. */
+const SHOT_PADDING = 16;
+
+/** Стиль сайта, прочитанный один раз на все снимки: файл под сотню килобайт. */
+let siteStyle = null;
+
+function siteStyleText() {
+	if (!siteStyle) {
+		const link = document.querySelector('link[rel="stylesheet"]');
+
+		siteStyle = link
+			? fetch(link.href).then(response => (response.ok ? response.text() : '')).catch(() => '')
+			: Promise.resolve('');
+	}
+
+	return siteStyle;
+}
+
+/**
+ * Обложки — внутрь самой картинки. Изнутри SVG браузер не идёт ни за чем: ни
+ * за файлом с того же сайта, ни тем более за чужим, — и обложка, оставленная
+ * ссылкой, на снимке просто не появится. Что не отдалось, убирается совсем:
+ * пустая рамка на месте картинки хуже её отсутствия.
+ */
+async function inlineImages(root) {
+	await Promise.all([...root.querySelectorAll('img')].map(async image => {
+		const src = image.getAttribute('src') ?? '';
+
+		if (!src || src.startsWith('data:')) {
+			return;
+		}
+
+		try {
+			const response = await fetch(src);
+
+			if (!response.ok) {
+				throw new Error(String(response.status));
+			}
+
+			const blob = await response.blob();
+
+			image.setAttribute('src', await new Promise((resolve, reject) => {
+				const reader = new FileReader();
+				reader.addEventListener('load', () => resolve(reader.result));
+				reader.addEventListener('error', () => reject(reader.error));
+				reader.readAsDataURL(blob);
+			}));
+		} catch {
+			image.remove();
+		}
+	}));
+}
+
+/** Карточка — картинкой PNG. Возвращает blob или null, если холст ничего не отдал. */
+async function cardToImage(card) {
+	const clone = card.cloneNode(true);
+
+	// «Подробности» на снимке раскрыты: за составом раундов за ним и лезут.
+	// Свёрнутое описание тоже разворачивается — обрезка по четырём строкам нужна
+	// выдаче, чтобы карточки не разъезжались по высоте, а у снимка соседей нет
+	clone.classList.remove('card--clickable');
+
+	for (const details of clone.querySelectorAll('details')) {
+		details.open = true;
+	}
+
+	for (const box of clone.querySelectorAll('.description')) {
+		box.classList.add('description--open');
+	}
+
+	// Кнопки со снимка убраны все разом: «Играть», «Скачать», «Отметить сыгранным»
+	// на картинке не нажимаются, и место занимают ровно зря. Остаётся то, ради чего
+	// карточкой и делятся, — название, оценка, доли, темы, описание, состав
+	for (const extra of clone.querySelectorAll('.card__actions, .description__more, .card__name-copy, .author-ban, .hide')) {
+		extra.remove();
+	}
+
+	// Копия меряется на настоящей странице, а не на глаз: высота карточки известна
+	// только после того, как браузер разложил её текст по строкам. Стоит она при
+	// этом за краем экрана — увидеть её нельзя, а размеры у неё настоящие
+	const width = Math.ceil(card.getBoundingClientRect().width);
+	const stage = element('div');
+	stage.style.cssText = `position:fixed;left:-20000px;top:0;width:${width}px;pointer-events:none;`;
+	stage.append(clone);
+	document.body.append(stage);
+
+	let markup;
+	let height;
+
+	try {
+		await inlineImages(clone);
+		height = Math.ceil(clone.getBoundingClientRect().height);
+		// XMLSerializer, а не innerHTML: внутри SVG разметка обязана быть правильным
+		// XML — с закрытыми <img> и своим пространством имён у значков
+		markup = new XMLSerializer().serializeToString(clone);
+	} finally {
+		stage.remove();
+	}
+
+	const css = await siteStyleText();
+	const page = getComputedStyle(document.body);
+	// Мерка вёрстки: на странице она висит на html, а корень картинки — сам SVG
+	const rootSize = getComputedStyle(document.documentElement).fontSize;
+
+	const full = { width: width + SHOT_PADDING * 2, height: height + SHOT_PADDING * 2 };
+
+	// Поля и шрифт страницы — правилом в стиле, а не атрибутом style у самой
+	// коробки: имя шрифта браузер отдаёт уже в кавычках («"Segoe UI", system-ui»),
+	// и в атрибуте XML эти кавычки закрывают его на середине — картинка после
+	// такого не разбирается вовсе.
+	const pageStyle = `.shot-page{width:${full.width}px;padding:${SHOT_PADDING}px;box-sizing:border-box;`
+		+ `background:${page.backgroundColor};color:${page.color};font-family:${page.fontFamily};`
+		+ `font-size:${page.fontSize};line-height:${page.lineHeight};}`;
+
+	// Стиль уезжает внутрь XML, и два знака в нём значат для разбора больше,
+	// чем для CSS
+	const escaped = `:root{font-size:${rootSize};}${pageStyle}${css}`
+		.replaceAll('&', '&amp;')
+		.replaceAll('<', '&lt;');
+
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${full.width}" height="${full.height}">`
+		+ '<foreignObject x="0" y="0" width="100%" height="100%">'
+		+ '<div xmlns="http://www.w3.org/1999/xhtml" class="shot-page">'
+		+ `<style>${escaped}</style>${markup}</div></foreignObject></svg>`;
+
+	const image = new Image();
+	image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+	await image.decode();
+
+	// Вдвое подробнее экрана: снимок смотрят на чужом мониторе и в чужом окне,
+	// где его растягивают, — а мылом текст карточки не читается вовсе
+	const canvas = element('canvas');
+	canvas.width = full.width * SHOT_SCALE;
+	canvas.height = full.height * SHOT_SCALE;
+
+	const context = canvas.getContext('2d');
+	context.fillStyle = page.backgroundColor || '#0e1015';
+	context.fillRect(0, 0, canvas.width, canvas.height);
+	context.setTransform(SHOT_SCALE, 0, 0, SHOT_SCALE, 0, 0);
+	context.drawImage(image, 0, 0, full.width, full.height);
+
+	return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+/**
+ * Картинка — в буфер обмена. Работает это только на защищённом соединении
+ * и не во всяком браузере; домашний сайт открывают по http с соседней машины,
+ * и там остаётся второй способ — сохранить файлом (см. кнопку).
+ */
+async function copyImage(blob) {
+	try {
+		if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {
+			await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+			return true;
+		}
+	} catch {
+		// Не дали — значит, файлом
+	}
+
+	return false;
+}
+
+/** Запасной путь: тот же снимок, но файлом на диск. */
+function saveImage(blob, pack) {
+	const url = URL.createObjectURL(blob);
+	const link = element('a');
+	link.href = url;
+	link.download = `${pack.slug || `pack-${pack.id}`}.png`;
+	document.body.append(link);
+	link.click();
+	link.remove();
+	setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/**
+ * Кнопка «Скрин». Стоит в общей строке действий рядом с «Поделиться»: обе про то,
+ * как унести пак отсюда наружу, — одна ссылкой, другая картинкой.
+ */
+function createShotButton(pack, card) {
+	const button = element('button', 'button button--ghost button--shot');
+	button.type = 'button';
+	button.append(icon('camera'), element('span', null, 'Скрин'));
+	button.title = 'Снять карточку целиком, вместе с подробностями, и положить картинкой в буфер обмена';
+
+	button.addEventListener('click', async event => {
+		event.stopPropagation();
+
+		button.disabled = true;
+		showToast('Снимаю карточку…');
+
+		try {
+			const blob = await cardToImage(card);
+
+			if (!blob) {
+				throw new Error('картинка не нарисовалась');
+			}
+
+			if (await copyImage(blob)) {
+				showToast('Карточка скопирована картинкой');
+			} else {
+				// Молчать нельзя: человек нажал «в буфер», а получил файл — и знать
+				// об этом должен он, а не папка загрузок
+				saveImage(blob, pack);
+				showToast('Буфер обмена недоступен — снимок сохранён файлом');
+			}
+		} catch (error) {
+			showToast(`Не вышло снять карточку: ${error.message}`);
+		} finally {
+			button.disabled = false;
+		}
+	});
+
+	return button;
+}
+
+/**
+ * «Скопировать название» — маленький знак справа от названия пака.
+ *
+ * Уходит в буфер ровно то, что написано, — без ссылки, без автора, без кавычек:
+ * этой строкой пак ищут в самой SIGame, в обсуждении и в чужом чате, и лишнее
+ * в ней приходится стирать руками.
+ *
+ * Нажатие не открывает страницу пака, хотя стоит кнопка внутри карточки, которая
+ * вся на это нажатие и настроена: у кнопок это учтено разом (см. OWN_TARGETS),
+ * а остановка события нужна ещё и ссылке названия, внутри которой знак не стоит.
+ */
+function createCopyNameButton(name) {
+	const button = element('button', 'card__name-copy');
+	button.type = 'button';
+	button.append(icon('copy'));
+	button.title = `Скопировать название: «${name}»`;
+	button.setAttribute('aria-label', button.title);
+
+	button.addEventListener('click', async event => {
+		event.stopPropagation();
+		event.preventDefault();
+
+		if (await copyText(name)) {
+			showToast('Название пака скопировано');
+		} else {
+			showToast('Не вышло скопировать название');
+		}
+	});
+
+	return button;
+}
+
+/**
  * «Обновить пак» — точечное обновление одного пака прямо с его страницы.
  *
  * Зачем оно тут. Пак изредка разбирается криво: модель не узнала произведение,
@@ -1311,15 +1609,27 @@ function createCard(pack, options = {}) {
 	// первого уровня и никуда не ведёт. В выдаче оно ссылка: у пака есть
 	// собственный адрес, и поисковику попасть на него больше неоткуда — дальше
 	// первой страницы выдачи он не листает, там кнопки, а не ссылки.
+	//
+	// Справа от названия стоит кнопка «скопировать»: пак ищут не только здесь.
+	// Название нужно, чтобы найти его же в самой SIGame, скинуть строкой в чат
+	// или поискать в обсуждении, — и до сих пор его выделяли мышью по буквам,
+	// а на карточке в выдаче выделение ещё и спорит с переходом на страницу пака.
+	// Копируется голое название, без ссылки и без автора: ссылкой делится соседняя
+	// кнопка внизу карточки, а здесь просят ровно ту строку, что написана.
+	const nameRow = element('div', 'card__name-row');
+
 	if (standalone) {
-		titleBox.append(element('h1', 'card__name', name));
+		nameRow.append(element('h1', 'card__name', name));
 	} else {
 		const link = element('a', 'card__name-link');
 		link.href = packHref(pack);
 		link.title = `Открыть страницу пака «${name}»`;
 		link.append(element('h3', 'card__name', name));
-		titleBox.append(link);
+		nameRow.append(link);
 	}
+
+	nameRow.append(createCopyNameButton(name));
+	titleBox.append(nameRow);
 
 	if (pack.authors.length > 0) {
 		const authors = element('p', 'card__authors');
@@ -1597,6 +1907,11 @@ function createCard(pack, options = {}) {
 	// «Поделиться» — прямо перед чёрным списком: обе кнопки без подписи, обе
 	// про сам пак, а не про игру им, и стоят они в конце строки одна за другой.
 	actions.append(createShareButton(pack));
+
+	// «Скрин» — рядом с «Поделиться»: обе уносят пак отсюда наружу, одна ссылкой,
+	// другая картинкой. Картинка нужна там, где ссылка не разворачивается ни во что:
+	// в чате она остаётся одним названием, а по карточке видно всё сразу
+	actions.append(createShotButton(pack, card));
 
 	// Точечное обновление — только на своей странице пака и только дома:
 	// на хостинге индексатора нет вовсе (см. createUpdateButton)

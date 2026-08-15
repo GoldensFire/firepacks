@@ -91,7 +91,7 @@ const ANALYTICS = `<!-- Cloudflare Web Analytics -->`
  * трогать не надо: gtag.js подгружается сам, а очередь событий (dataLayer)
  * заводится до него и переживает загрузку.
  */
-const GOOGLE_TAG_ID = 'G-B4T1NVCDBB';
+const GOOGLE_TAG_ID = 'G-B411NVCDBB';
 
 const GOOGLE_ANALYTICS = `<!-- Google tag (gtag.js) -->`
 	+ `<script async src="https://www.googletagmanager.com/gtag/js?id=${GOOGLE_TAG_ID}"></script>`

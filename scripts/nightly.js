@@ -13,6 +13,10 @@
 // узнать неоткуда. Каждый запуск пишет свой файл в data/nightly, а сама папка
 // подчищается: тридцати последних ночей хватает, чтобы понять, когда сломалось.
 //
+// Кончившиеся у модели суточные запросы ночь не заканчивают: индексатору отдаётся
+// ключ --fallback, и он переходит на запасную модель (обе Flash-Lite, см. nextSpareModel
+// в src/models.js). Запуск руками со страницы обновления так не делает.
+//
 // Ключи: --no-deploy — только собрать базу дома, наверх не выкладывать.
 //        --no-fresh  — одним проходом по всей базе, без забега за свежим (см. ниже).
 //        --fresh=N   — сколько суток считать свежими (по умолчанию 3).
@@ -59,8 +63,23 @@ const KEEP_LOGS = 30;
 
 const deploy = !process.argv.includes('--no-deploy');
 
+/**
+ * Ночь имеет право менять модель на ходу.
+ *
+ * Суточные запросы кончаются у Gemini на середине очереди всегда, и раньше это
+ * означало конец работы: шаг сворачивался, остальное откладывалось до завтра.
+ * Между тем квота считается на модель, а не на ключ — у соседней Flash-Lite
+ * в этот момент лежат нетронутыми ещё пятьсот запросов. Ключ разрешает
+ * индексатору взять их (см. --fallback и nextSpareModel в src/models.js:
+ * запасными отмечены только обе Lite, старшие модели этим не трогаются).
+ *
+ * Ставится он здесь, а не в самом индексаторе, нарочно: запуск руками
+ * со страницы обновления модель менять не должен — там её выбрал человек.
+ */
+const FALLBACK_FLAG = '--fallback';
+
 /** Свои ключи; остальные — не наше дело, они для индексатора. */
-const OWN_FLAGS = ['--no-deploy', '--no-fresh'];
+const OWN_FLAGS = ['--no-deploy', '--no-fresh', FALLBACK_FLAG];
 const indexerArgs = process.argv.slice(2).filter(arg => !OWN_FLAGS.includes(arg) && !arg.startsWith('--fresh='));
 
 /** Сколько суток считать свежими. */
@@ -169,7 +188,7 @@ if (doFresh) {
 	say(`Сначала свежее: паки, выложенные за последние ${freshDays} суток.`);
 
 	const fresh = await run(process.execPath, ['--no-warnings', 'src/indexer.js',
-		`--steps=${FRESH_STEPS}`, `--fresh=${freshDays}`, ...indexerArgs]);
+		`--steps=${FRESH_STEPS}`, `--fresh=${freshDays}`, FALLBACK_FLAG, ...indexerArgs]);
 
 	// Сорвавшийся забег ночь не отменяет: он про несколько десятков паков,
 	// а впереди вся остальная база. Молчать о нём нельзя — но и бросать
@@ -185,7 +204,9 @@ if (doFresh) {
 // Второй проход: вся база. Без ключей индексатор делает обычный полный проход —
 // ВК, разбор новых паков, статистика, тематики и краткие описания (см. STEPS
 // в src/indexer.js); после забега обход обсуждений из него убран.
-const restArgs = doFresh ? [`--steps=${REST_STEPS}`, ...indexerArgs] : indexerArgs;
+const restArgs = doFresh
+	? [`--steps=${REST_STEPS}`, FALLBACK_FLAG, ...indexerArgs]
+	: [FALLBACK_FLAG, ...indexerArgs];
 const indexed = await run(process.execPath, ['--no-warnings', 'src/indexer.js', ...restArgs]);
 
 if (indexed !== 0) {

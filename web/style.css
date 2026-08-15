@@ -898,6 +898,52 @@ a.brand:hover .brand__text {
 	gap: 0.625rem;
 }
 
+/* Название и знак «скопировать» рядом с ним. Знак стоит по верхнему краю, а не
+   по середине: название бывает в три строки, и кнопка, уехавшая к середине,
+   выглядела бы прицепленной к случайному слову. */
+.card__name-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.25rem;
+}
+
+/* Название забирает всю ширину, знак остаётся при нём: иначе длинное имя
+   отжимает кнопку за край карточки */
+.card__name-row > :first-child {
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+/* Тот же знак, что и запрет у имени автора: обводка ростом со строку, приглушённая
+   до наведения. Кнопка мелкая нарочно — она при названии, а не вместо него */
+.card__name-copy {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	height: 1.45em;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--text-muted);
+	font: inherit;
+	line-height: 1;
+	opacity: .55;
+	cursor: pointer;
+}
+
+.card__name-copy .icon {
+	width: 1.15em;
+	height: 1.15em;
+	vertical-align: 0;
+}
+
+.card__name-copy:hover,
+.card__name-copy:focus-visible {
+	color: var(--accent);
+	opacity: 1;
+}
+
 .card__name {
 	margin: 0;
 	font-size: 0.9375rem;
@@ -1483,6 +1529,16 @@ a.hide__item--login:hover {
 	color: var(--text-muted);
 }
 
+/* Сколько всего тем пака приходится на повторы: одно число вместо складывания
+   «×3, ×2, ×2» глазами. Набрано ярче подписи рядом — это и есть та цифра,
+   по которой паки сравнивают между собой */
+.repeats__total {
+	margin-left: 0.25rem;
+	color: var(--text);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
 .repeats__item {
 	display: inline-flex;
 	align-items: baseline;
@@ -1789,6 +1845,33 @@ a.hide__item--login:hover {
 	display: block;
 	width: 1.45em;
 	height: 1.45em;
+}
+
+/* «Скрин»: карточка целиком уходит картинкой в буфер обмена. Подпись у неё есть,
+   в отличие от «поделиться», — кнопка новая и сама себя объясняет; значок
+   фотоаппарата без слова читался бы как «обложка» или «картинки в паке». */
+.button--shot {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.375rem;
+	flex: 0 0 auto;
+}
+
+.button--shot:hover {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
+.button--shot svg {
+	width: 1.15em;
+	height: 1.15em;
+}
+
+/* Пока снимок рисуется, кнопка не нажимается: на большой карточке это доли
+   секунды, но за них успевают нажать второй раз */
+.button--shot:disabled {
+	opacity: .6;
+	cursor: progress;
 }
 
 /* Всплывающая подпись внизу экрана: «ссылка скопирована». Нажатие, после которого

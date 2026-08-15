@@ -291,7 +291,14 @@ function pack(file) {
 	// одинаково — второй путь относительно первого, — но проверено это на одной
 	// машине, а укладывает свёрток и Windows, и Actions. Ошибись он молча, полка
 	// осталась бы без обложек, и заметилось бы это через неделю.
-	const listed = run('tar', ['-tzf', file], { quiet: true }).out.split('\n');
+	//
+	// Строки режутся по \r\n, а не по \n, нарочно. Windows-овский tar (bsdtar
+	// из System32) заканчивает каждую строку списка возвратом каретки, и «data/sibase.db\r»
+	// не равно «data/sibase.db» — проверка не находила в свёртке ровно то, что
+	// сама же туда только что положила, и всякая выкладка с домашней машины
+	// заканчивалась «в свёрток не попало». Под Git Bash тот же код работал:
+	// там первым в PATH стоит GNU tar, а он переводит строку по-своему.
+	const listed = run('tar', ['-tzf', file], { quiet: true }).out.split(/\r?\n/).map(name => name.trim());
 
 	for (const part of parts) {
 		if (!listed.some(name => name === part || name.startsWith(`${part}/`))) {

@@ -275,8 +275,8 @@ export function computeDecades(themes, marks) {
 }
 
 /**
- * Наше или зарубежное: сколько в паке русского, советского и русскоязычного,
- * а сколько всего остального.
+ * Откуда родом то, из чего собран пак: сколько в нём советского, российского,
+ * постсоветского и иностранного.
  *
  * Вопрос стоит у музыки и кино, и там он главный после самого жанра: «музпак»
  * одинаково называется и сборник русского рэпа, и сборник западной эстрады,
@@ -284,8 +284,12 @@ export function computeDecades(themes, marks) {
  * и наш, и не наш.
  *
  * Считается по числам, которые модель называет поштучно по ответам темы
- * (поля ro и fo, см. gemini.js), и с тем же покрытием, что и десятилетия:
- * у вопроса про мем или про столицы происхождения нет.
+ * (поле og, см. gemini.js), и той же арифметикой, что жанры и десятилетия:
+ * тема на шесть вопросов, где четыре ответа советские, а два иностранные, —
+ * это четыре вопроса советскому и два иностранному, а не вся тема одному.
+ *
+ * Покрытие то же и по той же причине, что у десятилетий: у вопроса про мем
+ * или про столицы происхождения нет.
  *
  * @returns {{origins: Array<{key: string, questions: number, share: number}>, coverage: number}}
  */
@@ -297,19 +301,16 @@ export function computeOrigin(themes, marks) {
 	for (const theme of themes) {
 		const weight = theme.questions > 0 ? theme.questions : 1;
 		total += weight;
-
-		const origin = marks.get(theme.key)?.origin;
-		const list = ORIGIN_KEYS.map(key => ({ key, count: origin?.[key] ?? 0 }));
-
-		known += spread(weights, list, weight);
+		known += spread(weights, marks.get(theme.key)?.origins, weight, key => ORIGIN_KEYS.includes(key));
 	}
 
 	if (total === 0 || known === 0) {
 		return { origins: [], coverage: 0 };
 	}
 
-	// Порядок здесь не по величине, а свой, всегда одинаковый: у полоски
-	// из двух кусков перескакивающие местами цвета читаются как разные полоски
+	// Порядок здесь не по величине, а свой, всегда одинаковый (см. ORIGINS):
+	// у полоски перескакивающие местами цвета читаются как разные полоски,
+	// а «иностранное» стоит в ней последним куском всегда
 	const origins = ORIGIN_KEYS
 		.map(key => ({ key, questions: weights.get(key) ?? 0, share: round((weights.get(key) ?? 0) / known) }))
 		.filter(part => part.questions > 0);
@@ -368,20 +369,25 @@ export function computeOrigin(themes, marks) {
  * @param {Array} themes темы из listThemes
  * @param {Map<string, {category: string, music: boolean, franchise: string, franchiseEn: string, area: string, areaEn: string, works: string[]}>} marks
  * @returns {Array<{name: string, themes: number, questions: number, share: number, kind: string}>}
- *   от частых к редким, только те, что встретились не реже franchiseMinThemes
+ *   от частых к редким, только те, что заняли свою часть пака (см. minThemes)
  */
 export function computeFranchises(themes, marks) {
 	return countNamed(themes, marks, mark => [
 		// Оба написания — одна сущность: «Атака титанов» и «Shingeki no Kyojin»
 		// пришли из одной темы, значит это одно произведение, и тема, где названо
 		// только английское имя, сойдётся с той, где названо только русское.
-		[mark?.franchise, mark?.franchiseEn],
+		// whole — «тема посвящена этому целиком», и вес темы достаётся ему весь
+		{ names: [mark?.franchise, mark?.franchiseEn], whole: true },
 		// Названное в ответах. Каждое имя — своя сущность: связывать их между собой
-		// нельзя, это разные произведения, случайно оказавшиеся в одной теме
-		...(mark?.works ?? []).map(name => [name]),
+		// нельзя, это разные произведения, случайно оказавшиеся в одной теме.
+		// Тема таким не посвящена — они в ней всего лишь прозвучали
+		...(mark?.works ?? []).map(name => ({ names: [name], whole: false })),
 	], {
 		kind: 'work',
 		limit: config.franchiseLimit,
+		// Порог считается от самого пака: две темы — это повтор, когда тем шесть,
+		// и случайность, когда их тридцать (см. franchiseThemeShare в settings.js)
+		minThemes: Math.max(config.franchiseMinThemes, Math.ceil(themes.length * config.franchiseThemeShare)),
 		// Область произведением не является, и что бы модель ни написала
 		// в поле произведения, повтором это не станет
 		skip: isAreaName,
@@ -404,7 +410,7 @@ export function computeFranchises(themes, marks) {
  * с повторами, а в ярлыке-мишени (см. kind в web/card.js).
  */
 export function computeAreas(themes, marks) {
-	return countNamed(themes, marks, mark => [[mark?.area, mark?.areaEn]], {
+	return countNamed(themes, marks, mark => [{ names: [mark?.area, mark?.areaEn], whole: true }], {
 		kind: 'area',
 		limit: config.areaLimit,
 	});
@@ -417,12 +423,30 @@ export function computeAreas(themes, marks) {
  *
  * @param {Array} themes темы из listThemes
  * @param {Map} marks разметка по ключу темы
- * @param {(mark: object) => Array<Array<string>>} entitiesOf сущности темы:
- *   каждая — список написаний ОДНОГО И ТОГО ЖЕ, которые надо связать между собой
+ * ————— почему упоминание весит один вопрос —————
+ *
+ * Вес темы делился между названным в ней поровну, и на угадайках это врало
+ * в разы. Модель видит не всю тему, а выжимку — первые несколько ответов
+ * (см. buildSample в siq.js), — и называет то, что в этой выжимке попалось.
+ * Тема «Что было дальше?» на шесть вопросов, где в выжимку попал один Оверлорд,
+ * отдавала Оверлорду все шесть: пак получал «Оверлорд, 8 вопросов» там, где
+ * на деле вопрос был один, и вставал в повторы выше настоящих.
+ *
+ * Поэтому названное в ответах весит один вопрос — ровно то, что про него
+ * известно наверняка: оно там прозвучало. Больше одного даётся только предмету
+ * темы (whole) — тому, чему тема посвящена целиком: тема про стенды ДжоДжо
+ * и есть шесть вопросов про ДжоДжо. А если названного в теме больше, чем в ней
+ * вопросов, вес делится поровну — сумма упоминаний темы её саму не перевешивает.
+ *
+ * @param {Array} themes темы из listThemes
+ * @param {Map} marks разметка по ключу темы
+ * @param {(mark: object) => Array<{names: string[], whole: boolean}>} entitiesOf
+ *   сущности темы: names — написания ОДНОГО И ТОГО ЖЕ, которые надо связать
+ *   между собой; whole — посвящена ли тема этому целиком
  * @param {{kind: string, limit: number, skip?: (name: string) => boolean}} options
  *   чем помечать найденное, сколько хранить и что не считать за название
  */
-function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
+function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null, minThemes = config.franchiseMinThemes }) {
 	const names = new Names();
 	const entries = [];
 	const found = [];
@@ -439,8 +463,8 @@ function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
 		// решает тот, кто считает: повторам не годятся области (см. franchise.js)
 		const real = name => Boolean(name) && !isFormatMarker(name) && !(skip && skip(name));
 
-		/** Разные сущности этой темы: по ним и делится её вес. */
-		const canons = new Set();
+		/** Разные сущности этой темы: чему она посвящена и что в ней прозвучало. */
+		const canons = new Map();
 
 		const remember = (raw, canon) => {
 			const key = nameKey(raw);
@@ -451,7 +475,7 @@ function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
 		};
 
 		for (const entity of entitiesOf(mark ?? {})) {
-			const spellings = entity.map(name => String(name ?? '').trim()).filter(real);
+			const spellings = (entity.names ?? []).map(name => String(name ?? '').trim()).filter(real);
 
 			if (spellings.length === 0) {
 				continue;
@@ -463,7 +487,10 @@ function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
 				continue;
 			}
 
-			canons.add(canon);
+			// Названное и предметом темы, и в её ответах остаётся предметом:
+			// тема, посвящённая «Наруто», не перестаёт быть посвящённой ему
+			// оттого, что «Наруто» назван ещё и в списке прозвучавшего
+			canons.set(canon, canons.get(canon) || entity.whole === true);
 
 			for (const raw of spellings) {
 				remember(raw, canon);
@@ -474,12 +501,12 @@ function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
 			return;
 		}
 
-		// Вес темы делится поровну: шесть вопросов про шесть разных тайтлов —
-		// это по вопросу на тайтл. Тема с одним предметом достаётся ему целиком
-		const share = weight / canons.size;
+		// Упоминание весит один вопрос, а названного больше, чем вопросов, —
+		// делим поровну. Предмету темы достаётся вся тема: он и есть тема
+		const mention = Math.min(1, weight / canons.size);
 
-		for (const canon of canons) {
-			found.push({ theme: index, canon, weight: share });
+		for (const [canon, whole] of canons) {
+			found.push({ theme: index, canon, weight: whole ? weight : mention });
 		}
 	});
 
@@ -510,7 +537,7 @@ function countNamed(themes, marks, entitiesOf, { kind, limit, skip = null }) {
 	}
 
 	return [...groups.entries()]
-		.filter(([, group]) => group.themes.size >= config.franchiseMinThemes)
+		.filter(([, group]) => group.themes.size >= minThemes)
 		.map(([root, group]) => ({
 			name: names.display(root),
 			themes: group.themes.size,

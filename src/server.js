@@ -246,6 +246,12 @@ function toPackage(row) {
 		decadeCoverage: row.decade_coverage,
 		origins: jsonOrDefault(row.origins, []),
 		originCoverage: row.origin_coverage,
+		// Чем всё это посчитано: версия правил разметки и модель, которая её делала.
+		// Карточка пишет их мелко и бледно в самом низу — не ради красоты, а чтобы
+		// по любому странному проценту было видно, старой ли он разметки и какой
+		// моделью получен (см. TOPICS_VERSION в src/config.js)
+		topicsVersion: row.topics_at ? row.topics_version : null,
+		topicsModel: row.topics_model,
 		summary: row.summary,
 		// Кому пак: возраст промежутком и доля мужчин в процентах. Это оценка
 		// модели по содержимому, а не статистика игроков, — так она и подписана
@@ -775,12 +781,15 @@ function getFacets() {
 		// собирается третья полоска карточки — «какой жанр музыки»
 		genreNames: GENRES,
 		genreShare: config.genreShare,
-		// Полоска «когда это вышло» и полоска «наше — зарубежное»: имена кусков
-		// и то, какой части пака должно хватить, чтобы их вообще показывать
+		// Полоска «когда это вышло» и полоска «откуда это»: имена кусков и то,
+		// какой части пака должно хватить, чтобы их вообще показывать
 		// (см. decadeCoverage в settings.js). Списки типов паков — про то, у кого
-		// вопрос осмысленный: десятилетия у солянки и «наше» у аниме не значат ничего
+		// вопрос осмысленный: десятилетия у солянки и происхождение у аниме
+		// не значат ничего. originShare — с какой доли кусок называется словами:
+		// кусков в полоске шесть, и подписывать все — значит писать про одну песню
 		originNames: ORIGINS,
 		originTopics: ORIGIN_TOPICS,
+		originShare: config.originShare,
 		originCoverage: config.originCoverage,
 		decadeTopics: DECADE_TOPICS,
 		decadeCoverage: config.decadeCoverage,

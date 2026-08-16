@@ -266,7 +266,7 @@ for (const [name, definition] of [
 	// года нет, и полоска, собранная по одной десятой пака, врала бы уверенно
 	['decades', `TEXT NOT NULL DEFAULT '[]'`],
 	['decade_coverage', 'REAL'],
-	// Наше и зарубежное: [{key: 'ru', questions, share}] — с тем же покрытием
+	// Откуда родом названное: [{key: 'su', questions, share}] — с тем же покрытием
 	// и по той же причине. Спрашивается у всех, показывается у музыки и кино
 	['origins', `TEXT NOT NULL DEFAULT '[]'`],
 	['origin_coverage', 'REAL'],

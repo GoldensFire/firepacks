@@ -630,7 +630,7 @@ const updateTopics = db.prepare(`
 const updateSummary = db.prepare(`
 	UPDATE packages SET summary = ?, summary_at = ?, summary_model = ?,
 		audience_from = ?, audience_to = ?, audience_male = ?, audience_at = ?,
-		language_ai = COALESCE(?, language_ai) WHERE id = ?
+		language_ai = COALESCE(?, NULLIF(language_ai, ''), '') WHERE id = ?
 `);
 
 /**
@@ -640,6 +640,12 @@ const updateSummary = db.prepare(`
  * тоже разом. Отметка audience_at ставится и тогда, когда аудитории в ответе
  * не оказалось: спросили — значит, спросили, и переспрашивать каждую ночь
  * незачем.
+ *
+ * Так же и с языком, только отметка у него своя же колонка. NULL в language_ai
+ * значит «ещё не спрашивали» — по нему пак и попадает в очередь; пустая строка
+ * значит «спросили, а модель промолчала», и второй раз он в очередь не встаёт.
+ * Сайту пустая строка и NULL — одно и то же: и там, и там он берёт язык
+ * из файла (см. LANG_SQL в cf/src/library.js).
  */
 function saveSummary(row, model, summary, audience, language = null) {
 	updateSummary.run(
@@ -652,7 +658,8 @@ function saveSummary(row, model, summary, audience, language = null) {
 		Date.now(),
 		// Промолчавшая про язык модель не должна стирать прошлый ответ: язык
 		// у пака один и тот же от разбора к разбору, а «не сказала» — это
-		// не «языка нет» (COALESCE в самом запросе)
+		// не «языка нет». Зато пустую строку она ставит, и это отметка
+		// «спрашивали» (COALESCE в самом запросе)
 		language,
 		row.id,
 	);
@@ -1641,7 +1648,7 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 	const genres = computeGenres(themes, marks, topic);
 	// Когда вышло названное в паке и откуда оно родом. Считается у всех паков
 	// и хранится тоже у всех: показывать это или нет, решает сайт по типу пака
-	// (десятилетия у «прочего» смысла не имеют, «наше и зарубежное» — у аниме),
+	// (десятилетия у «прочего» смысла не имеют, происхождение — у аниме),
 	// а пересчёт порогов и ярлыков модель переспрашивать не должен
 	const { decades, coverage: decadeCoverage } = computeDecades(themes, marks);
 	const { origins, coverage: originCoverage } = computeOrigin(themes, marks);
@@ -1813,10 +1820,13 @@ async function refreshSummaries() {
 	}
 
 	const weaker = weakerModelSql('summary_model');
-	// Паку, описанному до появления оценки аудитории, вопрос задаётся заново:
-	// спрашивается она тем же запросом, что и описание, и переспросить его —
-	// единственный способ её получить (см. audience_at в db.js)
-	const condition = resummary ? '' : `AND (p.summary_at IS NULL OR p.audience_at IS NULL${weaker.where})`;
+	// Паку, описанному до появления оценки аудитории или вопроса про язык, вопрос
+	// задаётся заново: спрашиваются они тем же запросом, что и описание,
+	// и переспросить его — единственный способ их получить (см. audience_at
+	// и language_ai в db.js)
+	const condition = resummary
+		? ''
+		: `AND (p.summary_at IS NULL OR p.audience_at IS NULL OR p.language_ai IS NULL${weaker.where})`;
 	const target = targetSql();
 	const priority = priorityOrderSql();
 	const pending = db.prepare(`
@@ -1981,7 +1991,12 @@ async function refreshAnalysis() {
 	const needTopics = retopics
 		? '1'
 		: `(p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION}${weakTopics.where})`;
-	const needSummary = resummary ? '1' : `(p.summary_at IS NULL OR p.audience_at IS NULL${weakSummary.where})`;
+	// language_ai IS NULL — «про язык не спрашивали ни разу». Отдельным условием,
+	// потому что паки, описанные до появления вопроса про язык, иначе не встали бы
+	// в очередь никогда: summary_at и audience_at у них давно проставлены
+	const needSummary = resummary
+		? '1'
+		: `(p.summary_at IS NULL OR p.audience_at IS NULL OR p.language_ai IS NULL${weakSummary.where})`;
 	const target = targetSql();
 	const priority = priorityOrderSql();
 

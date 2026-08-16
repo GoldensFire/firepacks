@@ -557,9 +557,11 @@ function createShareBar(parts, className, suffix) {
  * упорядочивания тут не нужно вовсе — сама доля написана рядом словами.
  *
  * Куски мельче половины процента в подпись не идут: в полоске тонкая цветная
- * черта честнее пустоты, а в строке «0% HTML» — только лишнее слово.
+ * черта честнее пустоты, а в строке «0% HTML» — только лишнее слово. Полоска
+ * происхождения просит порог повыше и называет его сама: кусков в ней шесть,
+ * и подписывать все шесть значит писать про одну песню из полусотни.
  */
-function createShareLegend(parts) {
+function createShareLegend(parts, least = 0.5) {
 	const total = parts.reduce((sum, part) => sum + part.value, 0);
 
 	if (total <= 0) {
@@ -570,7 +572,7 @@ function createShareLegend(parts) {
 
 	const visible = parts
 		.map(part => ({ ...part, percent: (part.value / total) * 100 }))
-		.filter(part => part.percent >= 0.5);
+		.filter(part => part.percent >= least);
 
 	for (const part of visible) {
 		const item = element('span', 'shares__legend-item');
@@ -588,8 +590,9 @@ function createShareLegend(parts) {
  * Полоска вместе с её подписью. caption — вопрос, написанный над полоской:
  * он есть только у нижней («Из чего состоит пак?»), потому что к третьей подряд
  * полоске подписи под ней уже мало — читаются они как продолжение верхних.
+ * least — с какой доли кусок называется словами под полоской.
  */
-function createShareRow(parts, className, suffix, title, caption) {
+function createShareRow(parts, className, suffix, title, caption, least) {
 	const bar = createShareBar(parts, className, suffix);
 
 	if (!bar) {
@@ -606,7 +609,7 @@ function createShareRow(parts, className, suffix, title, caption) {
 
 	row.append(bar);
 
-	const legend = createShareLegend(parts);
+	const legend = createShareLegend(parts, least);
 
 	if (legend) {
 		row.append(legend);
@@ -781,12 +784,19 @@ function decadeName(decade) {
 }
 
 /**
- * Четвёртая полоска: наше или зарубежное.
+ * Четвёртая полоска: откуда родом то, что в паке.
  *
  * Вопрос стоит у музыки и кино, и там он главный после жанра. «Музпак»
  * одинаково называется и сборник русского рэпа, и сборник западной эстрады,
  * а собираются под них разные компании, и жанр на это не отвечает: рок бывает
  * и наш, и не наш. У аниме-пака вопрос бессмысленный, и полоски там нет.
+ *
+ * Кусков в полоске шесть (см. ORIGINS в src/settings.js), а словами под ней
+ * названы не все: только те, что взяли свою десятую часть. Полоска отвечает
+ * на вопрос «чьё это всё», и «60% Советское, 30% Российское» на него отвечает,
+ * а приписка «2% Казахское» — это уже не про пак, а про одну песню в нём.
+ * В самой полоске такой кусок остаётся: тонкая цветная черта честнее пустоты,
+ * и подсказка при наведении назовёт его полностью.
  *
  * Порог покрытия тот же и по той же причине, что у десятилетий: у вопроса
  * про мем происхождения нет, и считать по нему весь пак нельзя.
@@ -810,7 +820,7 @@ function createOrigins(pack) {
 	}));
 
 	return createShareRow(parts, 'shares__bar--origins', 'названного в паке',
-		'Наше это или зарубежное', 'Наше или зарубежное?');
+		'Откуда то, что в паке', 'Откуда это всё?', (facets.originShare ?? 0.1) * 100);
 }
 
 /**
@@ -2021,7 +2031,43 @@ function createCard(pack, options = {}) {
 
 	card.append(actions);
 
+	const stamp = createStamp(pack);
+
+	if (stamp) {
+		card.append(stamp);
+	}
+
 	return card;
+}
+
+/**
+ * Клеймо внизу карточки: версия правил разметки и модель, которая её сделала.
+ *
+ * Всё, что написано на карточке выше, — доли тематик, жанры, годы, повторы,
+ * происхождение — посчитано не сайтом, а моделью, и у разных паков разными:
+ * что-то размечено слабой моделью весной, что-то сильной прошлой ночью,
+ * и правила счёта с тех пор менялись не раз (см. TOPICS_VERSION). Пока этого
+ * нигде не было написано, странный процент выглядел ошибкой сайта, а на деле
+ * означал старую разметку.
+ *
+ * Отсюда и вид: два слова у самого низа, мелко и бледно, без единого лишнего
+ * слова — «v14 · 3.1-flash-lite». Читать это никого не просят; оно для того,
+ * кто уже споткнулся и спрашивает «чем это посчитано».
+ */
+function createStamp(pack) {
+	// Приставка «gemini-» одна и та же у всех и не отличает ничего
+	const model = (pack.topicsModel ?? '').replace(/^gemini-/, '');
+	const parts = [pack.topicsVersion ? `v${pack.topicsVersion}` : '', model].filter(Boolean);
+
+	if (parts.length === 0) {
+		return null;
+	}
+
+	const stamp = element('div', 'card__stamp', parts.join(' · '));
+	stamp.title = `Разметка пака: версия правил ${pack.topicsVersion ?? '—'}`
+		+ `${model ? `, модель ${pack.topicsModel}` : ''}`;
+
+	return stamp;
 }
 
 /**

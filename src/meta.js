@@ -286,6 +286,10 @@ export function buildSitemap(rows, origin) {
 		// Топ пакетов меняется чаще топа авторов: он считается за три месяца,
 		// и каждая новая неделя выбрасывает из него верхнюю строчку
 		`\t<url><loc>${escapeHtml(origin)}/top</loc><changefreq>weekly</changefreq><priority>0.7</priority></url>`,
+		// Список тем, которым посвящён целый пак. Меняется он медленно — новая
+		// строка появляется, когда про что-то соберут второй пак, — но искать
+		// «пак по Цивилизации» приходят именно поисковиком
+		`\t<url><loc>${escapeHtml(origin)}/subjects</loc><changefreq>weekly</changefreq><priority>0.6</priority></url>`,
 	];
 
 	for (const row of rows) {

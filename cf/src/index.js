@@ -13,7 +13,7 @@
 // в статике, — то есть /api/… и /auth/….
 
 import {
-	listPackages, getPackage, getFacets, getTopAuthors, getProfile, listSitemap,
+	listPackages, getPackage, getFacets, getSubjects, getTopAuthors, getProfile, listSitemap,
 	setPlayed, setPlayedKeys, isPlayedPack, playedCount,
 	setPlanned, setPlannedKeys, plannedCount,
 	matchList, namePacks,
@@ -47,7 +47,7 @@ import {
 const PUBLIC_TTL = 300;
 
 /** Что вообще можно так отдавать: только чтение и только общее. */
-const CACHEABLE = new Set(['/api/packages', '/api/facets', '/api/authors', '/api/package']);
+const CACHEABLE = new Set(['/api/packages', '/api/facets', '/api/subjects', '/api/authors', '/api/package']);
 
 /**
  * Карта сайта — самый дорогой запрос, какой тут есть: она читает все паки разом.
@@ -217,6 +217,12 @@ export default {
 				]);
 
 				return share(json({ ...facets, played, planned, hasDiscord: hasDiscord(env), user }));
+			}
+
+			// Полный список типов «пак целиком про одно». Отдельным методом
+			// от facets: он длинный (сотни строк), а нужен одной странице из шести
+			if (url.pathname === '/api/subjects') {
+				return share(json(await getSubjects(env.DB)));
 			}
 
 			if (url.pathname === '/api/authors') {

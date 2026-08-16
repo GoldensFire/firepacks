@@ -3,14 +3,14 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>Топ пакетов для «Своей игры» за 3 месяца — FirePacks</title>
-	<meta name="description" content="Самые играемые паки SIGame за последние три месяца: по десятке в каждой категории — солянки, аниме-паки, игропаки, кинопаки, мультпаки, музпаки и всё остальное.">
-	<link rel="canonical" href="/top">
+	<title>Паки целиком про одно — FirePacks</title>
+	<meta name="description" content="Все темы, которым посвящён целый пак для «Своей игры»: Вархаммер, Цивилизация, Гарри Поттер, футбол, Вторая мировая — полный список с числом паков у каждой.">
+	<link rel="canonical" href="/subjects">
 	<meta property="og:type" content="website">
 	<meta property="og:site_name" content="FirePacks">
 	<meta property="og:locale" content="ru_RU">
-	<meta property="og:title" content="Топ пакетов для «Своей игры» за 3 месяца">
-	<meta property="og:description" content="По десять самых играемых паков в каждой категории: солянки, аниме, игры, кино, мультики, музыка и остальное.">
+	<meta property="og:title" content="Паки целиком про одно">
+	<meta property="og:description" content="Полный список тем, которым посвящён целый пак: от «Наруто» и «Доты» до футбола и Второй мировой.">
 	<link rel="icon" href="/favicon.ico" sizes="any">
 	<link rel="stylesheet" href="/style.css">
 </head>
@@ -78,24 +78,26 @@
 		</div>
 	</header>
 
-	<main class="top">
+	<main class="top subjects-page">
 		<div class="top__head">
-			<h1 class="top__heading">Топ пакетов за 3 месяца</h1>
+			<h1 class="top__heading">Паки целиком про одно</h1>
 			<p class="hint" id="hint">Загрузка…</p>
 		</div>
 
-		<!-- Быстрый выбор категории. Это и есть вся страница: нажали на категорию —
-		     под ней десятка самых играемых паков этой категории. Кнопки рисует
-		     скрипт (см. web/top.js), потому что цвет и значок у каждой категории
-		     свои, те же самые, что у типов паков в библиотеке. -->
-		<nav class="top-tabs" id="tabs" aria-label="Категории"></nav>
+		<!-- Поиск идёт по уже приехавшему списку: ходить за ним второй раз незачем,
+		     он приезжает целиком одним ответом (см. /api/subjects). Ищется и по
+		     названию, и по его латинскому ключу — «dota» находит «Доту», потому
+		     что раскладку ради строки поиска никто не переключает. -->
+		<div class="subjects-page__search">
+			<input id="subjectSearch" class="select" type="search"
+				placeholder="Найти тему: Вархаммер, dota, футбол" autocomplete="off">
+		</div>
 
-		<div id="list" class="grid top-list"></div>
+		<div id="list" class="subjects-page__list"></div>
 	</main>
 
 	<script src="/common.js"></script>
 	<script src="/icons.js"></script>
-	<script src="/card.js"></script>
-	<script src="/top.js"></script>
+	<script src="/subjects.js"></script>
 </body>
 </html>

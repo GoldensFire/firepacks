@@ -65,7 +65,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS, GENRES } from './config.js';
+import { config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS, GENRES, ORIGINS, decadeName } from './config.js';
 import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
 import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi.js';
@@ -74,7 +74,11 @@ import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
 import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useModel, activeModel, tokensLine } from './gemini.js';
 import { MODELS, modelRank, usage, usageLine, usageReport, nextSpareModel } from './models.js';
-import { listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeOtherKinds, computeGenres } from './topics.js';
+import {
+	listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeOtherKinds,
+	computeGenres, computeDecades, computeOrigin,
+} from './topics.js';
+import { isCategoryName } from './franchise.js';
 
 const args = process.argv.slice(2);
 const has = flag => args.includes(flag);
@@ -619,12 +623,14 @@ const updateTopics = db.prepare(`
 	UPDATE packages SET topic_shares = ?, primary_topic = ?, primary_share = ?,
 		franchises = ?, franchise_top = ?, franchise_top_share = ?, other_kinds = ?,
 		genres = ?, genre_topic = ?,
+		decades = ?, decade_coverage = ?, origins = ?, origin_coverage = ?,
 		topics_at = ?, topics_model = ?, topics_version = ${TOPICS_VERSION} WHERE id = ?
 `);
 
 const updateSummary = db.prepare(`
 	UPDATE packages SET summary = ?, summary_at = ?, summary_model = ?,
-		audience_from = ?, audience_to = ?, audience_male = ?, audience_at = ? WHERE id = ?
+		audience_from = ?, audience_to = ?, audience_male = ?, audience_at = ?,
+		language_ai = COALESCE(?, language_ai) WHERE id = ?
 `);
 
 /**
@@ -635,7 +641,7 @@ const updateSummary = db.prepare(`
  * не оказалось: спросили — значит, спросили, и переспрашивать каждую ночь
  * незачем.
  */
-function saveSummary(row, model, summary, audience) {
+function saveSummary(row, model, summary, audience, language = null) {
 	updateSummary.run(
 		summary || null,
 		Date.now(),
@@ -644,6 +650,10 @@ function saveSummary(row, model, summary, audience) {
 		audience?.to ?? null,
 		audience?.male ?? null,
 		Date.now(),
+		// Промолчавшая про язык модель не должна стирать прошлый ответ: язык
+		// у пака один и тот же от разбора к разбору, а «не сказала» — это
+		// не «языка нет» (COALESCE в самом запросе)
+		language,
 		row.id,
 	);
 }
@@ -1629,6 +1639,12 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 	// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
 	// у солянки жанр называть не от чего, и список выйдет пустым
 	const genres = computeGenres(themes, marks, topic);
+	// Когда вышло названное в паке и откуда оно родом. Считается у всех паков
+	// и хранится тоже у всех: показывать это или нет, решает сайт по типу пака
+	// (десятилетия у «прочего» смысла не имеют, «наше и зарубежное» — у аниме),
+	// а пересчёт порогов и ярлыков модель переспрашивать не должен
+	const { decades, coverage: decadeCoverage } = computeDecades(themes, marks);
+	const { origins, coverage: originCoverage } = computeOrigin(themes, marks);
 
 	updateTopics.run(
 		JSON.stringify(shares ?? {}),
@@ -1640,6 +1656,10 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		JSON.stringify(kinds),
 		JSON.stringify(genres),
 		genres.length > 0 ? topic : null,
+		JSON.stringify(decades),
+		decadeCoverage,
+		JSON.stringify(origins),
+		originCoverage,
 		Date.now(),
 		model,
 		row.id,
@@ -1693,6 +1713,19 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		const names = GENRES[topic].list;
 		say(step, `      ${GENRES[topic].question.toLowerCase()} `
 			+ genres.map(genre => `${names[genre.key]} ${Math.round(genre.share * 100)}%`).join(', '));
+	}
+
+	// Каких лет пак и чьё в нём содержимое. Покрытие пишется рядом нарочно:
+	// «нулевые 60%» по четверти пака и по всему паку — это разные утверждения,
+	// и в логе они обязаны различаться
+	if (decades.length > 0) {
+		say(step, `      годы: ${decades.map(d => `${decadeName(d.key)} ${Math.round(d.share * 100)}%`).join(', ')}`
+			+ ` (по ${Math.round(decadeCoverage * 100)}% пака)`);
+	}
+
+	if (origins.length > 0) {
+		say(step, `      откуда: ${origins.map(o => `${ORIGINS[o.key]} ${Math.round(o.share * 100)}%`).join(', ')}`
+			+ ` (по ${Math.round(originCoverage * 100)}% пака)`);
 	}
 }
 
@@ -1812,14 +1845,14 @@ async function refreshSummaries() {
 			const model = activeModel();
 
 			try {
-				const { summary, audience } = await describePack({
+				const { summary, audience, language } = await describePack({
 					name: row.name ?? '',
 					tags: jsonOrDefault(row.tags, []),
 					about: row.comment_text ?? '',
 					themes,
 				});
 
-				saveSummary(row, model, summary, audience);
+				saveSummary(row, model, summary, audience, language);
 
 				if (summary) {
 					described++;
@@ -2012,7 +2045,7 @@ async function refreshAnalysis() {
 						saveTopics('analyze', label, row, themes, answer.marks, model, tally);
 					}
 
-					saveSummary(row, model, answer.summary, answer.audience);
+					saveSummary(row, model, answer.summary, answer.audience, answer.language);
 
 					if (answer.summary) {
 						described++;
@@ -2108,16 +2141,44 @@ function recalcTopics() {
 	// прежде, только без жанров.
 	const dropGenres = db.prepare(`UPDATE packages SET genres = '[]', genre_topic = NULL, topics_version = 0 WHERE id = ?`);
 
+	// Область, повторяющая ярлык пака, из сохранённого вычищается прямо здесь,
+	// не дожидаясь модели.
+	//
+	// Дождаться её тут нельзя по времени: суточного лимита хватает на сотни
+	// паков при базе в тысячи, и «Cinema», «Movies», «Games» и «Erudition»
+	// простояли бы в списке «Пак целиком про одно» ещё месяцы — четырьмя
+	// строками по полсотни паков в каждой, ничего не говорящими о паках.
+	// А сказать про них нечего и по существу: «пак целиком про кино» — это
+	// в точности кинопак, ярлык которого стоит рядом (см. NOT_AREAS
+	// в franchise.js). Английские названия оттуда же и той же природы.
+	//
+	// Переспрашивать модель ради этого не надо: убирается лишняя строка,
+	// а не считается новая, — и убрать её можно по тому, что уже записано.
+	const rewriteFranchises = db.prepare('UPDATE packages SET franchises = ? WHERE id = ?');
+
 	let labelled = 0;
 	let dropped = 0;
+	let cleaned = 0;
 
 	for (const row of rows) {
 		const shares = jsonOrDefault(row.topic_shares, null);
 		const { topic, share } = toPrimary(shares, row.question_count ?? 0);
 
+		const stored = jsonOrDefault(row.franchises, []);
+		// Проверяется по названию, а не по виду записи. Вид («область» или
+		// «произведение») появился не сразу, и у записей постарше его нет вовсе;
+		// а главное — модель кладёт «Games» и «Movies» в оба поля одинаково,
+		// и произведением такое не становится (см. isCategoryName в franchise.js)
+		const kept = stored.filter(f => !isCategoryName(f.name));
+
+		if (kept.length !== stored.length) {
+			rewriteFranchises.run(JSON.stringify(kept), row.id);
+			cleaned++;
+		}
+
 		// Сами франшизы пересчитать без модели нельзя — она называет их по темам, —
 		// но какая из сохранённых главная, видно и так
-		const top = jsonOrDefault(row.franchises, [])
+		const top = kept
 			.filter(f => f.themes >= config.franchiseMinThemes)
 			.sort((a, b) => b.questions - a.questions)[0] ?? null;
 
@@ -2134,7 +2195,8 @@ function recalcTopics() {
 	}
 
 	say('recalc', `тематики: обработано ${rows.length}, ярлык получили ${labelled}`
-		+ `${dropped > 0 ? `, у ${dropped} сменился тип — жанры переспросим` : ''}`);
+		+ `${dropped > 0 ? `, у ${dropped} сменился тип — жанры переспросим` : ''}`
+		+ `${cleaned > 0 ? `, у ${cleaned} убрана область, повторявшая ярлык` : ''}`);
 }
 
 /** Общий пересчёт по сохранённым данным: и уровни, и ярлыки. */

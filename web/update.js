@@ -474,6 +474,70 @@ async function copyLog() {
 	}, 1800);
 }
 
+/**
+ * По каким правилам размечена база: строка на версию разметки.
+ *
+ * Версия растёт, когда меняется смысл сохранённого (см. TOPICS_VERSION
+ * в src/config.js), и всё, что размечено по старым правилам, ждёт своей ночи
+ * в очереди к модели. Очередь длинная — суточного лимита хватает на сотни
+ * паков при базе в тысячи, — и вопрос «сколько ещё идти» до сих пор не имел
+ * ответа нигде: лог говорит про сегодняшний запуск, а не про базу.
+ *
+ * Полоска у каждой строки — доля от базы. Она здесь не для красоты: одиннадцать
+ * тысяч и триста читаются глазами одинаково, пока не встанут рядом длиной.
+ */
+async function loadVersions() {
+	const box = $('versions');
+
+	let info;
+
+	try {
+		info = await (await fetch('/api/update/versions')).json();
+	} catch {
+		box.textContent = '';
+		box.append(element('p', 'hint', 'Не удалось посчитать версии данных.'));
+		return;
+	}
+
+	box.textContent = '';
+
+	const total = info.total || 1;
+
+	// Неразмеченные — такая же строка, как остальные, и стоит она первой:
+	// это самый большой долг очереди, и прятать его в подпись незачем
+	const rows = [
+		...(info.unmarked > 0 ? [{ name: 'Не размечены', count: info.unmarked, stale: true }] : []),
+		...(info.versions ?? []).map(item => ({
+			name: `Версия ${item.version}`,
+			count: item.count,
+			// Нынешняя версия — это «сделано», всё остальное — «переспросим».
+			// Разница видна цветом: считать номера глазами не нужно
+			stale: item.version < info.current,
+		})),
+	];
+
+	for (const row of rows) {
+		const percent = (row.count / total) * 100;
+		const line = element('div', `version${row.stale ? ' version--stale' : ''}`);
+
+		line.append(
+			element('span', 'version__name', row.name),
+			element('span', 'version__count', `${row.count} (${percent < 0.5 ? '<1' : Math.round(percent)}%)`),
+		);
+
+		const track = element('div', 'version__track');
+		const fill = element('div', 'version__fill');
+		fill.style.width = `${percent}%`;
+		track.append(fill);
+		line.append(track);
+
+		box.append(line);
+	}
+
+	box.append(element('p', 'hint', `Нынешние правила — версия ${info.current}. `
+		+ `Паков в базе: ${info.total}.`));
+}
+
 async function init() {
 	// Кнопки оживают первыми. Всё остальное здесь ходит по сети, а любая заминка
 	// там оставляла страницу с нарисованной, но мёртвой кнопкой «Запустить»
@@ -522,11 +586,14 @@ async function init() {
 	renderSteps();
 
 	await loadModels();
+	loadVersions();
 
-	// Пока идёт работа, остаток запросов тает — раз в полминуты спрашиваем заново
+	// Пока идёт работа, остаток запросов тает, а размеченного прибывает —
+	// раз в полминуты спрашиваем заново и то, и другое
 	setInterval(() => {
 		if (running) {
 			loadModels();
+			loadVersions();
 		}
 	}, 30000);
 

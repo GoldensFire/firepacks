@@ -1,7 +1,44 @@
 // Доли тематик в паке. Категорию каждой темы определяет Gemini, здесь только арифметика.
 
-import { config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES, isNotableGenre } from './config.js';
+import {
+	config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES, isNotableGenre,
+	ORIGIN_KEYS, DECADE_MIN,
+} from './config.js';
 import { Names, nameKey, isFormatMarker, isAreaName, mergeRelated } from './franchise.js';
+
+/** Доля до тысячных: доли пака дальше третьего знака не значат ничего. */
+const round = value => Math.round(value * 1000) / 1000;
+
+/**
+ * Делит вес темы между тем, что в ней названо, — в той пропорции, в какой
+ * модель это назвала.
+ *
+ * Одна арифметика на три полоски: жанры, десятилетия и «наше — зарубежное»
+ * считаются совершенно одинаково, и разница между ними только в том, какой
+ * список брать. Тема на шесть вопросов, где три ответа рэп, два поп и один
+ * рок, — это три вопроса рэпу, два попу и один року, а не шесть вопросов рэпу.
+ *
+ * @param {Map} weights куда прибавлять
+ * @param {Array<{key: *, count: number}>} list что назвала модель
+ * @param {number} weight вес темы целиком
+ * @param {(key: *) => boolean} accept годится ли ключ
+ * @returns {number} сколько веса разошлось: остальное в счёт не идёт
+ */
+function spread(weights, list, weight, accept = () => true) {
+	const good = (list ?? []).filter(item => item?.count > 0 && accept(item.key));
+	const total = good.reduce((sum, item) => sum + item.count, 0);
+
+	if (total === 0) {
+		return 0;
+	}
+
+	for (const item of good) {
+		const share = (weight * item.count) / total;
+		weights.set(item.key, (weights.get(item.key) ?? 0) + share);
+	}
+
+	return weight;
+}
 
 /** Устойчивый ключ темы: по нему ответ модели возвращается на своё место. */
 export function themeKey(packageId, roundIndex, themeIndex) {
@@ -156,15 +193,16 @@ export function computeGenres(themes, marks, topic) {
 			continue;
 		}
 
-		const genre = topic === MUSIC_KEY
-			? (mark.music ? mark.musicGenre : '')
-			: (mark.category === topic ? mark.genre : '');
+		// Жанры темы приходят списком с числами — «поп 3, рэп 2, рок 1», —
+		// и вес темы делится между ними в этой же пропорции. Раньше жанр был
+		// один, и вся тема доставалась ему целиком: тема-угадайка, где подряд
+		// идут четыре разных жанра, отдавала весь свой вес самому частому,
+		// и музпак выходил «поп на 90%» при попе в четверть (см. THEME_RULES)
+		const list = topic === MUSIC_KEY
+			? (mark.music ? mark.musicGenres : [])
+			: (mark.category === topic ? mark.genres : []);
 
-		if (!genre || !Object.hasOwn(GENRES[topic].list, genre)) {
-			continue;
-		}
-
-		weights.set(genre, (weights.get(genre) ?? 0) + weight);
+		spread(weights, list, weight, key => Object.hasOwn(GENRES[topic].list, key));
 	}
 
 	if (total === 0) {
@@ -184,6 +222,99 @@ export function computeGenres(themes, marks, topic) {
 	const notable = passed.slice(config.genreLimit).filter(genre => isNotableGenre(topic, genre.key));
 
 	return [...shown, ...notable];
+}
+
+/**
+ * Когда вышло то, из чего собран пак: разбивка по десятилетиям.
+ *
+ * Полоска эта отвечает на вопрос, которого не задаёт ни один ярлык. «Музпак»
+ * и «музпак» — это и сборник восьмидесятых, и сборник прошлогодних тиктоков,
+ * а играются они разными людьми и по-разному; то же и с кино, и с играми,
+ * и с аниме. Возраст аудитории про это намекает, но косвенно: пак про игры
+ * нулевых интересен тридцатилетним — а вот что он именно про нулевые, видно
+ * только отсюда.
+ *
+ * Считается там же, где жанры, и той же арифметикой: модель называет годы
+ * поштучно по ответам темы (поле y, см. gemini.js), вес темы делится между
+ * названными десятилетиями.
+ *
+ * Возвращается вместе с покрытием — какой частью пака эта разбивка посчитана.
+ * Года есть далеко не у всего: у темы про мемы или про столицы его нет и быть
+ * не должно, и полоска, собранная по одной десятой пака, врала бы с уверенным
+ * видом. Показывать её или нет, решает уже сайт (см. decadeCoverage).
+ *
+ * @returns {{decades: Array<{key: number, questions: number, share: number}>, coverage: number}}
+ */
+export function computeDecades(themes, marks) {
+	const weights = new Map();
+	let total = 0;
+	let known = 0;
+
+	for (const theme of themes) {
+		const weight = theme.questions > 0 ? theme.questions : 1;
+		total += weight;
+		known += spread(weights, marks.get(theme.key)?.decades, weight, key => key >= DECADE_MIN);
+	}
+
+	if (total === 0 || known === 0) {
+		return { decades: [], coverage: 0 };
+	}
+
+	// Доли считаются от НАЗВАННОГО, а не от всего пака: полоска отвечает
+	// на вопрос «каких лет это всё», и вопросы без года в этот счёт не входят
+	// (иначе полоска была бы вечно недозаполнена, и читалось бы это как
+	// «остальное не посчитано»). А насколько ответу вообще можно верить,
+	// говорит покрытие — оно уезжает отдельным числом
+	const decades = [...weights.entries()]
+		.map(([key, questions]) => ({ key, questions, share: round(questions / known) }))
+		.filter(decade => decade.share >= config.decadeShare)
+		.sort((a, b) => a.key - b.key)
+		.slice(0, config.decadeLimit);
+
+	return { decades, coverage: round(known / total) };
+}
+
+/**
+ * Наше или зарубежное: сколько в паке русского, советского и русскоязычного,
+ * а сколько всего остального.
+ *
+ * Вопрос стоит у музыки и кино, и там он главный после самого жанра: «музпак»
+ * одинаково называется и сборник русского рэпа, и сборник западной эстрады,
+ * а собираются под них разные компании. Жанр на это не отвечает — рок бывает
+ * и наш, и не наш.
+ *
+ * Считается по числам, которые модель называет поштучно по ответам темы
+ * (поля ro и fo, см. gemini.js), и с тем же покрытием, что и десятилетия:
+ * у вопроса про мем или про столицы происхождения нет.
+ *
+ * @returns {{origins: Array<{key: string, questions: number, share: number}>, coverage: number}}
+ */
+export function computeOrigin(themes, marks) {
+	const weights = new Map();
+	let total = 0;
+	let known = 0;
+
+	for (const theme of themes) {
+		const weight = theme.questions > 0 ? theme.questions : 1;
+		total += weight;
+
+		const origin = marks.get(theme.key)?.origin;
+		const list = ORIGIN_KEYS.map(key => ({ key, count: origin?.[key] ?? 0 }));
+
+		known += spread(weights, list, weight);
+	}
+
+	if (total === 0 || known === 0) {
+		return { origins: [], coverage: 0 };
+	}
+
+	// Порядок здесь не по величине, а свой, всегда одинаковый: у полоски
+	// из двух кусков перескакивающие местами цвета читаются как разные полоски
+	const origins = ORIGIN_KEYS
+		.map(key => ({ key, questions: weights.get(key) ?? 0, share: round((weights.get(key) ?? 0) / known) }))
+		.filter(part => part.questions > 0);
+
+	return { origins, coverage: round(known / total) };
 }
 
 /**

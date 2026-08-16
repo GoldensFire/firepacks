@@ -254,6 +254,22 @@ for (const [name, definition] of [
 	// или нет, — иначе сломанный файл переспрашивался бы каждую ночь до скончания
 	// века (см. scanVk и parsePackages в indexer.js).
 	['recheck', 'INTEGER NOT NULL DEFAULT 0'],
+	// Язык пака по его тексту, а не по полю в файле. Поле в файле ставит редактор
+	// (там по умолчанию язык системы автора), и по нему английских паков в базе
+	// выходило больше, чем их есть на свете, а половина числилась «без указания».
+	// Модель называет язык по вопросам, темам и ответам (см. LANGUAGE_RULES
+	// в gemini.js), и сайт предпочитает её ответ, а на поле из файла падает
+	// только там, где модель промолчала. NULL — «ещё не спрашивали».
+	['language_ai', 'TEXT'],
+	// Когда вышло то, из чего собран пак: [{key: 1990, questions, share}].
+	// Рядом — какой частью пака эта разбивка посчитана: у вопроса про столицы
+	// года нет, и полоска, собранная по одной десятой пака, врала бы уверенно
+	['decades', `TEXT NOT NULL DEFAULT '[]'`],
+	['decade_coverage', 'REAL'],
+	// Наше и зарубежное: [{key: 'ru', questions, share}] — с тем же покрытием
+	// и по той же причине. Спрашивается у всех, показывается у музыки и кино
+	['origins', `TEXT NOT NULL DEFAULT '[]'`],
+	['origin_coverage', 'REAL'],
 	// Какой моделью размечен пак и какой описан. Нужны, чтобы слабую разметку
 	// можно было потом переспросить у сильной модели, не трогая уже хорошую
 	// (см. --upgrade в indexer.js). NULL значит «размечено до появления колонки».
@@ -302,7 +318,23 @@ db.exec('CREATE INDEX IF NOT EXISTS ix_packages_vk_ts ON packages (vk_ts)');
 // scripts/export-d1.js), а наверху они дороже вдвойне — там читанные строки
 // не просто время, а расход по тарифу.
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_topic ON packages (status, primary_topic)');
-db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_lang ON packages (status, language)');
+// Язык считается по двум колонкам сразу: сперва тот, что назвала модель, и лишь
+// потом тот, что записан в файле (см. LANG_SQL в server.js). Обе лежат в одном
+// указателе, чтобы подсчёт по всей базе по-прежнему собирался, не поднимая строк.
+//
+// Указатель со старым набором колонок сносится: «если ещё нет» существующий
+// не трогает, и база, заведённая прошлой версией, осталась бы с указателем
+// без language_ai — то есть подсчёт языков поднимал бы все строки целиком.
+{
+	const langIndex = 'ix_packages_ok_lang';
+	const known = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`).get(langIndex)?.sql ?? '';
+
+	if (known && !known.includes('language_ai')) {
+		db.exec(`DROP INDEX ${langIndex}`);
+	}
+
+	db.exec(`CREATE INDEX IF NOT EXISTS ${langIndex} ON packages (status, language_ai, language)`);
+}
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_tags ON packages (status, tags)');
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_vk_ts ON packages (status, vk_ts)');
 

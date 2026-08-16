@@ -60,8 +60,14 @@ const DURATION_UNITS = [
 let facets = null;
 let profile = null;
 
-/** Какая вкладка открыта: 'planned' или 'played'. Переживает перерисовку страницы. */
-let tab = 'planned';
+/**
+ * Какая вкладка открыта: 'planned' или 'played'. Переживает перерисовку страницы.
+ *
+ * Запланированное открыто по умолчанию, но счётчик «Сыграно» в шапке (см.
+ * renderTopbarCounters в web/common.js) ведёт сразу на сыгранное — заглянуть
+ * в запланированное после клика по чужому числу было бы лишним шагом.
+ */
+let tab = new URLSearchParams(window.location.search).get('tab') === 'played' ? 'played' : 'planned';
 
 /**
  * Какие страницы списков открыты. Паки приезжают по две дюжины за раз — столько

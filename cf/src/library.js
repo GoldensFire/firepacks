@@ -13,6 +13,7 @@
 
 import {
 	settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
+	ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
 } from '../../src/settings.js';
 import { jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
 import { readPackList, matchPackList, askedNames, chunk, NAME_KEY_SQL } from '../../src/packlist.js';
@@ -41,9 +42,13 @@ const shareOf = key => `COALESCE(json_extract(p.topic_shares, '$.${key}'), -1)`;
 
 /**
  * Язык пака одним ключом: «ru-RU» и «ru» — это один и тот же русский, а пак,
- * в котором язык не указан вовсе, попадает в unknown.
+ * в котором язык не указан нигде, попадает в unknown.
+ *
+ * Сперва спрашивается у модели (language_ai), потом у файла (language): поле
+ * в файле ставит редактор, по умолчанию — язык системы автора, и по нему
+ * половина базы числилась «без указания» (см. тот же LANG_SQL в src/server.js).
  */
-const LANG_SQL = `COALESCE(NULLIF(LOWER(SUBSTR(p.language, 1, 2)), ''), 'unknown')`;
+const LANG_SQL = `COALESCE(NULLIF(LOWER(SUBSTR(COALESCE(NULLIF(p.language_ai, ''), p.language), 1, 2)), ''), 'unknown')`;
 
 const SORTS = {
 	// Порядковый номер строки в таблице к «новизне» отношения не имеет: паки
@@ -165,6 +170,25 @@ async function subjectGroups(db) {
 	return subjectsCache;
 }
 
+/**
+ * Все типы паков «целиком про одно», без обрезки, — для отдельной страницы.
+ *
+ * В колонке фильтров их только сорок (см. subjectLimit), а всего сотни, и в
+ * хвосте у списка всё самое любопытное — «Цивилизация», «Вархаммер», «Твин
+ * Пикс». Пропав из колонки, они пропадали совсем. Считается тот же самый
+ * список, что и для колонки, и лежит в той же копилке — лишней ходки в базу
+ * страница не стоит.
+ */
+export async function getSubjects(db) {
+	const subjects = await subjectGroups(db);
+
+	return {
+		subjects: subjects.map(group => ({ name: group.name, key: group.key, count: group.count })),
+		subjectPackShare: settings.subjectPackShare,
+		subjectLimit: settings.subjectLimit,
+	};
+}
+
 function toPackage(row, counts) {
 	// Подпись из файла разбирается на людей: «Vieldy,Pa4ok,Slime» — это трое,
 	// и нажиматься на карточке каждый должен по отдельности. Разбор общий
@@ -190,7 +214,10 @@ function toPackage(row, counts) {
 		rounds: roundsForApi(row.rounds),
 		contentStat: jsonOrDefault(row.content_stat, {}),
 		authorDifficulty: row.author_difficulty,
-		language: row.language,
+		// Язык: тот, что назвала модель, а нет его — тот, что записан в файле
+		// (см. LANG_SQL). Карточка показывает один язык и не должна знать,
+		// откуда он взялся
+		language: row.language_ai || row.language,
 		packDate: row.pack_date,
 		size: row.size,
 		questionCount: row.question_count,
@@ -217,6 +244,14 @@ function toPackage(row, counts) {
 		// genreTopic — из чьего списка эти ключи: он же называет и саму полоску
 		genres: jsonOrDefault(row.genres, []),
 		genreTopic: row.genre_topic,
+		// Когда вышло то, из чего собран пак, и откуда оно родом. Рядом с каждой
+		// разбивкой — какой частью пака она посчитана: у вопроса про столицы
+		// ни года, ни происхождения нет, и полоска, собранная по одной десятой
+		// пака, врала бы уверенно. Показывать её или нет, решает карточка
+		decades: jsonOrDefault(row.decades, []),
+		decadeCoverage: row.decade_coverage,
+		origins: jsonOrDefault(row.origins, []),
+		originCoverage: row.origin_coverage,
 		summary: row.summary,
 		// Кому пак: возраст промежутком и доля мужчин в процентах. Это оценка
 		// модели по содержимому, а не статистика игроков, — так она и подписана
@@ -773,6 +808,16 @@ export async function getFacets(db) {
 		// собирается третья полоска карточки — «какой жанр музыки»
 		genreNames: GENRES,
 		genreShare: settings.genreShare,
+		// Полоска «когда это вышло» и полоска «наше — зарубежное»: имена кусков
+		// и то, какой части пака должно хватить, чтобы их вообще показывать
+		// (см. decadeCoverage в settings.js). Списки типов паков — про то, у кого
+		// вопрос осмысленный: десятилетия у солянки и «наше» у аниме не значат ничего
+		originNames: ORIGINS,
+		originTopics: ORIGIN_TOPICS,
+		originCoverage: settings.originCoverage,
+		decadeTopics: DECADE_TOPICS,
+		decadeCoverage: settings.decadeCoverage,
+		decadeMin: DECADE_MIN,
 		// Собирать базу тут нечем: ни страницы обновления, ни ссылки на неё
 		readOnly: true,
 		playerUri: settings.playerUri,

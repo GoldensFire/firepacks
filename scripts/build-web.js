@@ -107,7 +107,10 @@ const GOOGLE_ANALYTICS = `<!-- Google tag (gtag.js) -->`
  * Скрипты и стили, к которым дописывается отпечаток содержимого. Ссылки на них
  * стоят в вёрстке, и сборка их переписывает: /app.js → /app.js?v=1a2b3c4d.
  */
-const VERSIONED = ['app.js', 'common.js', 'icons.js', 'card.js', 'pack.js', 'authors.js', 'profile.js', 'top.js', 'style.css'];
+const VERSIONED = [
+	'app.js', 'common.js', 'icons.js', 'card.js', 'pack.js',
+	'authors.js', 'profile.js', 'top.js', 'subjects.js', 'style.css',
+];
 
 /**
  * Значок туда же, хотя лежит он не в web, а в корне проекта. Имя у него одно

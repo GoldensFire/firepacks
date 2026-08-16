@@ -4,7 +4,10 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { config, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS, GENRES } from './config.js';
+import {
+	config, TOPICS_VERSION, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS, GENRES,
+	ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
+} from './config.js';
 import {
 	db, jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
 } from './db.js';
@@ -69,10 +72,18 @@ const shareOf = key => `COALESCE(json_extract(p.topic_shares, '$.${key}'), -1)`;
 
 /**
  * Язык пака одним ключом: «ru-RU» и «ru» — это один и тот же русский, а пак,
- * в котором язык не указан вовсе, попадает в unknown. Имена ключей живут
+ * в котором язык не указан нигде, попадает в unknown. Имена ключей живут
  * в LANGUAGE_NAMES.
+ *
+ * Спрашивается сперва у модели (language_ai) и только потом у файла (language).
+ * Порядок именно такой, и он не про доверие к нейросети вообще, а про то,
+ * откуда берётся поле в файле: его ставит редактор, по умолчанию — язык
+ * системы автора. Оттого в базе английских паков по этому полю выходило
+ * больше, чем их есть на свете, а половина базы числилась «без указания»,
+ * и фильтр «Язык пака» отбирал не по языку, а по тому, у кого какая Windows.
+ * Модель же читает сами вопросы, темы и ответы (см. LANGUAGE_RULES в gemini.js).
  */
-const LANG_SQL = `COALESCE(NULLIF(LOWER(SUBSTR(p.language, 1, 2)), ''), 'unknown')`;
+const LANG_SQL = `COALESCE(NULLIF(LOWER(SUBSTR(COALESCE(NULLIF(p.language_ai, ''), p.language), 1, 2)), ''), 'unknown')`;
 
 const SORTS = {
 	// Порядковый номер строки в таблице к «новизне» отношения не имеет: паки
@@ -198,7 +209,10 @@ function toPackage(row) {
 		rounds: roundsForApi(row.rounds),
 		contentStat: jsonOrDefault(row.content_stat, {}),
 		authorDifficulty: row.author_difficulty,
-		language: row.language,
+		// Язык: тот, что назвала модель, а нет его — тот, что записан в файле
+		// (см. LANG_SQL). Карточка показывает один язык и не должна знать,
+		// откуда он взялся
+		language: row.language_ai || row.language,
 		packDate: row.pack_date,
 		size: row.size,
 		questionCount: row.question_count,
@@ -224,6 +238,14 @@ function toPackage(row) {
 		// genreTopic — из чьего списка эти ключи: он же называет и саму полоску
 		genres: jsonOrDefault(row.genres, []),
 		genreTopic: row.genre_topic,
+		// Когда вышло то, из чего собран пак, и откуда оно родом. Рядом с каждой
+		// разбивкой — какой частью пака она посчитана: у вопроса про столицы
+		// ни года, ни происхождения нет, и полоска, собранная по одной десятой
+		// пака, врала бы уверенно. Показывать её или нет, решает карточка
+		decades: jsonOrDefault(row.decades, []),
+		decadeCoverage: row.decade_coverage,
+		origins: jsonOrDefault(row.origins, []),
+		originCoverage: row.origin_coverage,
 		summary: row.summary,
 		// Кому пак: возраст промежутком и доля мужчин в процентах. Это оценка
 		// модели по содержимому, а не статистика игроков, — так она и подписана
@@ -565,6 +587,67 @@ const sitemapQuery = db.prepare(`
 	SELECT id, name, file_name, vk_ts FROM packages WHERE status = 'ok' ORDER BY id
 `);
 
+/**
+ * Все типы паков «целиком про одно», без обрезки, — для отдельной страницы.
+ *
+ * В колонке фильтров их только сорок (см. subjectLimit): колонка не список
+ * всего на свете, в ней смотрят, чего много. Но список этот вправду длинный —
+ * сотни строк, — и в хвосте у него всё самое любопытное: «Цивилизация»,
+ * «Вархаммер», «Твин Пикс». Пропав из колонки, они пропадали совсем: найти
+ * их можно было только случайно наткнувшись на такой пак в выдаче.
+ *
+ * Поэтому страница целиком: тот же самый список, но весь, с поиском по нему.
+ * Считается он и так на каждый /api/facets — здесь берётся уже готовый
+ * (см. subjectGroups), и лишнего запроса к базе это не стоит.
+ */
+function getSubjects() {
+	return {
+		subjects: subjectGroups().map(group => ({ name: group.name, key: group.key, count: group.count })),
+		subjectPackShare: config.subjectPackShare,
+		// Сколько из них показывает колонка фильтров: страница пишет об этом
+		// прямо, чтобы не выглядела вторым, случайно другим списком
+		subjectLimit: config.subjectLimit,
+	};
+}
+
+/**
+ * По каким правилам размечена база: сколько паков какой версией разметки.
+ *
+ * Версия растёт, когда меняется смысл сохранённого (см. TOPICS_VERSION
+ * в src/config.js), и всё, что размечено по старым правилам, ждёт своей ночи
+ * в очереди к модели. Очередь эта длинная — суточного лимита хватает на сотни
+ * паков при базе в одиннадцать тысяч, — и вопрос «сколько ещё идти» до сих пор
+ * не имел ответа нигде. Из лога его не видно: он говорит про сегодняшний
+ * запуск, а не про базу.
+ *
+ * Отсюда он виден сразу: строка на версию, число паков, доля. Заодно видно
+ * и то, чего не расскажет ни один счётчик, — что паков, размеченных четвёртой
+ * версией, всё ещё три сотни, и они там уже полгода.
+ *
+ * Считается по указателю на topics_version? Нет: указателя на неё нет, и это
+ * нарочно. Запрос идёт раз в открытие страницы обновления, а лишний указатель
+ * платится на каждой записи разметки — то есть на каждом разобранном паке.
+ */
+function getTopicsVersions() {
+	const rows = db.prepare(`
+		SELECT topics_version AS version, COUNT(*) AS count
+		FROM packages WHERE status = 'ok' AND topics_at IS NOT NULL
+		GROUP BY topics_version ORDER BY version DESC
+	`).all();
+
+	return {
+		current: TOPICS_VERSION,
+		versions: rows.map(row => ({ version: row.version, count: row.count })),
+		// Разобранные, но ни разу не размеченные: у них версии нет вовсе, и это
+		// не «версия ноль», а «модель до них не дошла». В одну строку с версиями
+		// такое не сложить — считается отдельно и пишется отдельно
+		unmarked: db.prepare(`
+			SELECT COUNT(*) AS c FROM packages WHERE status = 'ok' AND topics_at IS NULL
+		`).get().c,
+		total: db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'ok'`).get().c,
+	};
+}
+
 function getFacets() {
 	// Теги в паках пишут кто как: «Аниме», «аниме», «anime». Считаем их одним и тем же
 	// и показываем то написание, которое встречается чаще.
@@ -692,6 +775,16 @@ function getFacets() {
 		// собирается третья полоска карточки — «какой жанр музыки»
 		genreNames: GENRES,
 		genreShare: config.genreShare,
+		// Полоска «когда это вышло» и полоска «наше — зарубежное»: имена кусков
+		// и то, какой части пака должно хватить, чтобы их вообще показывать
+		// (см. decadeCoverage в settings.js). Списки типов паков — про то, у кого
+		// вопрос осмысленный: десятилетия у солянки и «наше» у аниме не значат ничего
+		originNames: ORIGINS,
+		originTopics: ORIGIN_TOPICS,
+		originCoverage: config.originCoverage,
+		decadeTopics: DECADE_TOPICS,
+		decadeCoverage: config.decadeCoverage,
+		decadeMin: DECADE_MIN,
 		// На хостинге собирать базу нечем: сайт не показывает ни страницы обновления, ни ссылки на неё
 		readOnly: config.readOnly,
 		playerUri: config.playerUri,
@@ -1385,6 +1478,13 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
+		// Полный список типов «пак целиком про одно». Отдельным методом от facets:
+		// он длинный (сотни строк), а нужен одной странице из шести
+		if (url.pathname === '/api/subjects') {
+			sendJson(response, getSubjects());
+			return;
+		}
+
 		if (url.pathname === '/api/authors') {
 			sendJson(response, getTopAuthors(url.searchParams));
 			return;
@@ -1464,6 +1564,13 @@ const server = http.createServer(async (request, response) => {
 
 		if (url.pathname === '/api/update/steps') {
 			sendJson(response, { steps: UPDATE_STEPS, hasGemini: Boolean(config.geminiKey), hasVkToken: Boolean(config.vkToken) });
+			return;
+		}
+
+		// По каким правилам размечена база: сколько паков какой версией разметки.
+		// Спрашивается заново, как и расход: за ночь работы числа меняются
+		if (url.pathname === '/api/update/versions') {
+			sendJson(response, getTopicsVersions());
 			return;
 		}
 
@@ -1599,6 +1706,7 @@ const server = http.createServer(async (request, response) => {
 			'/profile': '/profile.html',
 			'/authors': '/authors.html',
 			'/top': '/top.html',
+			'/subjects': '/subjects.html',
 		};
 
 		sendStatic(response, pages[url.pathname] ?? url.pathname, request);

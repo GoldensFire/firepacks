@@ -521,13 +521,24 @@ function renderTopbarCounters(facets) {
 		box.append(item);
 	};
 
+	// «Сыграно» и «В планах» ведут в профиль, сразу на нужную вкладку: это те же
+	// списки, что там показаны, и до сих пор к ним приходилось идти через отдельную
+	// ссылку «Профиль», а потом ещё переключать вкладку руками.
+	const addLink = (label, value, tab) => {
+		const item = element('a', 'counters__item counters__item--link', `${label}: `);
+		item.href = `/profile?tab=${tab}`;
+		item.title = `Перейти в профиль: ${label.toLowerCase()}`;
+		item.append(element('b', null, formatNumber(value)));
+		box.append(item);
+	};
+
 	add('Паков', facets.total);
-	add('Сыграно', played);
+	addLink('Сыграно', played, 'played');
 
 	// Запланированное показывается, только когда оно есть: пустой счётчик
 	// в шапке — это строка про то, чего человек ни разу не делал
 	if (planned > 0) {
-		add('В планах', planned);
+		addLink('В планах', planned, 'planned');
 	}
 }
 
@@ -563,16 +574,10 @@ function renderTopbarAccount(facets) {
 		return;
 	}
 
+	// «Выйти» здесь больше нет: это действие теперь живёт на самой странице
+	// профиля, у имени и аватара (см. renderWho в web/profile.js), а не в шапке,
+	// которая одна на весь сайт и есть на каждой странице
 	box.append(createAccountLink(facets.user));
-
-	const out = element('button', 'button button--ghost', 'Выйти');
-	out.type = 'button';
-	out.addEventListener('click', async () => {
-		await fetch('/auth/logout', { method: 'POST' });
-		window.location.reload();
-	});
-
-	box.append(out);
 }
 
 /** Ссылка «Играть» на официальный движок с уже подставленным паком. */

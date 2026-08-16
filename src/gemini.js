@@ -321,7 +321,12 @@ const SOURCES = `Чего не знаешь — посмотри, а не уга
 - Ничего не нашлось — отвечай пустыми строками, как и велено ниже. Выдумка хуже
   молчания.`;
 
-const THEME_RULES = `Для каждой темы определи, о чём она, и выбери ровно одну категорию (поле c):
+const THEME_RULES = `У каждой темы стоит номер — тот, под которым она дана в списке.
+Верни его в поле i, не меняя: по нему ответ возвращается на своё место. Нумерация
+идёт с нуля и своя у каждого пака: дано несколько паков — у второго темы снова
+считаются с нуля, а не подряд за первым.
+
+Для каждой темы определи, о чём она, и выбери ровно одну категорию (поле c):
 
 anime    — аниме: японская (и в этом же смысле корейская, китайская) анимация,
            сериалы и полнометражки, персонажи и сэйю аниме
@@ -1056,8 +1061,17 @@ function cleanWorks(value) {
 	return [...seen.values()].slice(0, WORKS_LIMIT);
 }
 
-/** Разметка темы, про которую модель ничего не сказала. */
+/**
+ * Разметка темы, про которую модель ничего не сказала.
+ *
+ * Помечена отдельным полем нарочно. По самой разметке «прочее от модели»
+ * и «модель промолчала» неразличимы, а разница между ними огромная: первое —
+ * ответ, второе — его отсутствие. По этой пометке считается marked, и пак,
+ * где не разобралась ни одна тема, переспрашивается, а не записывается солянкой
+ * из ничего (см. analyzePack).
+ */
 const UNMARKED = {
+	unmarked: true,
 	category: 'other',
 	music: false,
 	franchise: '',
@@ -1155,6 +1169,55 @@ function areaOf(answer) {
 const cleanOrigins = value => cleanCounted(value, key => ORIGIN_KEYS.includes(key));
 
 /**
+ * Кому какой ответ: раскладывает объекты ответа по темам, которые их вызвали.
+ *
+ * По номеру темы (поле i), пока номера сходятся, и по порядку, когда не сошлись.
+ * Второе — не запасной путь на всякий случай, а починка настоящей беды: одним
+ * запросом уезжает несколько паков (см. analyzePacks), нумерация тем у каждого
+ * своя и начинается с нуля, и модель на втором-третьем паке нет-нет да и продолжит
+ * сквозной счёт первого. Номера тогда не попадают ни в одну тему — и пак, целиком
+ * разобранный моделью, доставался нам пустым: ни одной размеченной темы, «прочее»
+ * на весь пак, ярлык «солянка» и записанная дата разметки, после которой пак
+ * в очередь больше не встанет. Так испортилось около каждого пятого пака.
+ *
+ * Порядок — надёжная опора, потому что о нём и просит запрос: «по объекту
+ * на каждую тему, в том же порядке, в каком темы даны». Берётся он, только когда
+ * ответов ровно столько же, сколько тем: иначе непонятно, где именно модель
+ * пропустила тему, и подставлять ответы наугад хуже, чем не подставлять.
+ *
+ * Номера считаются сошедшимися, только если каждый попадает в свою тему и все они
+ * разные. Проверка строгая нарочно: сдвинутая на единицу нумерация (1..n вместо
+ * 0..n-1) прошла бы частичную проверку и молча приписала каждой теме ответ соседней.
+ */
+function alignAnswers(batch, answers) {
+	const spots = answers.map(answer => Number(answer?.i));
+	const byNumber = spots.every(at => Number.isInteger(at) && at >= 0 && at < batch.length)
+		&& new Set(spots).size === spots.length;
+	const inOrder = answers.length === batch.length;
+
+	return answers.map((answer, index) => ({
+		theme: byNumber ? batch[spots[index]] : (inOrder ? batch[index] : undefined),
+		answer,
+	}));
+}
+
+/**
+ * Сколько тем модель и вправду разобрала: остальным разметка досталась
+ * от молчания (см. UNMARKED).
+ */
+function marked(marks) {
+	let count = 0;
+
+	for (const mark of marks.values()) {
+		if (mark.unmarked !== true) {
+			count++;
+		}
+	}
+
+	return count;
+}
+
+/**
  * Раскладывает ответы модели по ключам тем и отсеивает всё, чего в списках нет.
  *
  * Вынесено отдельно, потому что ответ про темы приходит двумя путями: своим
@@ -1166,9 +1229,7 @@ const cleanOrigins = value => cleanCounted(value, key => ORIGIN_KEYS.includes(ke
  * @param {Map} result куда складывать
  */
 function collectMarks(batch, answers, result = new Map()) {
-	for (const answer of answers) {
-		const theme = batch[answer?.i];
-
+	for (const { theme, answer } of alignAnswers(batch, answers)) {
 		if (theme && EXCLUSIVE_TOPIC_KEYS.includes(answer.c)) {
 			result.set(theme.key, {
 				category: answer.c,
@@ -1667,8 +1728,17 @@ export async function analyzePack(pack) {
 			throw new GeminiError(`ответ оборван: ${answers.length} тем из ${themes.length}`, 0);
 		}
 
+		const marks = collectMarks(themes, answers);
+
+		// Ответ есть, а разобранных тем в нём нет ни одной — значит, он не про этот
+		// пак: либо номера тем чужие, либо категории не из списка. Записать такое
+		// значило бы навсегда объявить пак «прочим» (см. alignAnswers)
+		if (themes.length > 0 && marked(marks) === 0) {
+			throw new GeminiError('ни одна тема не разобрана', 0);
+		}
+
 		return {
-			marks: collectMarks(themes, answers),
+			marks,
 			summary: cleanSummary(value?.s),
 			audience: cleanAudience(value),
 			language: cleanLanguage(value?.lg),
@@ -1823,8 +1893,17 @@ export async function analyzePacks(packs) {
 			return null;
 		}
 
+		const collected = collectMarks(themes, marks);
+
+		// Ответ про пак есть, а разобранных тем в нём нет: он не про этот пак.
+		// Спрашиваем заново — по одному пак разбирается своими номерами тем,
+		// и путать их там не с чем (см. alignAnswers)
+		if (themes.length > 0 && marked(collected) === 0) {
+			return null;
+		}
+
 		return {
-			marks: collectMarks(themes, marks),
+			marks: collected,
 			summary: cleanSummary(answer.s),
 			audience: cleanAudience(answer),
 			language: cleanLanguage(answer.lg),

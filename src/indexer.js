@@ -279,31 +279,61 @@ const NOTHING_KNOWN = `(CASE WHEN p.topics_at IS NULL AND p.summary_at IS NULL
 	THEN 0 ELSE 1 END)`;
 
 /**
+ * Второй ключ того же порядка: у кого этого шага не было ни разу.
+ *
+ * NOTHING_KNOWN отвечает на вопрос про всю карточку целиком, и этого мало. В очередь
+ * шага встают не только нетронутые паки, но и давно размеченные — те, у кого разметка
+ * старее нынешних правил или сделана моделью послабее (см. TOPICS_VERSION
+ * и weakerModelSql). Для NOTHING_KNOWN и те и другие одинаковы: раз пак хоть чем-то
+ * заполнен, он в общей куче, а дальше решает дата — и переразметка позавчерашнего
+ * пака обгоняла пак, у которого разметки нет вообще. То есть работа уходила на то,
+ * что на сайте и так показано, вместо того, где пусто.
+ *
+ * Отсюда отдельный ключ у каждого шага: «версии нет» идёт впереди «версия старая».
+ * Пишется как `... IS NOT NULL`: у нетронутого пака выходит 0, и обычный ASC ставит
+ * его первым — так же, как `p.vk_ts IS NULL` в порядке по свежести.
+ */
+const NEVER = {
+	topics: 'p.topics_at IS NOT NULL',
+	summary: 'p.summary_at IS NOT NULL',
+	// Общий шаг спрашивает про разметку и описание одним запросом (см. refreshAnalysis),
+	// и нетронутый для него тот, у кого нет ни того, ни другого
+	analyze: '(p.topics_at IS NOT NULL OR p.summary_at IS NOT NULL)',
+};
+
+/**
  * Чем начинать очередь: `--first=fresh|virgin|oldest`.
  *
  * Порядок решает всё, потому что очередь не проходится до конца (см. NEWEST_FIRST):
  * вопрос не в том, что будет сделано, а в том, что останется несделанным.
+ *
+ * @param {string} [step] шаг, для которого строится очередь: от него зависит,
+ *   что считать нетронутым паком (см. NEVER)
  */
-const ORDERS = {
-	fresh: NEWEST_FIRST,
-	virgin: `${NOTHING_KNOWN}, ${OLDEST_FIRST}`,
-	oldest: OLDEST_FIRST,
-};
+function orderSql(step) {
+	if (firstOrder !== 'virgin') {
+		return firstOrder === 'oldest' ? OLDEST_FIRST : NEWEST_FIRST;
+	}
+
+	const never = Object.hasOwn(NEVER, step) ? `${NEVER[step]}, ` : '';
+
+	return `${NOTHING_KNOWN}, ${never}${OLDEST_FIRST}`;
+}
 
 const ORDER_NAMES = {
 	fresh: 'сначала свежие',
-	virgin: 'сначала совсем неразобранные, потом самые давние',
+	virgin: 'сначала совсем неразобранные, потом ни разу не считанные, потом самые давние',
 	oldest: 'сначала самые давние',
 };
 
-const firstOrder = Object.hasOwn(ORDERS, text('first')) ? text('first') : 'fresh';
+const firstOrder = Object.hasOwn(ORDER_NAMES, text('first')) ? text('first') : 'fresh';
 
 /**
  * То же самое, но постоянно избранные авторы идут впереди всех (см. priorityAuthors).
  * Внутри избранных порядок такой же, какой выбран ключом --first.
  */
-function priorityOrderSql() {
-	const order = ORDERS[firstOrder];
+function priorityOrderSql(step) {
+	const order = orderSql(step);
 
 	if (priorityAuthors.length === 0) {
 		return { order, params: [] };
@@ -1749,7 +1779,7 @@ async function refreshTopics() {
 		? ''
 		: `AND (p.topics_at IS NULL OR p.topics_version < ${TOPICS_VERSION}${weaker.where})`;
 	const target = targetSql();
-	const priority = priorityOrderSql();
+	const priority = priorityOrderSql('topics');
 	const pending = db.prepare(`
 		SELECT p.id, p.name, p.rounds FROM packages p
 		WHERE p.status = 'ok' AND p.rounds <> '[]' ${condition}${target.where}
@@ -1828,7 +1858,7 @@ async function refreshSummaries() {
 		? ''
 		: `AND (p.summary_at IS NULL OR p.audience_at IS NULL OR p.language_ai IS NULL${weaker.where})`;
 	const target = targetSql();
-	const priority = priorityOrderSql();
+	const priority = priorityOrderSql('summary');
 	const pending = db.prepare(`
 		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text FROM packages p
 		WHERE p.status = 'ok' ${condition}${target.where}
@@ -1998,7 +2028,7 @@ async function refreshAnalysis() {
 		? '1'
 		: `(p.summary_at IS NULL OR p.audience_at IS NULL OR p.language_ai IS NULL${weakSummary.where})`;
 	const target = targetSql();
-	const priority = priorityOrderSql();
+	const priority = priorityOrderSql('analyze');
 
 	// comment_text — это то, что автор написал под паком в обсуждении: единственное
 	// место, где сказано, что он задумывал. Модели оно уходит подсказкой, а не

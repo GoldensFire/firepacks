@@ -25,6 +25,7 @@
 //   node src/indexer.js --packs=12,34   работать только с этими паками (номера из адреса /pack/N)
 //   node src/indexer.js --authors=А,Б   работать только с паками этих авторов
 //   node src/indexer.js --fresh=3       только паки, выложенные за последние трое суток
+//   node src/indexer.js --tail          обойти не тему целиком, а её хвост по --fresh
 //   node src/indexer.js --first=virgin  чем начинать очередь: fresh (свежие, по умолчанию),
 //                                       virgin (совсем неразобранные, потом самые давние),
 //                                       oldest (самые давние)
@@ -71,7 +72,7 @@ import {
 } from './config.js';
 import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
-import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi.js';
+import { readTopic as readTopicApi, readTopicSince, hasVkApi, refreshDocumentUrl } from './vkapi.js';
 import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
 import { fetchPackageStats, summarize, toLevel } from './stats.js';
@@ -82,6 +83,8 @@ import {
 	computeGenres, computeForms, computeDecades, computeOrigin,
 } from './topics.js';
 import { isCategoryName } from './franchise.js';
+import { ensureThumb } from './thumbs.js';
+import { thumbName } from './settings.js';
 
 const args = process.argv.slice(2);
 const has = flag => args.includes(flag);
@@ -107,6 +110,19 @@ const upgrade = has('--upgrade');
 const serial = has('--serial');
 const maxPages = value('pages', Infinity);
 const limit = value('limit', Infinity);
+
+/**
+ * `--tail`: обойти не тему целиком, а только её хвост — сообщения не старше
+ * отсечки свежести (см. --fresh ниже и readTopicSince в vkapi.js).
+ *
+ * Отдельным ключом, а не само собой при `--fresh`, и это не мелочь. Обход темы
+ * целиком делает две работы разом: находит новое и замечает, что в старом
+ * сообщении подменили или убрали файл. Вторая работа возможна только у того,
+ * кто прочитал тему до конца, — и делать её должен кто-то. Ночь читает всю тему
+ * и делает обе; ежечасный обход берёт этот ключ и делает одну, зато за секунды
+ * вместо десяти минут (см. .github/workflows/hourly.yml).
+ */
+const tail = has('--tail');
 
 /**
  * Сколько паков разбирать одновременно.
@@ -950,11 +966,33 @@ function applyPending(pending, known) {
 	return counts;
 }
 
+/**
+ * Насколько раньше отсечки свежести начинать читать хвост темы.
+ *
+ * Отсечка считается от нынешнего мига (`--fresh=1` — сутки назад), а пак попадает
+ * в тему тогда, когда его выложили. Между тем и другим лежат все обычные
+ * неурядицы: пропущенный по расписанию запуск, обход, отложенный очередью,
+ * сообщение, у которого дата правки моложе даты выкладки. Лишние сутки хвоста
+ * стоят одного-двух запросов к ВК, а сужать их до точности незачем: отбирает
+ * свежие паки всё равно не обход, а условие по vk_ts (см. targetSql).
+ */
+const TAIL_MARGIN_MS = 86_400_000;
+
 async function scanVk() {
 	const useApi = hasVkApi();
-	const readTopic = useApi ? readTopicApi : readTopicHtml;
 
-	say('vk', `обход обсуждений (${useApi ? 'через API' : 'разбором страниц, ключа нет'})`);
+	// Хвостом читается тема тогда, когда об этом попросили ключом и когда есть
+	// от чего считать хвост. Без ключа ВК так нельзя вовсе: разбор страниц темы
+	// с конца читать не умеет
+	const tailOnly = tail && useApi && freshSince !== null;
+	const readTopic = !useApi
+		? readTopicHtml
+		: tailOnly
+			? (url, options) => readTopicSince(url, freshSince - TAIL_MARGIN_MS, options)
+			: readTopicApi;
+
+	say('vk', `обход обсуждений (${useApi ? 'через API' : 'разбором страниц, ключа нет'}`
+		+ `${tailOnly ? `, только хвост — сообщения за последние ${freshDays + 1} суток` : ''})`);
 
 	const tally = { added: 0, edited: 0, back: 0, pending: [] };
 	const bar = track('vk');
@@ -1040,7 +1078,7 @@ async function scanVk() {
 			// Недобор в пару сообщений тревогой не считается: пока идёт обход,
 			// в теме удаляют, и отсчёт под нами сдвигается сам собой. Страница —
 			// та мера, ниже которой это точно не поломка.
-			if (announced !== null && announced - read > 100 && maxPages === Infinity) {
+			if (!tailOnly && announced !== null && announced - read > 100 && maxPages === Infinity) {
 				broken++;
 				console.error(`[ВК] тема прочитана не до конца: ${read} сообщений из ${announced}. `
 					+ 'Собранное осталось в базе, недочитанное подберётся следующим обходом.');
@@ -1055,15 +1093,20 @@ async function scanVk() {
 	const known = db.prepare('SELECT COUNT(*) AS c FROM packages').get().c;
 
 	// Недочитанный обход не имеет права никого хоронить: «файла в сообщении нет»
-	// и «до сообщения не дошли» выглядят одинаково, а разница в цене — целая база
-	const incomplete = broken > 0 || gaps > 0;
+	// и «до сообщения не дошли» выглядят одинаково, а разница в цене — целая база.
+	//
+	// Обход хвоста неполон всегда и по своему устройству: старой части темы он
+	// не видел вовсе. Это не поломка, а его назначение — и потому он поставлен
+	// сюда же, рядом с обрывом: судить о пропавших файлах ему нечем ровно так же
+	const incomplete = broken > 0 || gaps > 0 || tailOnly;
 
 	const applied = incomplete
 		? { replaced: 0, gone: 0, refused: tally.pending.length }
 		: applyPending(tally.pending, known);
 
 	if (incomplete && tally.pending.length > 0) {
-		say('vk', `подмен и пропаж отложено: ${tally.pending.length}. Обход был неполным, и верить им нельзя.`);
+		say('vk', `подмен и пропаж отложено: ${tally.pending.length}. `
+			+ `${tailOnly ? 'Читался только хвост темы' : 'Обход был неполным'}, и верить им нельзя.`);
 	}
 
 	say('vk', `просмотрено сообщений с файлами: ${comments}`
@@ -1080,9 +1123,35 @@ async function scanVk() {
 
 const LOGO_EXTENSIONS = new Set(['.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.gif', '.webp', '.bmp', '.avif']);
 
+/** Есть ли у обложки уменьшенная копия — та самая, что показывается на карточке. */
+const hasThumb = logoFile => Boolean(logoFile) && fs.existsSync(path.join(config.thumbsPath, thumbName(logoFile)));
+
+/** Лежит ли у нас оригинал обложки: из него копию можно сделать когда угодно. */
+const hasOriginal = logoFile => Boolean(logoFile) && fs.existsSync(path.join(config.logosPath, logoFile));
+
 /**
  * Скачивает логотип пака из того же архива. Оглавление уже прочитано,
  * так что это ещё два range-запроса.
+ *
+ * Тут же делается и уменьшенная копия — та, что показывается на карточке.
+ * Раньше её делала выкладка (см. scripts/build-web.js), и на домашней машине
+ * это было безразлично: оригинал лежит в data/logos и никуда не девается,
+ * копию можно посчитать хоть завтра.
+ *
+ * В облаке — не безразлично, и стоило это четырёх паков без обложек.
+ * Оригиналы на полку не ездят (семьдесят мегабайт, см. scripts/state.js) —
+ * ездят только готовые копии. Значит, оригинал живёт ровно столько, сколько
+ * живёт одноразовый раннер: скачали при разборе, а посчитать копию должны были
+ * в самом конце запуска. Не дошло до конца — обход убили по времени, выкладку
+ * отключили ключом, шаг упал — и раннер уносит оригинал с собой. В базу же при
+ * этом уже записано logo_state='ok', и шаг логотипов такой пак больше не берёт:
+ * логотип у него есть, просто показать его нечем. Навсегда.
+ *
+ * Копия поэтому считается здесь, сразу и в том же запуске. Не вышло уменьшить
+ * (уменьшать нечем или картинка не по зубам) — это не ошибка: logo_state
+ * остаётся 'ok', оригинал на месте, и копию посчитает выкладка. А вот
+ * в облаке, где оригиналу не жить, такой пак попадёт в починку (см. fetchLogos).
+ *
  * @returns {Promise<{file: string|null, state: string}>}
  */
 async function fetchLogo(archive, logoName, packageId) {
@@ -1111,6 +1180,8 @@ async function fetchLogo(archive, logoName, packageId) {
 
 	fs.mkdirSync(config.logosPath, { recursive: true });
 	fs.writeFileSync(path.join(config.logosPath, fileName), content);
+
+	await ensureThumb(fileName).catch(() => null);
 
 	return { file: fileName, state: 'ok' };
 }
@@ -1382,23 +1453,56 @@ async function parsePackages() {
 	say('parse', `разобрано: ${ok} (логотипов ${logos}), мёртвых ссылок: ${dead}, прочих ошибок: ${failed}.`);
 }
 
-/** Догружает логотипы для паков, разобранных до появления этой возможности. */
+/**
+ * Догружает логотипы для паков, разобранных до появления этой возможности,
+ * и чинит те, у которых логотип по базе есть, а показать его нечем.
+ *
+ * Второе — про паки вроде 15915–15917 и 16554. В базе у них logo_state='ok',
+ * а на деле нет ни уменьшенной копии, ни оригинала: копию должна была посчитать
+ * выкладка, но до неё тот запуск не дожил, а оригинал уехал вместе с раннером
+ * (см. fetchLogo). Пометки в базе такому случаю нет и быть не может — она
+ * не врала в тот миг, когда её ставили, — поэтому чинится он по тому, чего нет
+ * на складе: ни копии, ни оригинала. Такой пак качается заново, и на этот раз
+ * копия делается сразу.
+ */
 async function fetchLogos() {
 	const target = targetSql();
 
 	// Точечное обновление логотип перекачивает всегда: «докачать недостающие» —
-	// это про ночной обход, а названный поимённо пак просят обновить целиком
-	const missing = force ? '' : ` AND (p.logo_state IS NULL OR p.logo_state = 'error')`;
+	// это про ночной обход, а названный поимённо пак просят обновить целиком.
+	//
+	// Паки с logo_state='ok' идут в очередь наравне с прочими: есть у них
+	// показывать нечего или нет, по одной базе не видно — это решает уже склад
+	// (см. broken ниже)
+	const missing = force ? '' : ` AND (p.logo_state IS NULL OR p.logo_state = 'error' OR p.logo_state = 'ok')`;
 
 	const pending = db.prepare(`
-		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name, p.logo_state, p.logo_file FROM packages p
 		WHERE p.status = 'ok'${missing}${target.where}
 		ORDER BY p.id
 	`);
 
 	const params = target.params;
 
-	say('logos', `без логотипа ${pending.all(...params).length}${queueNote(false)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+	/**
+	 * Что из отобранного и вправду надо качать. Пак, у которого логотип уже есть
+	 * и показывается, отсеивается здесь: по одной базе этого не видно — ответ
+	 * лежит на складе обложек, а не в ней.
+	 *
+	 * `--force` отсев отменяет целиком, как и всё прочее: «обнови этот пак»
+	 * означает перекачать, а не рассудить, надо ли.
+	 */
+	const wanted = () => (force
+		? pending.all(...params)
+		: pending.all(...params)
+			.filter(row => row.logo_state !== 'ok' || !(hasThumb(row.logo_file) || hasOriginal(row.logo_file))));
+
+	const queue = wanted();
+	const broken = queue.filter(row => row.logo_state === 'ok').length;
+
+	say('logos', `без логотипа ${queue.length - broken}`
+		+ `${broken ? `, с потерянной обложкой ${broken}` : ''}`
+		+ `${queueNote(false)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let none = 0;
@@ -1407,7 +1511,7 @@ async function fetchLogos() {
 	await drain({
 		step: 'logos',
 		jobs,
-		take: () => pending.all(...params),
+		take: wanted,
 		work: async (row, bar) => {
 			try {
 				const logo = await retryNetwork(() => withFreshUrl(row, async url => {

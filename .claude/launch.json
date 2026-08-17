@@ -9,6 +9,13 @@
 			"autoPort": true
 		},
 		{
+			"name": "firepacks-asis",
+			"runtimeExecutable": "node",
+			"runtimeArgs": ["--no-warnings", "scripts/start.js", "--no-sync"],
+			"port": 3000,
+			"autoPort": true
+		},
+		{
 			"name": "firepacks-cloudflare",
 			"runtimeExecutable": "npx",
 			"runtimeArgs": ["wrangler", "dev", "--port", "8787"],

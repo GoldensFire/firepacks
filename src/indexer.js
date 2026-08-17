@@ -65,7 +65,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS, GENRES, ORIGINS, decadeName } from './config.js';
+import {
+	config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS, GENRES, FORMS, ORIGINS,
+	LANGUAGE_NAMES, decadeName,
+} from './config.js';
 import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
 import { readTopic as readTopicApi, hasVkApi, refreshDocumentUrl } from './vkapi.js';
@@ -76,7 +79,7 @@ import { hasGemini, classifyThemes, describePack, analyzePacks, listModels, useM
 import { MODELS, modelRank, usage, usageLine, usageReport, nextSpareModel } from './models.js';
 import {
 	listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeOtherKinds,
-	computeGenres, computeDecades, computeOrigin,
+	computeGenres, computeForms, computeDecades, computeOrigin,
 } from './topics.js';
 import { isCategoryName } from './franchise.js';
 
@@ -139,6 +142,44 @@ if (text('model')) {
  * Ключ ставит ночной обход сам (см. scripts/nightly.js).
  */
 const fallback = has('--fallback');
+
+/**
+ * Сколько минут работе отпущено. Ноль — сколько угодно, как было всегда.
+ *
+ * Это не ограничение ради ограничения, а способ доделать работу до конца.
+ * Обход не кончается сам: очередь в базе на тысячи паков, а размечается она
+ * сотнями, и всякий полный проход упирается либо в лимиты Gemini, либо в чужое
+ * терпение. В облаке терпение измеримо — GitHub убивает работу на шести часах,
+ * и убивает грубо: не «доделай и выйди», а обрыв посреди запроса. Дальше
+ * не выполняется ничего: ни выкладка, ни отчёт. Две ночи подряд (16 и 17 августа
+ * 2026) так и прошли — по пять с лишним часов разметки, около двух тысяч
+ * размеченных паков за ночь, и ни один из них не доехал до сайта, потому что
+ * шаг выкладки стоит ПОСЛЕ обхода, а до него дело не дошло.
+ *
+ * Срок решает это целиком. Индексатор смотрит на часы там же, где смотрит
+ * на кончившиеся лимиты (см. drain), и по истечении времени доводит начатое
+ * до конца и выходит с успехом — а ночь спокойно идёт дальше, к выкладке.
+ * Сделано меньше, зато сделанное — на сайте.
+ */
+const minutesLeft = value('minutes', 0);
+const finishBy = minutesLeft > 0 ? Date.now() + minutesLeft * 60_000 : null;
+
+/** Кончилось ли отпущенное время. Проверяется на каждом круге очереди. */
+let timeUp = false;
+
+function outOfTime() {
+	if (!finishBy || timeUp) {
+		return timeUp;
+	}
+
+	if (Date.now() >= finishBy) {
+		timeUp = true;
+		say('time', `отпущенные ${minutesLeft} мин вышли: доделываю начатое и заканчиваю. `
+			+ 'Оставшаяся очередь никуда не денется — её возьмёт следующий обход.');
+	}
+
+	return timeUp;
+}
 
 /**
  * Паки, названные поимённо: `--packs=128,340`. Номер — тот же, что в адресе
@@ -571,6 +612,9 @@ const TAGS = {
 	logos: 'логотипы',
 	specials: 'спецвопросы',
 	recalc: 'пересчёт',
+	// Не шаг, а весь обход разом: строка про то, что отпущенное время вышло
+	// и очередь досрочно свёрнута (см. --minutes)
+	time: 'время',
 };
 
 const say = (step, line) => console.log(`[${TAGS[step]}] ${line}`);
@@ -653,6 +697,7 @@ const updateTopics = db.prepare(`
 	UPDATE packages SET topic_shares = ?, primary_topic = ?, primary_share = ?,
 		franchises = ?, franchise_top = ?, franchise_top_share = ?, other_kinds = ?,
 		genres = ?, genre_topic = ?,
+		forms = ?, form_topic = ?, form_coverage = ?,
 		decades = ?, decade_coverage = ?, origins = ?, origin_coverage = ?,
 		topics_at = ?, topics_model = ?, topics_version = ${TOPICS_VERSION} WHERE id = ?
 `);
@@ -699,6 +744,29 @@ function saveSummary(row, model, summary, audience, language = null) {
 const audienceLine = audience => (audience
 	? `${audience.from}–${audience.to} лет, М ${audience.male}% / Ж ${100 - audience.male}%`
 	: 'аудитория не названа');
+
+/**
+ * Язык пака строкой для лога: «язык: Русский (ru), в файле en-US».
+ *
+ * Строка эта нужна не для полноты отчёта. Язык — единственное, что модель
+ * называет ВОПРЕКИ файлу: поле в самом паке ставит редактор, и стоит в нём
+ * то, какая у автора Windows, — по нему английских паков в базе выходило
+ * больше, чем их есть на свете (см. LANGUAGE_RULES в gemini.js). Пока в логе
+ * этого не было, проверить, не выдумывает ли модель, было нечем: в базе лежит
+ * итог, а от чего он отличается — не видно. Поэтому рядом стоит и то,
+ * что записано в файле: расхождение и есть весь смысл этой строки.
+ *
+ * Промолчавшая модель называется вслух тоже: пустая строка от неё значит
+ * «спросили, а ответа нет», и молча пропускать это в логе нельзя — иначе
+ * пак без языка выглядит паком, про который не спрашивали.
+ */
+const languageLine = (language, fromFile) => {
+	const own = fromFile ? `, в файле ${fromFile}` : ', в файле не указан';
+
+	return language
+		? `язык: ${LANGUAGE_NAMES[language] ?? language} (${language})${own}`
+		: `язык: модель не назвала${own}`;
+};
 const updateSpecials = db.prepare('UPDATE packages SET special_count = ?, special_stat = ? WHERE id = ?');
 
 const upsertStats = db.prepare(`
@@ -1088,6 +1156,11 @@ async function drain({ step, jobs, take, work, group = null, stop = () => false 
 	const bar = track(step);
 	const seen = new Set();
 
+	// Отпущенное время кончается для всех шагов разом и проверяется здесь одним
+	// местом, а не в каждом stop по отдельности: срок дан обходу целиком,
+	// и «статистика доработает, а разметка нет» было бы правилом ниоткуда
+	const done = () => stop() || outOfTime();
+
 	// Кто может подкинуть работы этому шагу, записано в STEPS одним местом (feeds),
 	// чтобы «разбору подносит обход ВК» не приходилось помнить в двух файлах
 	const feeds = STEPS.find(item => item.key === step)?.feeds ?? [];
@@ -1095,7 +1168,7 @@ async function drain({ step, jobs, take, work, group = null, stop = () => false 
 
 	let taken = 0;
 
-	while (!stop()) {
+	while (!done()) {
 		const room = limit === Infinity ? Infinity : limit - taken;
 
 		if (room <= 0) {
@@ -1136,7 +1209,7 @@ async function drain({ step, jobs, take, work, group = null, stop = () => false 
 		await runPool(units, jobs, async unit => {
 			await work(unit, bar);
 			bar.tick(Array.isArray(unit) ? unit.length : 1);
-		}, stop);
+		}, done);
 	}
 }
 
@@ -1663,7 +1736,11 @@ function geminiReady(step) {
  */
 function saveTopics(step, label, row, themes, marks, model, tally) {
 	const { shares, questions } = computeShares(themes, marks);
-	const { topic, share } = toPrimary(shares, questions);
+	// Виды «прочего» считаются раньше ярлыка, потому что ярлык на них смотрит:
+	// пак, у которого «прочее» почти всё и оно спортивное, — не солянка,
+	// а спортпак (см. KIND_PACKS и toPrimary в topics.js)
+	const kinds = computeOtherKinds(themes, marks);
+	const { topic, share } = toPrimary(shares, questions, kinds);
 	// Франшизы и области лежат одним списком, но означают разное: по франшизам
 	// считаются повторы, по областям пак целиком про футбол получает подпись
 	// (см. computeAreas в topics.js). Кто из них главный — решает доля: ярлык
@@ -1672,10 +1749,13 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 	const franchises = [...repeats, ...computeAreas(themes, marks)]
 		.sort((a, b) => b.share - a.share || b.themes - a.themes);
 	const top = franchises[0] ?? null;
-	const kinds = computeOtherKinds(themes, marks);
 	// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
 	// у солянки жанр называть не от чего, и список выйдет пустым
 	const genres = computeGenres(themes, marks, topic);
+	// Из чего пак сделан по носителю: манга или манхва, кино или сериалы.
+	// Спрашивается у двух тематик, и обе — те, у которых ярлык до сих пор
+	// молчал о главном (см. FORMS в settings.js)
+	const { forms, coverage: formCoverage } = computeForms(themes, marks, topic);
 	// Когда вышло названное в паке и откуда оно родом. Считается у всех паков
 	// и хранится тоже у всех: показывать это или нет, решает сайт по типу пака
 	// (десятилетия у «прочего» смысла не имеют, происхождение — у аниме),
@@ -1693,6 +1773,9 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		JSON.stringify(kinds),
 		JSON.stringify(genres),
 		genres.length > 0 ? topic : null,
+		JSON.stringify(forms),
+		forms.length > 0 ? topic : null,
+		formCoverage,
 		JSON.stringify(decades),
 		decadeCoverage,
 		JSON.stringify(origins),
@@ -1750,6 +1833,15 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		const names = GENRES[topic].list;
 		say(step, `      ${GENRES[topic].question.toLowerCase()} `
 			+ genres.map(genre => `${names[genre.key]} ${Math.round(genre.share * 100)}%`).join(', '));
+	}
+
+	// Из чего пак сделан по носителю. Покрытие рядом по той же причине, что
+	// у годов: «манхва 100%» по одной теме из тридцати — это не про пак
+	if (forms.length > 0) {
+		const names = FORMS[topic].list;
+		say(step, `      ${FORMS[topic].question.toLowerCase()} `
+			+ forms.map(form => `${names[form.key]} ${Math.round(form.share * 100)}%`).join(', ')
+			+ ` (по ${Math.round(formCoverage * 100)}% тематики)`);
 	}
 
 	// Каких лет пак и чьё в нём содержимое. Покрытие пишется рядом нарочно:
@@ -1860,7 +1952,7 @@ async function refreshSummaries() {
 	const target = targetSql();
 	const priority = priorityOrderSql('summary');
 	const pending = db.prepare(`
-		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text FROM packages p
+		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text, p.language FROM packages p
 		WHERE p.status = 'ok' ${condition}${target.where}
 		ORDER BY ${priority.order}
 	`);
@@ -1902,6 +1994,7 @@ async function refreshSummaries() {
 
 				say('summary', `${label} «${row.name}»: ${summary || 'сказать нечего'}`);
 				say('summary', `      ${audienceLine(audience)}`);
+				say('summary', `      ${languageLine(language, row.language)}`);
 			} catch (error) {
 				say('summary', `${label} «${row.name}»: ${error.message}`);
 
@@ -2035,7 +2128,7 @@ async function refreshAnalysis() {
 	// истиной: в описании бывает «чистое аниме» у пака, где треть тем про игры
 	// (см. PACK_CONTEXT в gemini.js)
 	const pending = db.prepare(`
-		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text FROM packages p
+		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text, p.language FROM packages p
 		WHERE p.status = 'ok' AND (${needTopics} OR ${needSummary})${target.where}
 		ORDER BY ${priority.order}
 	`);
@@ -2104,6 +2197,11 @@ async function refreshAnalysis() {
 					// Кому этот пак: возраст и пол — оценка модели по содержимому,
 					// а не статистика игроков (см. AUDIENCE_RULES в gemini.js)
 					say('analyze', `      ${audienceLine(answer.audience)}`);
+
+					// Какой язык модель насчитала этому паку. Стоит рядом
+					// с аудиторией и по той же причине: и то, и другое — её
+					// суждение, а не запись из файла (см. languageLine)
+					say('analyze', `      ${languageLine(answer.language, row.language)}`);
 
 					// Что модель искала в поиске. Строка нужна не для красоты: по ней
 					// видно, гуглит ли она то, о чём пак, — или само шуточное название
@@ -2174,7 +2272,8 @@ function recalcLevels() {
 /** Пересчитывает ярлыки паков по сохранённым долям — нужен после правки порога. */
 function recalcTopics() {
 	const target = targetSql();
-	const rows = db.prepare(`SELECT p.id, p.topic_shares, p.question_count, p.franchises, p.genre_topic
+	const rows = db.prepare(`SELECT p.id, p.topic_shares, p.question_count, p.franchises, p.genre_topic,
+			p.form_topic, p.other_kinds
 		FROM packages p WHERE p.topics_at IS NOT NULL${target.where}`).all(...target.params);
 	const update = db.prepare('UPDATE packages SET primary_topic = ?, primary_share = ?, franchise_top = ?, franchise_top_share = ? WHERE id = ?');
 
@@ -2185,6 +2284,10 @@ function recalcTopics() {
 	// Доли и ярлык при этом остаются на месте, и до переспроса пак выглядит как
 	// прежде, только без жанров.
 	const dropGenres = db.prepare(`UPDATE packages SET genres = '[]', genre_topic = NULL, topics_version = 0 WHERE id = ?`);
+
+	// То же самое и с носителями, и по той же причине: «Сериалы 60%» в верхней
+	// полоске пака, переставшего быть кинопаком, читались бы как доля манги
+	const dropForms = db.prepare(`UPDATE packages SET forms = '[]', form_topic = NULL, form_coverage = NULL, topics_version = 0 WHERE id = ?`);
 
 	// Область, повторяющая ярлык пака, из сохранённого вычищается прямо здесь,
 	// не дожидаясь модели.
@@ -2207,7 +2310,9 @@ function recalcTopics() {
 
 	for (const row of rows) {
 		const shares = jsonOrDefault(row.topic_shares, null);
-		const { topic, share } = toPrimary(shares, row.question_count ?? 0);
+		// Виды «прочего» уже посчитаны и лежат в базе: по ним пак, который весь
+		// про спорт, получает свой ярлык, не дожидаясь модели
+		const { topic, share } = toPrimary(shares, row.question_count ?? 0, jsonOrDefault(row.other_kinds, []));
 
 		const stored = jsonOrDefault(row.franchises, []);
 		// Проверяется по названию, а не по виду записи. Вид («область» или
@@ -2236,6 +2341,10 @@ function recalcTopics() {
 		if (row.genre_topic && row.genre_topic !== topic) {
 			dropGenres.run(row.id);
 			dropped++;
+		}
+
+		if (row.form_topic && row.form_topic !== topic) {
+			dropForms.run(row.id);
 		}
 	}
 

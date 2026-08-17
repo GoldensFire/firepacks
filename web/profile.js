@@ -12,7 +12,7 @@
 
 const LEVEL_ORDER = [4, 3, 2, 1];
 /** Порядок тот же, что в колонке фильтров библиотеки (см. web/app.js). */
-const TOPIC_ORDER = ['mixed', 'anime', 'manga', 'games', 'movies', 'cartoons', 'books', 'comics', 'music', 'unknown'];
+const TOPIC_ORDER = ['mixed', 'anime', 'manga', 'games', 'movies', 'cartoons', 'books', 'comics', 'music', 'sport', 'unknown'];
 
 const EXTRA_TOPICS = {
 	mixed: { name: 'Солянка', packName: 'Солянка' },

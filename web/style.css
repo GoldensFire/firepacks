@@ -28,6 +28,11 @@
 	--books: #f0a836;
 	--comics: #3d6fff;
 	--music: #ff4fa3;
+	/* Спорт — свой тип пака, а не оттенок солянки (см. KIND_PACKS в src/settings.js),
+	   и цвет ему нужен свой. Зелёный тот же, каким и раньше красился спортивный
+	   кусок «прочего» в полоске долей: пак, который был «Солянкой (спорт)», стал
+	   «Спортпаком», и менять при этом цвет значило бы прятать, что это то же самое */
+	--sport: #3fb95a;
 	--mixed: #1fdca4;
 	--radius: 0.625rem;
 }
@@ -1375,6 +1380,7 @@ a.brand:hover .brand__text {
 .topic--books { color: var(--books); }
 .topic--comics { color: var(--comics); }
 .topic--music { color: var(--music); }
+.topic--sport { color: var(--sport); }
 .topic--mixed { color: var(--mixed); }
 .topic--unknown { color: var(--text-muted); }
 
@@ -1386,6 +1392,7 @@ a.brand:hover .brand__text {
 .level-toggle[aria-pressed="true"].topic--books { border-color: var(--books); }
 .level-toggle[aria-pressed="true"].topic--comics { border-color: var(--comics); }
 .level-toggle[aria-pressed="true"].topic--music { border-color: var(--music); }
+.level-toggle[aria-pressed="true"].topic--sport { border-color: var(--sport); }
 .level-toggle[aria-pressed="true"].topic--mixed { border-color: var(--mixed); }
 
 .level-toggle.topic--anime,
@@ -1396,6 +1403,7 @@ a.brand:hover .brand__text {
 .level-toggle.topic--books,
 .level-toggle.topic--comics,
 .level-toggle.topic--music,
+.level-toggle.topic--sport,
 .level-toggle.topic--mixed,
 .level-toggle.topic--unknown {
 	color: var(--text-muted);
@@ -1412,6 +1420,7 @@ a.brand:hover .brand__text {
 .level-toggle.topic--books .topic-icon { stroke: var(--books); }
 .level-toggle.topic--comics .topic-icon { stroke: var(--comics); }
 .level-toggle.topic--music .topic-icon { stroke: var(--music); }
+.level-toggle.topic--sport .topic-icon { stroke: var(--sport); }
 .level-toggle.topic--mixed .topic-icon { stroke: var(--mixed); }
 
 .level-toggle[aria-pressed="true"] .label {
@@ -1863,6 +1872,20 @@ a.hide__item--login:hover {
 .shares__part--kind-art { background: #c07ad0; }
 .shares__part--kind-food { background: #e08b3a; }
 .shares__part--kind-life { background: #7f8a9c; }
+
+/* Носители внутри тематики: манга и манхва, кино и сериалы. Живут они в самой
+   верхней полоске — делят её главный кусок, — и цвета им нужны родственные тому,
+   что они делят, а не чужие: полоска обязана читаться как один кусок тематики,
+   разбитый на доли, а не как ещё три новые тематики.
+   Поэтому манга и её соседи — оттенки манги, кино и сериалы — оттенки кино */
+.shares__part--form-manga { background: var(--manga); }
+.shares__part--form-manhwa { background: #b8608f; }
+.shares__part--form-manhua { background: #8f5fb0; }
+.shares__part--form-webtoon { background: #d08a5f; }
+.shares__part--form-ranobe { background: #7f8a9c; }
+.shares__part--form-film { background: var(--movies); }
+.shares__part--form-series { background: #4f7fb8; }
+.shares__part--form-show { background: #3fa8a0; }
 
 /* Вопрос над нижней полоской: «Из чего состоит пак?». Есть только у неё — две
    верхние читаются как одна мысль про содержание пака, а эта про другое, про его

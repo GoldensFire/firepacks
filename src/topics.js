@@ -2,7 +2,7 @@
 
 import {
 	config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, OTHER_KIND_KEYS, GENRES, isNotableGenre,
-	ORIGIN_KEYS, DECADE_MIN,
+	ORIGIN_KEYS, DECADE_MIN, FORMS, KIND_PACKS, SPORT_KEY,
 } from './config.js';
 import { Names, nameKey, isFormatMarker, isAreaName, mergeRelated } from './franchise.js';
 
@@ -198,9 +198,16 @@ export function computeGenres(themes, marks, topic) {
 		// один, и вся тема доставалась ему целиком: тема-угадайка, где подряд
 		// идут четыре разных жанра, отдавала весь свой вес самому частому,
 		// и музпак выходил «поп на 90%» при попе в четверть (см. THEME_RULES)
+		// Откуда брать жанр, зависит от того, чем пак является. У музпака —
+		// у музыкальных тем любой категории (опенинги в музпаке тоже музыка).
+		// У спортпака — у тем, чьё «прочее» вышло спортивным: спорт не категория,
+		// а вид «прочего», и темы про футбол числятся в c=other (см. KIND_PACKS).
+		// У остальных — у тем своей категории
 		const list = topic === MUSIC_KEY
 			? (mark.music ? mark.musicGenres : [])
-			: (mark.category === topic ? mark.genres : []);
+			: topic === SPORT_KEY
+				? (mark.kind === SPORT_KEY ? mark.genres : [])
+				: (mark.category === topic ? mark.genres : []);
 
 		spread(weights, list, weight, key => Object.hasOwn(GENRES[topic].list, key));
 	}
@@ -222,6 +229,64 @@ export function computeGenres(themes, marks, topic) {
 	const notable = passed.slice(config.genreLimit).filter(genre => isNotableGenre(topic, genre.key));
 
 	return [...shown, ...notable];
+}
+
+/**
+ * Из чего пак сделан по носителю: сколько в манга-паке манги, сколько манхвы
+ * и маньхуа; сколько в кинопаке фильмов, а сколько сериалов.
+ *
+ * Считается только у своих тем и только своей тематики: манхву спрашивают
+ * у манга-тем, а сериал — у кино-тем, и случайная тема про игру в кинопаке
+ * носителя не имеет вовсе. Этим же счёт отличается от жанров: доли здесь
+ * берутся не от всего пака, а от НАЗВАННОГО — верхняя полоска делит один
+ * свой кусок, и куски эти обязаны сложиться в него целиком, а не в две трети.
+ *
+ * Рядом уезжает покрытие — какую часть тематики модель сумела разложить.
+ * Кинопак, где носитель назван у одной темы из тридцати, делить на «кино
+ * и сериалы» нельзя: это была бы уверенная выдумка по одной теме.
+ *
+ * @param {Array} themes темы из listThemes
+ * @param {Map} marks разметка по ключу темы
+ * @param {string|null} topic тип пака: по нему выбирается список носителей
+ * @returns {{forms: Array<{key: string, questions: number, share: number}>, coverage: number}}
+ *   в порядке самого списка (FORMS), а не по величине: полоска читается
+ *   как «манга, потом манхва, потом маньхуа», и перестановка кусков местами
+ *   от пака к паку сбивала бы глаз
+ */
+export function computeForms(themes, marks, topic) {
+	if (!topic || !FORMS[topic]) {
+		return { forms: [], coverage: 0 };
+	}
+
+	const weights = new Map();
+	let own = 0;
+	let known = 0;
+
+	for (const theme of themes) {
+		const mark = marks.get(theme.key);
+
+		// Тема чужой категории в этот счёт не входит вовсе — ни в делимое,
+		// ни в делитель: полоска делит кусок своей тематики, а не весь пак
+		if (mark?.category !== topic) {
+			continue;
+		}
+
+		const weight = theme.questions > 0 ? theme.questions : 1;
+		own += weight;
+		known += spread(weights, mark.forms, weight, key => Object.hasOwn(FORMS[topic].list, key));
+	}
+
+	if (own === 0 || known === 0) {
+		return { forms: [], coverage: 0 };
+	}
+
+	const order = Object.keys(FORMS[topic].list);
+	const forms = [...weights.entries()]
+		.map(([key, questions]) => ({ key, questions: Math.round(questions), share: round(questions / known) }))
+		.filter(form => form.share >= config.formShare)
+		.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+
+	return { forms, coverage: round(known / own) };
 }
 
 /**
@@ -564,8 +629,16 @@ export function isMusical(shares) {
  * Музыка в этом соревновании не участвует: она не спорит с аниме или кино,
  * а идёт рядом отдельным ярлыком. Но если ни одна из обычных категорий порог
  * не взяла, а музыки много, пак всё же музыкальный, а не солянка.
+ *
+ * Последними в очередь встают виды «прочего», доросшие до собственного типа
+ * (см. KIND_PACKS): пак, который весь про футбол, солянкой числился не потому,
+ * что в нём намешано, а потому, что спорту негде было стать тематикой. Стоят
+ * они именно последними — после всех настоящих категорий и после музыки:
+ * ярлык спорта достаётся тому, у кого другого ярлыка нет.
+ *
+ * @param {Array<{key: string, share: number}>} kinds виды «прочего» из computeOtherKinds
  */
-export function toPrimary(shares, questions) {
+export function toPrimary(shares, questions, kinds = []) {
 	if (!shares) {
 		return { topic: null, share: null, musical: false };
 	}
@@ -587,6 +660,15 @@ export function toPrimary(shares, questions) {
 
 	if (musical) {
 		return { topic: MUSIC_KEY, share: shares[MUSIC_KEY], musical };
+	}
+
+	// Вид «прочего», занявший больше половины пака: «Спортпак» вместо «Солянки».
+	// Виды приходят от частых к редким, и годится только первый — если спорта
+	// половина, второму такому виду взяться уже неоткуда
+	const kind = (kinds ?? [])[0];
+
+	if (kind && KIND_PACKS[kind.key] && kind.share >= config.kindPackShare) {
+		return { topic: KIND_PACKS[kind.key], share: kind.share, musical };
 	}
 
 	return { topic: 'mixed', share, musical };

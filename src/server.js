@@ -6,7 +6,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import {
 	config, TOPICS_VERSION, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS, GENRES,
-	ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
+	FORMS, ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
 } from './config.js';
 import {
 	db, jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
@@ -238,6 +238,12 @@ function toPackage(row) {
 		// genreTopic — из чьего списка эти ключи: он же называет и саму полоску
 		genres: jsonOrDefault(row.genres, []),
 		genreTopic: row.genre_topic,
+		// Из чего пак сделан по носителю: манга или манхва, кино или сериалы.
+		// Этим делится верхняя полоска — тот её кусок, который у манга-пака
+		// занимает всё и сам по себе не говорит ничего
+		forms: jsonOrDefault(row.forms, []),
+		formTopic: row.form_topic,
+		formCoverage: row.form_coverage,
 		// Когда вышло то, из чего собран пак, и откуда оно родом. Рядом с каждой
 		// разбивкой — какой частью пака она посчитана: у вопроса про столицы
 		// ни года, ни происхождения нет, и полоска, собранная по одной десятой
@@ -781,6 +787,11 @@ function getFacets() {
 		// собирается третья полоска карточки — «какой жанр музыки»
 		genreNames: GENRES,
 		genreShare: config.genreShare,
+		// Носители внутри тематики: манга и манхва, кино и сериалы. Имена кусков
+		// и порог покрытия — с какой части тематики верхнюю полоску вообще
+		// можно делить (см. FORMS и formCoverage в settings.js)
+		formNames: FORMS,
+		formCoverage: config.formCoverage,
 		// Полоска «когда это вышло» и полоска «откуда это»: имена кусков и то,
 		// какой части пака должно хватить, чтобы их вообще показывать
 		// (см. decadeCoverage в settings.js). Списки типов паков — про то, у кого

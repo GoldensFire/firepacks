@@ -1141,6 +1141,17 @@ a.brand:hover .brand__text {
 	opacity: 1;
 }
 
+/* Полторы секунды после удачного копирования: два листка сменяются галочкой,
+   и она зелёная — тем же цветом, каким на сайте говорится «получилось».
+   Приглушённость снимается: подтверждение видно и не наводя мышь, а именно
+   тогда, когда руку с кнопки уже убрали (см. createCopyNameButton). */
+.card__name-copy--done,
+.card__name-copy--done:hover,
+.card__name-copy--done:focus-visible {
+	color: var(--easy);
+	opacity: 1;
+}
+
 .card__name {
 	margin: 0;
 	font-size: 0.9375rem;
@@ -1431,30 +1442,42 @@ a.brand:hover .brand__text {
    справа. Все три отвечают на один вопрос — стоит ли смотреть дальше, — и стоят
    раньше названия именно поэтому. */
 
+/* Три колонки, а не «прижать по краям и что осталось»: середина обязана быть
+   серединой самой карточки, а не серединой между датой и плашкой игр. Крайние
+   колонки равны друг другу по построению (обе 1fr), поэтому число вопросов
+   стоит ровно посередине независимо от того, длинная сегодня дата или короткая,
+   четырёхзначное число игр или однозначное. minmax(0, …) — чтобы длинная дата
+   растягивала не колонку, а перенос внутри себя. */
 .card__top {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 	align-items: center;
-	justify-content: space-between;
 	gap: 0.625rem;
 	min-height: 1.375rem;
 }
 
 .card__date {
+	justify-self: start;
 	font-size: 0.75rem;
 	color: var(--text-muted);
 	white-space: nowrap;
 }
 
-/* Число вопросов. Прижато к плашке игр, а не растянуто по строке: дата и игры —
-   это края строки, и середину между ними число занимало бы наугад. Набрано
-   так же, как плашка игр, но без рамки: главное в строке справа, а это — то,
-   что стоит рядом. */
+/* Число вопросов — по центру карточки. Оно и есть то, за чем в эту строку
+   смотрят чаще всего: пак на полсотни вопросов и пак на четыре сотни — это
+   разные вечера. Набрано так же, как плашка игр, но без рамки: у той рамка
+   несёт цвет ступени, а тут её было бы не за что дать. */
 .card__questions {
 	display: inline-flex;
 	align-items: baseline;
+	justify-self: center;
 	gap: 0.3125rem;
-	margin-left: auto;
 	white-space: nowrap;
+}
+
+/* Плашка игр — правым краем строки, как и была */
+.card__top > .games {
+	justify-self: end;
 }
 
 .card__questions-value {
@@ -1716,6 +1739,18 @@ a.hide__item--login:hover {
 	color: var(--very-hard);
 }
 
+/* Числа, у которых есть «слишком много»: повторы и спецвопросы.
+   Порог первый — оранжевым, второй — красным, теми же цветами, какими на сайте
+   набраны «сложный» и «очень сложный». Классы общие на двоих нарочно: правило
+   одно (см. alarmClass в web/card.js), разные у них только пороги. */
+.value--warn { color: var(--hard); }
+.value--alarm { color: var(--very-hard); }
+
+/* Значок красится вместе с числом: в строке мелких цифр под карточкой одна
+   покрасневшая цифра теряется, а значок с цифрой — уже пятно */
+.value--warn .icon { stroke: var(--hard); }
+.value--alarm .icon { stroke: var(--very-hard); }
+
 /* Повторы франшиз: к чему пак возвращается снова и снова */
 
 .repeats {
@@ -1771,6 +1806,26 @@ a.hide__item--login:hover {
 	opacity: .8;
 }
 
+/* «Смотреть все повторы» — не ярлык, а действие, и выглядеть должна иначе:
+   без рамки и подчёркнутой, как ссылка. Стоит она в одном ряду с ярлыками
+   и того же роста, чтобы строка не разъезжалась. */
+.repeats__more {
+	padding: 2px 0.25rem;
+	border: 0;
+	background: none;
+	color: var(--text-muted);
+	font: inherit;
+	font-size: 0.6875rem;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+}
+
+.repeats__more:hover,
+.repeats__more:focus-visible {
+	color: var(--accent);
+}
+
 /* Доли под названием: сверху тематики, поделившие вопросы между собой, снизу —
    из чего эти вопросы сделаны (текст, картинки, музыка, видео, html). Обе полны
    ровно на сотню.
@@ -1818,6 +1873,8 @@ a.hide__item--login:hover {
 	width: 0.4375rem;
 	height: 0.4375rem;
 	border-radius: 50%;
+	/* То же, что и у куска полоски: точка без цвета в подписи выглядит опечаткой */
+	background: #333a49;
 }
 
 .shares__bar {
@@ -1832,6 +1889,12 @@ a.hide__item--login:hover {
    и до неё надо знать, что вообще навёлся на что-то, а не мимо */
 .shares__part {
 	min-width: 2px;
+	/* Цвет по умолчанию — тот же ничей, что и у «прочего». Нужен на случай,
+	   когда в списках жанров или десятилетий появится ключ, которому цвета ещё
+	   не дали: кусок без заливки — это дыра в полоске, и выглядит она поломкой,
+	   а серый кусок с подписью читается честно. Стоит выше именных правил
+	   нарочно — они перебивают его порядком, а не весом */
+	background: #333a49;
 	transition: filter .15s;
 	cursor: help;
 }
@@ -1900,34 +1963,127 @@ a.hide__item--login:hover {
 	color: var(--text-muted);
 }
 
-/* Жанры. Цвет здесь достаётся по месту в полоске, а не по смыслу: список жанров
-   свой у каждой тематики, один и тот же ключ значит в них разное, и общего
-   цвета у «комедии» быть не может. Оттенки взяты потусклее тематических —
-   полоска стоит прямо под тематиками и спорить с ними ей незачем */
-.shares__part--genre-1 { background: #d8563f; }
-.shares__part--genre-2 { background: #3f8fd8; }
-.shares__part--genre-3 { background: #57b25b; }
-.shares__part--genre-4 { background: #c9a13a; }
-.shares__part--genre-5 { background: #9b62d0; }
-.shares__part--genre-6 { background: #3fb5b0; }
+/* Жанры. Цвет здесь у каждого свой и один и тот же везде.
+
+   Раньше он доставался по месту в полоске: первый кусок красный, второй синий,
+   третий зелёный. Внутри одной карточки это читалось, между карточками — нет.
+   Комедия, стоящая в одном паке первой, а в другом третьей, оказывалась там
+   красной, а тут зелёной; два одинаково окрашенных куска на соседних карточках
+   были двумя разными жанрами. Цвет при таком раскладе не значит ничего —
+   а полоска затевалась ровно ради того, чтобы её читали не наводя мышь.
+
+   Теперь имя цвета — сам ключ жанра, а не его номер (см. createGenres
+   в web/card.js). Ключи у тематик общие: «комедия» в кинопаке, в аниме-паке
+   и в музыкальном — это один и тот же `comedy`, и цвет у неё один и тот же.
+
+   Список написан не от руки и не наугад: цвета розданы так, чтобы внутри
+   ОДНОЙ тематики двух одинаковых не было — иначе на полоске музпака рядом
+   встали бы два неразличимых куска. Всего оттенков два десятка, а жанров
+   семь, поэтому в разных тематиках цвета повторяются: спутать «сёнэн»
+   и «стратегии» негде — они не встречаются в одной полоске.
+
+   Оттенки взяты потусклее тематических: полоска стоит прямо под тематиками,
+   и спорить с ними ей незачем. */
+.shares__part--genre-isekai      { background: #d8563f; } /* исекай */
+.shares__part--genre-mecha       { background: #3f8fd8; } /* меха */
+.shares__part--genre-mahou       { background: #57b25b; } /* махо-сёдзё */
+.shares__part--genre-sport       { background: #3fa95a; } /* спорт */
+.shares__part--genre-detective   { background: #c9a13a; } /* детектив и триллер / детективы и триллеры / детективы и нуар */
+.shares__part--genre-horror      { background: #b0405f; } /* хоррор и мистика / хорроры / ужасы / ужасы и мистика */
+.shares__part--genre-shounen     { background: #9b62d0; } /* сёнэн и боевые */
+.shares__part--genre-magic       { background: #3fb5b0; } /* магия и фэнтези */
+.shares__part--genre-scifi       { background: #e0873a; } /* фантастика */
+.shares__part--genre-romance     { background: #d0619b; } /* романтика и ромком / мелодрамы */
+.shares__part--genre-comedy      { background: #6f7fd8; } /* комедия / комедии / юмор / юмор и пародии */
+.shares__part--genre-slice       { background: #8fa83f; } /* повседневность */
+.shares__part--genre-drama       { background: #5f6fb8; } /* драма / драмы */
+.shares__part--genre-classic     { background: #a9762f; } /* классика и старое аниме / классика манги */
+.shares__part--genre-mmo         { background: #d8563f; } /* онлайновые и MMO */
+.shares__part--genre-esports     { background: #3f8fd8; } /* киберспорт */
+.shares__part--genre-shooter     { background: #57b25b; } /* шутеры */
+.shares__part--genre-rpg         { background: #c9a13a; } /* ролевые */
+.shares__part--genre-strategy    { background: #9b62d0; } /* стратегии */
+.shares__part--genre-survival    { background: #3fb5b0; } /* песочницы и выживание */
+.shares__part--genre-fighting    { background: #e0873a; } /* файтинги */
+.shares__part--genre-racing      { background: #d0619b; } /* гонки */
+.shares__part--genre-platformer  { background: #6f7fd8; } /* платформеры */
+.shares__part--genre-quest       { background: #8fa83f; } /* квесты и визуальные новеллы */
+.shares__part--genre-simulator   { background: #a9762f; } /* симуляторы */
+.shares__part--genre-tabletop    { background: #4f9fa8; } /* настольные */
+.shares__part--genre-mobile      { background: #7f8a9c; } /* мобильные */
+.shares__part--genre-retro       { background: #c07ad0; } /* ретро и классика */
+.shares__part--genre-indie       { background: #3fa95a; } /* инди / инди и авторские / инди и альтернатива */
+.shares__part--genre-superhero   { background: #d8563f; } /* супергерои */
+.shares__part--genre-fantasy     { background: #9b62d0; } /* фэнтези */
+.shares__part--genre-action      { background: #3f8fd8; } /* боевики */
+.shares__part--genre-soviet      { background: #57b25b; } /* советское кино / советские мультики / советская эстрада */
+.shares__part--genre-documentary { background: #3fb5b0; } /* документальное */
+.shares__part--genre-disney      { background: #3f8fd8; } /* Disney и классика студий */
+.shares__part--genre-adult       { background: #c9a13a; } /* взрослая анимация */
+.shares__part--genre-fairy       { background: #9b62d0; } /* сказки и фэнтези */
+.shares__part--genre-adventure   { background: #3fb5b0; } /* приключения */
+.shares__part--genre-kids        { background: #e0873a; } /* детские */
+.shares__part--genre-poetry      { background: #9c5fa0; } /* поэзия */
+.shares__part--genre-children    { background: #57b25b; } /* детские книги */
+.shares__part--genre-nonfiction  { background: #d8563f; } /* нон-фикшн */
+.shares__part--genre-modern      { background: #3f8fd8; } /* современная проза */
+.shares__part--genre-european    { background: #3f8fd8; } /* европейские комиксы */
+.shares__part--genre-webcomics   { background: #57b25b; } /* веб-комиксы и стрипы */
+.shares__part--genre-football    { background: #3fa95a; } /* футбол */
+.shares__part--genre-hockey      { background: #d8563f; } /* хоккей */
+.shares__part--genre-basketball  { background: #3f8fd8; } /* баскетбол */
+.shares__part--genre-tennis      { background: #57b25b; } /* теннис */
+.shares__part--genre-volleyball  { background: #c9a13a; } /* волейбол */
+.shares__part--genre-martial     { background: #9b62d0; } /* единоборства и бокс */
+.shares__part--genre-motorsport  { background: #3fb5b0; } /* автоспорт и гонки */
+.shares__part--genre-athletics   { background: #e0873a; } /* лёгкая атлетика */
+.shares__part--genre-winter      { background: #d0619b; } /* зимние виды */
+.shares__part--genre-olympics    { background: #6f7fd8; } /* Олимпиады и турниры */
+.shares__part--genre-chess       { background: #7f8a9c; } /* шахматы и настольный спорт */
+.shares__part--genre-anisong     { background: #d8563f; } /* опенинги и аниме-музыка */
+.shares__part--genre-gaming      { background: #3f8fd8; } /* музыка из игр */
+.shares__part--genre-soundtrack  { background: #c9a13a; } /* саундтреки кино */
+.shares__part--genre-kpop        { background: #9b62d0; } /* K-pop */
+.shares__part--genre-rap         { background: #a9762f; } /* рэп и хип-хоп */
+.shares__part--genre-metal       { background: #7f8a9c; } /* метал */
+.shares__part--genre-punk        { background: #3fb5b0; } /* панк и эмо */
+.shares__part--genre-rock        { background: #e0873a; } /* рок */
+.shares__part--genre-electronic  { background: #d0619b; } /* электроника */
+.shares__part--genre-rnb         { background: #8fa83f; } /* R&B и соул */
+.shares__part--genre-country     { background: #4f9fa8; } /* кантри */
+.shares__part--genre-jazz        { background: #d07a5f; } /* джаз и блюз */
+.shares__part--genre-classical   { background: #b0405f; } /* классика */
+.shares__part--genre-chanson     { background: #c07ad0; } /* шансон */
+.shares__part--genre-folk        { background: #d8ad3a; } /* фолк и народное */
+.shares__part--genre-pop         { background: #5f6fb8; } /* поп */
 
 /* Всё, чего по отдельности набралось меньше порога: не «не посчитано», а «всего
    понемногу», и цвет у него такой же ничей, как у «прочего» наверху */
 .shares__part--genre-rest { background: #333a49; }
 
-/* Десятилетия. Здесь цвет не «по месту в списке ради различимости», а по самому
-   времени: одна шкала от холодного к тёплому, от давнего к свежему. Куски в этой
-   полоске идут по порядку лет, и градиент читается как ось — видно сразу,
-   пак «оттуда» или «отсюда», ещё до того, как прочитана хоть одна подпись */
-.shares__part--decade-1 { background: #3d5a80; }
-.shares__part--decade-2 { background: #3f7fa8; }
-.shares__part--decade-3 { background: #3fa8a0; }
-.shares__part--decade-4 { background: #57b25b; }
-.shares__part--decade-5 { background: #a8bd44; }
-.shares__part--decade-6 { background: #d8ad3a; }
-.shares__part--decade-7 { background: #e0873a; }
-.shares__part--decade-8 { background: #d8563f; }
-.shares__part--decade-9 { background: #c0405f; }
+/* Десятилетия. Цвет — по самому времени: одна шкала от холодного к тёплому,
+   от давнего к свежему. Куски в полоске идут по порядку лет, и градиент читается
+   как ось — видно сразу, пак «оттуда» или «отсюда», ещё до того, как прочитана
+   хоть одна подпись.
+
+   Имя цвета — само десятилетие, а не его номер в полоске, и это та же правка,
+   что и у жанров. По номеру выходило так: у пака, где есть всё от пятидесятых
+   до двадцатых, девяностые — пятый кусок и потому зелёные; у пака из одних
+   девяностых и двухтысячных они первый кусок и потому синие. Шкала сохранялась
+   внутри каждой карточки и не значила ничего между ними — то есть не значила
+   ничего. Теперь пятидесятые синие всегда, двадцатые красные всегда.
+
+   Тридцатые стоят про запас: полоска доживёт до них раньше, чем кто-нибудь
+   вспомнит про этот список. */
+.shares__part--decade-1950 { background: #3d5a80; }
+.shares__part--decade-1960 { background: #3f7fa8; }
+.shares__part--decade-1970 { background: #3fa8a0; }
+.shares__part--decade-1980 { background: #57b25b; }
+.shares__part--decade-1990 { background: #a8bd44; }
+.shares__part--decade-2000 { background: #d8ad3a; }
+.shares__part--decade-2010 { background: #e0873a; }
+.shares__part--decade-2020 { background: #d8563f; }
+.shares__part--decade-2030 { background: #c0405f; }
 
 /* Откуда родом названное. Кусков шесть, и цвета им нужны такие, чтобы не спорить
    ни с тематиками наверху, ни с жанрами. Своё — тёплое, от красного к жёлтому;
@@ -2006,26 +2162,9 @@ a.hide__item--login:hover {
 	color: var(--text-muted);
 }
 
-.tags {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 0.3125rem;
-}
-
-.tag {
-	padding: 2px 0.5rem;
-	border-radius: 999px;
-	background: var(--bg-panel-2);
-	border: 1px solid var(--border);
-	color: var(--text-muted);
-	font-size: 0.6875rem;
-	cursor: pointer;
-}
-
-.tag:hover {
-	color: var(--text);
-	border-color: var(--accent);
-}
+/* Правил для ярлыков тем здесь больше нет: с карточки они убраны целиком
+   (см. createCard в web/card.js). Отбор по темам остался в колонке фильтров,
+   а там своя вёрстка — список галочек с поиском, .checklist. */
 
 .meta {
 	display: flex;

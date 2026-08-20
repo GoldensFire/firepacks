@@ -145,27 +145,56 @@ function exitCode(status) {
 	return status === null || status === undefined || status >= 0xc0000000 ? 1 : status;
 }
 
-function run(command, args) {
+/** Конец всему: сказать, на чём споткнулись, и уйти с годным кодом. */
+function fail(command, args, status) {
+	console.error(`\nСорвалось на: ${command} ${args.join(' ')}`);
+
+	if (args[0] === 'wrangler' && !CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN) {
+		authAdvice();
+	}
+
+	process.exit(exitCode(status));
+}
+
+/**
+ * Запуск программы. Сорвалась — уносит с собой всю выкладку.
+ *
+ * Ключ `soft` это отменяет: вместо выхода вернётся то, чем программа ругалась,
+ * и решать, что с этим делать, будет вызвавший (см. execute — там ждут чужую
+ * заливку и пробуют снова).
+ *
+ * Ругань при `soft` печатается не самой программой, а нами: перехватить её
+ * иначе нельзя. Появляется она поэтому разом, по концу работы. На вид выкладки
+ * это не влияет — ошибок там несколько строк, а ход самой заливки идёт первым
+ * потоком и по-прежнему уходит в лог сразу, строка за строкой.
+ */
+function run(command, args, { soft = false } = {}) {
 	console.log(`\n$ ${command} ${args.join(' ')}`);
 
 	const passed = Object.fromEntries(Object.entries(CLOUDFLARE_ENV).filter(([, value]) => value));
 
 	const result = spawnSync(command, args, {
 		cwd: root,
-		stdio: 'inherit',
+		stdio: soft ? ['inherit', 'inherit', 'pipe'] : 'inherit',
 		shell: process.platform === 'win32',
 		env: { ...process.env, ...passed },
 	});
 
-	if (result.status !== 0) {
-		console.error(`\nСорвалось на: ${command} ${args.join(' ')}`);
+	const complaint = result.stderr ?? Buffer.alloc(0);
 
-		if (args[0] === 'wrangler' && !CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN) {
-			authAdvice();
-		}
-
-		process.exit(exitCode(result.status));
+	if (soft) {
+		process.stderr.write(complaint);
 	}
+
+	if (result.status === 0) {
+		return null;
+	}
+
+	if (!soft) {
+		fail(command, args, result.status);
+	}
+
+	return { status: result.status, complaint: complaint.toString('utf8') };
 }
 
 /**
@@ -214,9 +243,87 @@ function checkAuth() {
 	process.exit(1);
 }
 
-/** Заливка файла SQL. Куда — решает --local: в местную копию или в настоящую базу. */
+/**
+ * Чем ругается D1, когда по базе уже льют — не мы.
+ *
+ * Заливка файла у D1 не мгновенна: файл кладётся на его сторону, а дальше база
+ * какое-то время переваривает его сама, и вторую такую работу она в это время
+ * не начинает. Отвечает при этом отказом: «Currently processing a long-running
+ * import. Cannot start another import until that completes or times out».
+ *
+ * Ждать приходится не себя, а другого: база в Cloudflare одна, а отправляют
+ * в неё двое — этот компьютер и ежечасный обход в GitHub Actions (см.
+ * .github/workflows/hourly.yml). Общая очередь у обходов есть, но стережёт
+ * она полку с базой, а не D1, и на здешнюю выкладку не распространяется вовсе.
+ * Поэтому «отправить на сайт» в начале часа рано или поздно попадает ровно
+ * в ту минуту, когда наверху переваривается чужая заливка.
+ *
+ * Раньше это валило всю выкладку целиком — со всеми уже собранной статикой,
+ * выгруженной базой и залитыми до срыва кусками, — хотя ничего не сломалось
+ * и делать надо было ровно одно: подождать. 20 августа так и вышло, на первом
+ * же куске из семи.
+ */
+const IMPORT_BUSY = /long-running import|another import/i;
+
+/**
+ * Сколько ждать перед следующей попыткой, секунды. Сначала коротко — чужая
+ * заливка обычно идёт кусками по паре мегабайт и переваривается быстро; дальше
+ * длиннее, потому что если уж не успело, то там что-то большое. Всего около
+ * четверти часа: не дождались за это время — дело не в очереди, и врать про
+ * «сейчас пройдёт» не стоит.
+ */
+const BUSY_WAITS = [15, 30, 60, 120, 240, 300];
+
+/** Подождать, ничего не делая. Здесь всё идёт по порядку и сплошняком, поэтому так. */
+function sleep(seconds) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
+}
+
+/**
+ * Заливка файла SQL. Куда — решает --local: в местную копию или в настоящую базу.
+ *
+ * Наткнулись на чужую заливку — ждём и пробуем снова. Повторная попытка дешева:
+ * файл на стороне D1 уже лежит, wrangler узнаёт его по отпечатку и второй раз
+ * не отправляет («File already uploaded. Processing»).
+ */
 function execute(file) {
-	run('npx', ['wrangler', 'd1', 'execute', DB_NAME, local ? '--local' : '--remote', `--file=${file}`, '-y']);
+	const args = ['wrangler', 'd1', 'execute', DB_NAME, local ? '--local' : '--remote', `--file=${file}`, '-y'];
+
+	// Местная копия лежит рядом с проектом, и делить её не с кем: ждать там
+	// нечего и некого, а лишний перехват вывода только запутает
+	if (local) {
+		run('npx', args);
+		return;
+	}
+
+	for (let attempt = 0; ; attempt += 1) {
+		const failure = run('npx', args, { soft: true });
+
+		if (!failure) {
+			return;
+		}
+
+		if (!IMPORT_BUSY.test(failure.complaint)) {
+			fail('npx', args, failure.status);
+		}
+
+		if (attempt >= BUSY_WAITS.length) {
+			console.error('');
+			console.error('Наверху всё это время переваривается чужая заливка, и наша очередь так и не подошла.');
+			console.error('Дома всё цело: отметка «доехало» не ставится до конца, и следующая отправка');
+			console.error('пошлёт ровно те же строки. Проще всего — повторить попозже кнопкой');
+			console.error('«Отправить на сайт заново».');
+
+			fail('npx', args, failure.status);
+		}
+
+		const wait = BUSY_WAITS[attempt];
+
+		console.log(`\nНаверху идёт другая заливка — скорее всего ежечасный обход.`);
+		console.log(`Это не ошибка: ждём ${wait} с и пробуем снова (попытка ${attempt + 2}).`);
+
+		sleep(wait);
+	}
 }
 
 /**

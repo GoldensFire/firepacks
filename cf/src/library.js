@@ -15,7 +15,9 @@ import {
 	settings, thumbName, logoUrl, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
 	FORMS, ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
 } from '../../src/settings.js';
-import { jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
+import {
+	jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, SPECIAL_SHARE_SQL,
+} from '../../src/keys.js';
 import { readPackList, matchPackList, askedNames, chunk, NAME_KEY_SQL } from '../../src/packlist.js';
 import { packSlug } from '../../src/slug.js';
 import { groupSubjects, subjectMatches } from '../../src/subject.js';
@@ -58,6 +60,15 @@ const SORTS = {
 	games: 'COALESCE(s.started_games, -1)',
 	questions: 'COALESCE(p.question_count, -1)',
 	size: 'COALESCE(p.size, -1)',
+	// Те же два процента, что стоят на карточке рядом со сложностью. Паки, где
+	// статистики нет, уходят в конец при любом направлении: -1 это не «ноль
+	// процентов», а «считать не по чему»
+	take: 'COALESCE(s.take_percent, -1)',
+	right: 'COALESCE(s.right_percent, -1)',
+	// Доли тематик, название и повторы франшизы из списка сортировок убраны,
+	// а отсюда — нет: по старым ссылкам (/?sort=name) люди ходят, и пусть они
+	// работают, как работали
+
 	anime: shareOf('anime'),
 	manga: shareOf('manga'),
 	games_share: shareOf('games'),
@@ -89,6 +100,24 @@ const BASE_FROM = `
 		SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
 		FROM ratings GROUP BY pack_key
 	) r ON r.pack_key = ${PACK_KEY_SQL}
+`;
+
+/**
+ * То же начало, но для счёта, а не для выдачи: без оценок.
+ *
+ * Оценки подшиваются свёрнутыми по ключу пака — целой группировкой всей таблицы
+ * ratings, — и в выдаче это оправдано: балл стоит на каждой карточке. В счёте же
+ * он не спрашивается ни разу, а платится сполна, и здесь дороже, чем дома:
+ * у D1 прочитанные строки — расход по тарифу, а счётов на один запрос шесть.
+ *
+ * Ни одно условие отбора оценок не касается — по ним только сортируют, —
+ * поэтому вычесть их из счёта можно молча. Первым параметром, как и у BASE_FROM,
+ * идёт номер вошедшего.
+ */
+const COUNT_FROM = `
+	FROM packages p
+	LEFT JOIN stats s ON s.package_id = p.id
+	LEFT JOIN played pl ON pl.pack_key = ${PACK_KEY_SQL} AND pl.user_id = ?
 `;
 
 /** Своя оценка пака. Отдельным подзапросом: без входа спрашивать не о чем. */
@@ -320,20 +349,48 @@ function toPackage(row, counts) {
  *
  * @param {Array} groups сведённые типы паков (см. subjectGroups)
  */
-function buildWhere(query, userId, hits, groups = []) {
+/**
+ * Что этот человек вообще прятал: «pack», «author», оба или ничего. Пустой
+ * набор — и проверок чёрного списка в отборе не будет вовсе.
+ *
+ * Затем и спрашивается. Проверка — это два NOT EXISTS на каждую строку базы,
+ * один из них с подшиванием авторов, и платят её все вошедшие, включая тех,
+ * у кого в списке ноль записей, то есть почти всех. Наверху это не просто
+ * время: строки, прочитанные ради проверки, у D1 считаны по тарифу, а счётов
+ * на один запрос шесть.
+ *
+ * Спрашивается один раз за запрос, вместе с поиском и типами паков, и ответ
+ * не запоминается: спрятанный пак обязан пропасть со следующего же обновления
+ * списка, а не через отведённое копилке время.
+ */
+async function bannedKinds(db, userId) {
+	if (!userId) {
+		return new Set();
+	}
+
+	const { results } = await db.prepare('SELECT DISTINCT kind FROM blacklist WHERE user_id = ?').bind(userId).all();
+
+	return new Set(results.map(row => row.kind));
+}
+
+function buildWhere(query, userId, hits, groups = [], bans = null) {
 	const conditions = [`p.status = 'ok'`];
 	const params = [];
 
 	// Личный чёрный список: что человек однажды спрятал, больше ему не показываем.
 	// Пак прячется вместе со всеми своими копиями (ключ общий), автор — по тому же
 	// ключу, по которому работает фильтр «показать паки автора».
-	if (userId && query.get('showBlacklisted') !== '1') {
+	const banned = query.get('showBlacklisted') === '1' ? new Set() : bans ?? new Set();
+
+	if (banned.has('pack')) {
 		conditions.push(`NOT EXISTS (
 			SELECT 1 FROM blacklist b
 			WHERE b.user_id = ? AND b.kind = 'pack' AND b.value = ${PACK_KEY_SQL}
 		)`);
 		params.push(userId);
+	}
 
+	if (banned.has('author')) {
 		conditions.push(`NOT EXISTS (
 			SELECT 1 FROM blacklist b
 			JOIN pack_authors pa ON pa.author_key = b.value AND pa.package_id = p.id
@@ -430,6 +487,24 @@ function buildWhere(query, userId, hits, groups = []) {
 		params.push(...names, settings.subjectPackShare);
 	}
 
+	// Три галочки про то, каким пак будет за столом, а не про что он. Условия
+	// те же самые, что и дома (см. buildWhere в src/server.js), и пороги общие:
+	// пак, названный ровным на одной половине, обязан быть ровным и на другой.
+	if (query.get('lowRepeats') === '1') {
+		conditions.push('COALESCE(p.repeat_share, 0) < ?');
+		params.push(settings.repeatWarnShare);
+	}
+
+	if (query.get('lowSpecials') === '1') {
+		conditions.push(`${SPECIAL_SHARE_SQL} < ?`);
+		params.push(settings.specialWarnShare);
+	}
+
+	if (query.get('noFranchise') === '1') {
+		conditions.push('COALESCE(p.franchise_top_share, 0) < ?');
+		params.push(settings.subjectPackShare);
+	}
+
 	if (query.get('hidePlayed') === '1') {
 		conditions.push('pl.pack_key IS NULL');
 	}
@@ -466,19 +541,156 @@ function buildWhere(query, userId, hits, groups = []) {
  * Сама сложность из подсчёта выброшена нарочно: иначе у выбранного уровня
  * стояло бы его же число, а у остальных — нули, и переключиться было бы не на что.
  */
-function levelsQuery(db, query, userId, hits, groups) {
+/**
+ * Отбор, по которому считаются числа в колонке фильтров. Отличается от выдачи
+ * одним: сыгранное в счёт не идёт — колонка отвечает на вопрос «во что ещё
+ * не игранное тут можно сыграть». Устроено ровно как дома (см. countingQuery
+ * в src/server.js): расходись эти два счёта, одна и та же выборка показывала бы
+ * дома и на сайте разные числа.
+ */
+function countingQuery(query) {
 	const asked = new URLSearchParams(query);
+
+	// Выбрано «только сыгранные» — прятать сыгранное значит обнулить колонку
+	if (asked.get('onlyPlayed') !== '1') {
+		asked.set('hidePlayed', '1');
+	}
+
+	return asked;
+}
+
+function levelsQuery(db, query, userId, hits, groups, bans) {
+	const asked = countingQuery(query);
 	asked.delete('levels');
 	asked.set('unrated', '1');
 
-	const { where, params } = buildWhere(asked, userId, hits, groups);
+	const { where, params } = buildWhere(asked, userId, hits, groups, bans);
 
 	return db.prepare(`
 		SELECT s.level AS level, COUNT(*) AS c
-		${BASE_FROM}
+		${COUNT_FROM}
 		WHERE ${where} AND s.level IS NOT NULL
 		GROUP BY s.level
 	`).bind(userId, ...params);
+}
+
+/**
+ * Фильтры, от которых числа в колонке меняются. Всё остальное — страница,
+ * размер страницы, направление порядка — на числа не влияет.
+ */
+const NARROWING = [
+	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
+	'onlyPlayed', 'onlyPlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
+];
+
+/**
+ * Сужена ли выборка хоть чем-нибудь. Вошедший сужает её самим фактом входа:
+ * у него есть чёрный список и отметки «сыграно».
+ */
+function narrowed(query, userId) {
+	return Boolean(userId)
+		|| query.get('unrated') !== '1'
+		|| Boolean(periodOf(query.get('sort') ?? 'added'))
+		|| NARROWING.some(name => (query.get(name) ?? '') !== '');
+}
+
+/**
+ * Запросы за числами у остальных фильтров — то самое «фасетное» поведение:
+ * выбрал сложность «сложный», и у типа «Солянка» стоит, сколько сложных солянок,
+ * а не сколько солянок в базе вообще.
+ *
+ * Каждое число считается по всем фильтрам, КРОМЕ своего собственного: иначе
+ * у выбранного типа стояло бы его же число, а у соседних нули, и переключиться
+ * было бы не на что.
+ *
+ * Стоит это дорого, и дороже всего здесь: пять счётов обходят всю отобранную
+ * часть базы, а у D1 прочитанные строки — расход по тарифу. Спасают две вещи.
+ * Первая: ничего не выбрано — не считаем вовсе (см. narrowed), а именно так
+ * открывается главная страница, то есть самый частый запрос из всех. Вторая:
+ * ответ ложится в ту же копилку, что и «найдено» со сложностями, и живёт там
+ * те же пять минут — фильтры у большинства одни и те же (см. cachedCounts).
+ */
+function facetQueries(db, query, userId, hits, groups, bans) {
+	const base = countingQuery(query);
+
+	const whereFor = except => {
+		const asked = new URLSearchParams(base);
+		asked.delete(except);
+		return buildWhere(asked, userId, hits, groups, bans);
+	};
+
+	const topics = whereFor('topic');
+	const languages = whereFor('lang');
+	const subjects = whereFor('subject');
+	const tags = whereFor('tag');
+
+	return [
+		db.prepare(`
+			SELECT COALESCE(p.primary_topic, 'unknown') AS t, COUNT(*) AS c
+			${COUNT_FROM} WHERE ${topics.where} GROUP BY t
+		`).bind(userId, ...topics.params),
+		// Музыкальных считаем по доле, а не по ярлыку: у аниме-пака с опенингами
+		// ярлык будет «Аниме-пак», но в музыкальные он попасть должен — ровно так же,
+		// как их отбирает сам фильтр
+		db.prepare(`
+			SELECT COUNT(*) AS c ${COUNT_FROM}
+			WHERE ${topics.where} AND p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?
+		`).bind(userId, ...topics.params, settings.musicThreshold),
+		db.prepare(`
+			SELECT ${LANG_SQL} AS lang, COUNT(*) AS c
+			${COUNT_FROM} WHERE ${languages.where} GROUP BY lang
+		`).bind(userId, ...languages.params),
+		db.prepare(`
+			SELECT p.franchise_top AS name, COUNT(*) AS count
+			${COUNT_FROM}
+			WHERE ${subjects.where} AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
+			GROUP BY p.franchise_top
+		`).bind(userId, ...subjects.params, settings.subjectPackShare),
+		// Написания тем сводит JS, а не SQL: LOWER() в SQLite умеет только латиницу,
+		// и «Аниме» с «аниме» остались бы двумя разными темами
+		db.prepare(`
+			SELECT je.value AS tag, COUNT(*) AS c
+			${COUNT_FROM}, json_each(CASE WHEN json_valid(p.tags) THEN p.tags ELSE '[]' END) je
+			WHERE ${tags.where}
+			GROUP BY je.value
+		`).bind(userId, ...tags.params),
+	];
+}
+
+/** Пять ответов facetQueries — в то, что читает колонка фильтров. */
+function readFacets([topicRows, musicRow, languageRows, subjectRows, tagRows]) {
+	const topics = {};
+
+	for (const row of topicRows.results) {
+		topics[row.t] = row.c;
+	}
+
+	topics[MUSIC_KEY] = musicRow.results[0].c;
+
+	const languages = {};
+
+	for (const row of languageRows.results) {
+		languages[row.lang] = row.c;
+	}
+
+	const tags = {};
+
+	for (const row of tagRows.results) {
+		const key = String(row.tag ?? '').trim().toLowerCase();
+
+		if (key) {
+			tags[key] = (tags[key] ?? 0) + row.c;
+		}
+	}
+
+	return {
+		topics,
+		languages,
+		subjects: groupSubjects(subjectRows.results)
+			.slice(0, settings.subjectLimit)
+			.map(group => ({ name: group.name, key: group.key, count: group.count })),
+		tags,
+	};
 }
 
 /**
@@ -539,12 +751,13 @@ export async function listPackages(db, query, userId) {
 	// Поиск считается в памяти: он прощает опечатки, а такое сравнение SQL не умеет.
 	// Сведённые типы паков нужны отбору, но спрашиваются заранее: сам разбор условий
 	// синхронный, а тут за списком надо в базу.
-	const [hits, groups] = await Promise.all([
+	const [hits, groups, bans] = await Promise.all([
 		findHits(db, query.get('search') ?? ''),
 		subjectGroups(db),
+		bannedKinds(db, userId),
 	]);
 
-	const { where, params } = buildWhere(query, userId, hits, groups);
+	const { where, params } = buildWhere(query, userId, hits, groups, bans);
 
 	const sortKey = query.get('sort') ?? 'added';
 	const direction = query.get('dir') === 'asc' ? 'ASC' : 'DESC';
@@ -615,12 +828,18 @@ export async function listPackages(db, query, userId) {
 		// строки, которые уедут человеку.
 		rows = await listQuery.all();
 	} else {
-		// Три запроса разом: D1 живёт за сетью, и три отдельные ходки туда заметны
+		// Числа у остальных фильтров считаются только при уже выбранных: на голой
+		// главной странице годятся общие числа из /api/facets, а каждый такой счёт
+		// обходит базу целиком (см. facetQueries)
+		const facets = narrowed(query, userId) ? facetQueries(db, query, userId, hits, groups, bans) : [];
+
+		// Все запросы разом: D1 живёт за сетью, и отдельные ходки туда заметны
 		// глазом там, где дома всё считалось в одном процессе.
-		const [total, list, levels] = await db.batch([
-			db.prepare(`SELECT COUNT(*) AS c ${BASE_FROM} WHERE ${where}`).bind(userId, ...params),
+		const [total, list, levels, ...facetRows] = await db.batch([
+			db.prepare(`SELECT COUNT(*) AS c ${COUNT_FROM} WHERE ${where}`).bind(userId, ...params),
 			listQuery,
-			levelsQuery(db, query, userId, hits, groups),
+			levelsQuery(db, query, userId, hits, groups, bans),
+			...facets,
 		]);
 
 		const levelCounts = {};
@@ -629,7 +848,12 @@ export async function listPackages(db, query, userId) {
 			levelCounts[row.level] = row.c;
 		}
 
-		counted = { total: total.results[0].c, levels: levelCounts };
+		counted = {
+			total: total.results[0].c,
+			levels: levelCounts,
+			counts: facets.length > 0 ? readFacets(facetRows) : null,
+		};
+
 		rememberCounts(countsKey, counted);
 		rows = list;
 	}
@@ -641,6 +865,9 @@ export async function listPackages(db, query, userId) {
 		page,
 		pageSize,
 		levels: counted.levels,
+		// Числа у остальных фильтров. null значит «ничего не выбрано» — тогда
+		// колонка берёт общие числа из /api/facets (см. web/app.js)
+		counts: counted.counts ?? null,
 		packages: rows.results.map(row => toPackage(row, counts)),
 	};
 }
@@ -908,6 +1135,12 @@ export async function getFacets(db) {
 		hardRight: settings.hardRightPercent,
 		franchiseMinThemes: settings.franchiseMinThemes,
 		franchiseDominantShare: settings.franchiseDominantShare,
+		// Пороги, по которым карточка красит числа повторов и спецвопросов,
+		// и по ним же отбирают галочки «мало повторов» и «мало спецвопросов»
+		repeatWarnShare: settings.repeatWarnShare,
+		repeatAlarmShare: settings.repeatAlarmShare,
+		specialWarnShare: settings.specialWarnShare,
+		specialAlarmShare: settings.specialAlarmShare,
 		// Дополнительные типы паков и порог, с которого пак считается паком про одно.
 		// key — то же название латиницей и без номера части: по нему в колонке
 		// фильтров находится «Дота», когда набирают «dota»

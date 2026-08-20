@@ -30,7 +30,12 @@
 	     У Google код метки другой, чем имя файла, и подставить его отсюда нельзя. -->
 	<meta name="yandex-verification" content="42c0743c2b5d2eb6">
 
-	<link rel="icon" href="/favicon.ico" sizes="any">
+	<!-- Значок сайта — webp: весит втрое меньше прежнего ico и не мылится
+	     на экранах повышенной плотности. Ico остаётся ссылкой ниже ради тех,
+	     кто webp не понимает, и лежит по /favicon.ico для закладок и роботов,
+	     которые вёрстку не читают вовсе. -->
+	<link rel="icon" href="/icon.webp" type="image/webp">
+	<link rel="alternate icon" href="/favicon.ico" sizes="any">
 	<link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -47,7 +52,7 @@
 	<header class="topbar">
 		<div class="topbar__inner">
 			<a class="brand" href="/" title="На главную страницу библиотеки">
-				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
+				<span class="brand__mark" aria-hidden="true"><img src="/icon.webp" alt="" width="30" height="30"></span>
 				<span class="brand__text">SIFirePacks</span>
 			</a>
 
@@ -140,18 +145,21 @@
 						<option value="games">Популярные за всё время</option>
 						<option value="rating">По оценке игроков</option>
 						<option value="difficulty">По сложности (от сложных)</option>
+						<!-- Те же два процента, что стоят на карточке рядом со сложностью.
+						     Сложность считается из первого из них, но отвечают они
+						     на разные вопросы: «на сколько вопросов вообще решились»
+						     и «сколько из отвеченного угадали», — и паки, у которых
+						     эти числа расходятся сильнее всего, ищутся именно так. -->
+						<option value="take">По доле отвечавших</option>
+						<option value="right">По доле правильных ответов</option>
 						<option value="questions">По числу вопросов</option>
 						<option value="size">По размеру</option>
-						<option value="name">По названию</option>
-						<option value="anime">По доле аниме</option>
-						<option value="manga">По доле манги</option>
-						<option value="games_share">По доле игр</option>
-						<option value="movies">По доле кино и сериалов</option>
-						<option value="cartoons">По доле мультиков</option>
-						<option value="books">По доле книг</option>
-						<option value="comics">По доле комиксов</option>
-						<option value="music">По доле музыки</option>
-						<option value="franchise">По повторам одной франшизы</option>
+						<!-- Сортировок по долям тематик здесь больше нет: «по доле аниме»
+						     отвечало на тот же вопрос, что и галочка «Аниме» в колонке
+						     фильтров, только хуже — списком, где сверху стоят паки
+						     со стопроцентной долей, то есть ровно те, что и так первыми
+						     попадаются в отборе по типу. Туда же ушли «по названию»
+						     и «по повторам одной франшизы». -->
 					</select>
 				</label>
 
@@ -183,7 +191,7 @@
 
 				<label class="check" id="unratedRow">
 					<input type="checkbox" id="unrated" checked>
-					<span>Показывать паки без оценки</span>
+					<span>Показывать паки без сложности</span>
 				</label>
 			</section>
 
@@ -216,6 +224,43 @@
 				<label class="check">
 					<input type="checkbox" id="onlyPlanned">
 					<span>Только запланированные</span>
+				</label>
+
+				<!-- Спрятанное в чёрный список — тоже своя отметка, и смотрят на неё
+				     оттуда же, откуда на сыгранное. Управляют списком по-прежнему
+				     в профиле; здесь только «покажи, что я спрятал», чтобы снять
+				     запрет можно было прямо на карточке, не уходя со страницы.
+				     Прятать нечем — галочка гаснет (см. renderBlacklistFilter). -->
+				<label class="check" id="blacklistRow">
+					<input type="checkbox" id="showBlacklisted">
+					<span>Показать паки и авторов в чёрном списке</span>
+				</label>
+			</section>
+
+			<!-- Три галочки про то, каким пак окажется за столом, а не про то, о чём
+			     он. Стоят выше типов пака нарочно: «дайте ровный пак на вечер» —
+			     вопрос более общий, чем «дайте аниме», и решают его раньше.
+			     Работают все три вместе, ни одна не снимает соседнюю.
+
+			     «Мало» у первых двух значит ровно то же, что молчание карточки:
+			     пороги общие с цветом чисел на ней (см. repeatWarnShare
+			     и specialWarnShare в src/settings.js). -->
+			<section class="filters__block">
+				<h2 class="filters__title">Без перекосов</h2>
+
+				<label class="check" id="lowRepeatsRow">
+					<input type="checkbox" id="lowRepeats">
+					<span>Мало повторов</span>
+				</label>
+
+				<label class="check" id="lowSpecialsRow">
+					<input type="checkbox" id="lowSpecials">
+					<span>Мало спецвопросов</span>
+				</label>
+
+				<label class="check" id="noFranchiseRow">
+					<input type="checkbox" id="noFranchise">
+					<span>Без паков про одну франшизу</span>
 				</label>
 			</section>
 

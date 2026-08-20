@@ -70,7 +70,10 @@ import {
 	config, TOPICS_VERSION, PROGRESS_PREFIX, OTHER_KINDS, GENRES, FORMS, ORIGINS,
 	LANGUAGE_NAMES, decadeName,
 } from './config.js';
-import { db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds, jsonOrDefault } from './db.js';
+import {
+	db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds,
+	jsonOrDefault, repeatShare,
+} from './db.js';
 import { readTopic as readTopicHtml } from './vk.js';
 import { readTopic as readTopicApi, readTopicSince, hasVkApi, refreshDocumentUrl } from './vkapi.js';
 import { openRemoteZip, DeadLinkError } from './zip.js';
@@ -711,7 +714,7 @@ const updateUrl = db.prepare('UPDATE packages SET url = ? WHERE id = ?');
 const updateLogo = db.prepare('UPDATE packages SET logo_file = ?, logo_state = ? WHERE id = ?');
 const updateTopics = db.prepare(`
 	UPDATE packages SET topic_shares = ?, primary_topic = ?, primary_share = ?,
-		franchises = ?, franchise_top = ?, franchise_top_share = ?, other_kinds = ?,
+		franchises = ?, franchise_top = ?, franchise_top_share = ?, repeat_share = ?, other_kinds = ?,
 		genres = ?, genre_topic = ?,
 		forms = ?, form_topic = ?, form_coverage = ?,
 		decades = ?, decade_coverage = ?, origins = ?, origin_coverage = ?,
@@ -1874,6 +1877,10 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		JSON.stringify(franchises),
 		top?.name ?? null,
 		top?.share ?? null,
+		// Доля повторов хранится готовой: по ней отбирает галочка «мало повторов»,
+		// и считать её на лету из этого же JSON выходит впятеро дороже самой
+		// выдачи (см. repeatShare в keys.js)
+		repeatShare(franchises, config.subjectPackShare),
 		JSON.stringify(kinds),
 		JSON.stringify(genres),
 		genres.length > 0 ? topic : null,
@@ -2406,7 +2413,9 @@ function recalcTopics() {
 	//
 	// Переспрашивать модель ради этого не надо: убирается лишняя строка,
 	// а не считается новая, — и убрать её можно по тому, что уже записано.
-	const rewriteFranchises = db.prepare('UPDATE packages SET franchises = ? WHERE id = ?');
+	// Доля повторов пересчитывается вместе со списком: она из него и считается,
+	// и разойдись они — галочка «мало повторов» отбирала бы по вчерашнему списку
+	const rewriteFranchises = db.prepare('UPDATE packages SET franchises = ?, repeat_share = ? WHERE id = ?');
 
 	let labelled = 0;
 	let dropped = 0;
@@ -2426,7 +2435,7 @@ function recalcTopics() {
 		const kept = stored.filter(f => !isCategoryName(f.name));
 
 		if (kept.length !== stored.length) {
-			rewriteFranchises.run(JSON.stringify(kept), row.id);
+			rewriteFranchises.run(JSON.stringify(kept), repeatShare(kept, config.subjectPackShare), row.id);
 			cleaned++;
 		}
 

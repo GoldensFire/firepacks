@@ -511,13 +511,30 @@ function createFranchises(pack) {
 	// и по нему паки сравниваются между собой с одного взгляда.
 	const total = franchises.reduce((sum, item) => sum + item.themes, 0);
 
+	// …а красится оно по доле, а не по себе самому. Десять повторов в паке
+	// на четыре сотни вопросов — обычный большой пак; те же десять в паке
+	// на полсотни означают, что треть вечера уйдёт на одно и то же. Доли
+	// франшиз кое-где пересекаются, поэтому сумма изредка переваливает
+	// за сотню — на порогах это не сказывается, но писать «110%» нельзя
+	const share = Math.min(1, franchises.reduce((sum, item) => sum + item.share, 0));
+	const percent = Math.round(share * 100);
+
 	const title = iconText('repeat', 'Повторы:', 'repeats__title');
-	title.append(element('span', 'repeats__total', String(total)));
+	const value = element('span', `repeats__total${alarmClass(share, facets.repeatWarnShare, facets.repeatAlarmShare)}`, String(total));
+	title.append(value);
 	title.title = `Повторяющихся тем в паке: ${total} — они приходятся на `
-		+ `${franchises.length} ${plural(franchises.length, 'франшизу', 'франшизы', 'франшиз')}`;
+		+ `${franchises.length} ${plural(franchises.length, 'франшизу', 'франшизы', 'франшиз')} `
+		+ `и на ${percent}% вопросов пака`;
 	box.append(title);
 
-	for (const franchise of franchises) {
+	// Ярлыков показывается три, и это не обрезка списка ради красоты. Повторы
+	// приходят от частых к редким, и всё, что решает — «пак возвращается вот
+	// к этому», — стоит в самом начале; хвост из «×2, ×2, ×2» занимал у карточки
+	// две-три строки и добавлял к сказанному ровно ничего. Остальные никуда
+	// не деваются — их открывает кнопка рядом, на том же месте.
+	const HEAD = 3;
+
+	const chipFor = franchise => {
 		const chip = element('button', 'repeats__item');
 		chip.type = 'button';
 		chip.append(
@@ -533,10 +550,62 @@ function createFranchises(pack) {
 
 		chip.addEventListener('click', () => pickFilter('franchise', franchise.name));
 
-		box.append(chip);
+		return chip;
+	};
+
+	for (const franchise of franchises.slice(0, HEAD)) {
+		box.append(chipFor(franchise));
+	}
+
+	const hidden = franchises.slice(HEAD);
+
+	if (hidden.length > 0) {
+		const more = element('button', 'repeats__more');
+		more.type = 'button';
+		more.textContent = `Смотреть все повторы (${franchises.length})`;
+		more.title = `Показать остальные ${hidden.length} `
+			+ `${plural(hidden.length, 'франшизу', 'франшизы', 'франшиз')}`;
+
+		// Раскрывается на месте и обратно не сворачивается: кнопка исчезает,
+		// а её место занимают те самые ярлыки, ради которых на неё нажали.
+		// Сворачивать нечего — карточка и так вернётся в прежний вид при
+		// следующем обновлении списка
+		more.addEventListener('click', event => {
+			event.stopPropagation();
+			event.preventDefault();
+
+			for (const franchise of hidden) {
+				box.append(chipFor(franchise));
+			}
+
+			more.remove();
+		});
+
+		box.append(more);
 	}
 
 	return box;
+}
+
+/**
+ * Цвет числа по доле пака: до первого порога — как всё остальное, после первого —
+ * оранжевым, после второго — красным.
+ *
+ * Общая на двоих: так красится и число повторов, и число спецвопросов. Пороги
+ * у них разные (спецвопрос ломает игру сильнее повтора, и его порог вдвое ниже),
+ * а правило одно, и заводить его дважды не за чем — иначе одно из двух чисел
+ * однажды окажется покрашено по-своему.
+ */
+function alarmClass(share, warn, alarm) {
+	if (share >= (alarm ?? Infinity)) {
+		return ' value--alarm';
+	}
+
+	if (share >= (warn ?? Infinity)) {
+		return ' value--warn';
+	}
+
+	return '';
 }
 
 /**
@@ -813,14 +882,25 @@ function createGenres(pack) {
 		return null;
 	}
 
-	// Цвет куска — по месту в полоске, а не по ключу жанра: ключи у каждой
-	// тематики свои, и один и тот же «comedy» встречается в трёх списках
+	// Цвет куска — по самому жанру, а не по месту в полоске.
+	//
+	// По месту он и достался бы: первый кусок красный, второй синий, третий
+	// зелёный. Внутри одной карточки это читается, а между карточками — нет:
+	// комедия, стоящая в одном паке первой, а в другом третьей, оказывалась там
+	// красной, а тут зелёной, и цвет переставал что-либо значить вовсе. Хуже
+	// того, он значил неправду: два одинаково окрашенных куска на соседних
+	// карточках — это два разных жанра.
+	//
+	// Теперь ключ жанра и есть имя цвета (см. shares__part--genre-* в style.css),
+	// один и тот же во всех паках и во всех тематиках сразу: «комедия» всюду
+	// одного цвета, попалась она в кинопаке, в аниме-паке или в музыкальном.
+	//
 	// С большой буквы: в списках жанры записаны строчными («рок», «шутеры»),
 	// потому что писались как перечисление внутри строки, — а стоят они
 	// подписями кусков полоски, каждая сама по себе, рядом с «Аниме» и «Играми»
 	// из полоски выше. Строчная буква среди них читается как обрывок фразы
-	const parts = genres.map((genre, index) => ({
-		key: `genre-${index + 1}`,
+	const parts = genres.map(genre => ({
+		key: `genre-${genre.key}`,
 		name: capitalize(list.list[genre.key]),
 		value: genre.share,
 	}));
@@ -888,11 +968,22 @@ function createDecades(pack) {
 		return null;
 	}
 
-	// Цвет — по месту в полоске, как и у жанров, но порядок здесь не «от
-	// большего к меньшему», а по времени: полоска годов, где восьмидесятые
-	// стоят правее двадцатых, читается как ошибка, сколько её ни подписывай
-	const parts = decades.map((decade, index) => ({
-		key: `decade-${index + 1}`,
+	// Цвет — по самому десятилетию, как и у жанров по самому жанру. Раньше он
+	// доставался по месту в полоске, и выходило так: у пака, где есть всё
+	// от пятидесятых до двадцатых, девяностые — пятый кусок и потому зелёные,
+	// а у пака из одних девяностых и двухтысячных они первый кусок и потому
+	// синие. Шкала «от холодного к тёплому» при этом сохранялась внутри каждой
+	// карточки и не значила ничего между ними.
+	//
+	// Теперь холодное — это и есть давнее, в любом паке: пятидесятые всегда
+	// синие, двадцатые всегда красные, и по одному взгляду на полоску видно,
+	// «оттуда» пак или «отсюда», — даже не сравнивая его с соседним.
+	//
+	// Порядок кусков — по времени, а не «от большего к меньшему»: полоска годов,
+	// где восьмидесятые стоят правее двадцатых, читается как ошибка, сколько её
+	// ни подписывай
+	const parts = decades.map(decade => ({
+		key: `decade-${decade.key}`,
 		name: decadeName(decade.key),
 		value: decade.share,
 	}));
@@ -961,7 +1052,16 @@ function createSpecials(pack) {
 		return null;
 	}
 
-	const box = iconText('special', pack.specialCount, pack.specialCount > 0 ? 'meta__specials' : null);
+	// Красится по доле, а не по числу: двадцать аукционов в паке на четыре сотни
+	// вопросов — это обычный пак, а те же двадцать на полутора сотнях означают,
+	// что каждый восьмой вопрос идёт не по общим правилам. Красится вместе
+	// со значком: цифра тут мелкая, и одна она в строке мелких цифр не заметна.
+	// Вопросов не разобрано вовсе — доли нет, и цвета тоже: молчать честнее,
+	// чем красить наугад
+	const share = pack.questionCount > 0 ? pack.specialCount / pack.questionCount : null;
+	const alarm = share === null ? '' : alarmClass(share, facets.specialWarnShare, facets.specialAlarmShare);
+
+	const box = iconText('special', pack.specialCount, `${pack.specialCount > 0 ? 'meta__specials' : ''}${alarm}`.trim() || null);
 
 	const parts = Object.entries(pack.specialStat ?? {})
 		.sort((a, b) => b[1] - a[1])
@@ -969,6 +1069,7 @@ function createSpecials(pack) {
 
 	box.title = pack.specialCount > 0
 		? `Спецвопросов: ${pack.specialCount} (${parts.join(', ')})`
+			+ (share === null ? '' : ` — ${Math.round(share * 100)}% вопросов пака`)
 		: 'Спецвопросов в паке нет: ни аукционов, ни котов в мешке';
 
 	return box;
@@ -1014,7 +1115,11 @@ function createBadges(pack) {
 
 	const badge = level
 		? element('span', `badge badge--${pack.stats.levelKey}`, pack.stats.levelName)
-		: element('span', 'badge badge--none', 'Нет оценки');
+		// «Сложность n/a», а не «Нет оценки»: слово «оценка» на карточке занято
+		// оценкой игроков — теми самыми звёздами строкой ниже, — и ярлык «Нет
+		// оценки» читался как «пак никто не оценил». Речь же о другом: статистики
+		// SIGame не хватило, чтобы посчитать сложность
+		: element('span', 'badge badge--none', 'Сложность n/a');
 
 	// Ступень за неточные ответы стоит назвать: иначе пак, где отвечали на 70%
 	// вопросов, выглядит средним без всякой причины
@@ -1588,15 +1693,35 @@ function createCopyNameButton(name) {
 	button.title = `Скопировать название: «${name}»`;
 	button.setAttribute('aria-label', button.title);
 
+	// Сколько знак держится галочкой после удачного копирования. Полторы секунды —
+	// это «успел заметить, но не успел решить, что кнопка сломалась»: сообщение
+	// внизу экрана говорит то же самое, только смотрят в этот миг не на него,
+	// а на саму кнопку, по которой только что нажали.
+	const HELD = 1500;
+	let timer = null;
+
 	button.addEventListener('click', async event => {
 		event.stopPropagation();
 		event.preventDefault();
 
-		if (await copyText(name)) {
-			showToast('Название пака скопировано');
-		} else {
+		if (!await copyText(name)) {
 			showToast('Не вышло скопировать название');
+			return;
 		}
+
+		showToast('Название пака скопировано');
+
+		// Два листка сменяются галочкой и через полторы секунды возвращаются
+		// обратно. Нажали второй раз, пока держится первая, — отсчёт начинается
+		// заново, а не гасит галочку посреди второго нажатия
+		clearTimeout(timer);
+		button.classList.add('card__name-copy--done');
+		button.replaceChildren(icon('check'));
+
+		timer = setTimeout(() => {
+			button.classList.remove('card__name-copy--done');
+			button.replaceChildren(icon('copy'));
+		}, HELD);
 	});
 
 	return button;
@@ -1742,7 +1867,7 @@ function showToast(text) {
  * при этом не должно: кнопки, ссылки, темы, звёзды оценки. Всё остальное —
  * обложка, числа, полоски, описание — мишень для перехода (см. makeCardClickable).
  */
-const OWN_TARGETS = 'a, button, input, label, select, textarea, summary, .tag, .badge--topic, .rating, .card__ban';
+const OWN_TARGETS = 'a, button, input, label, select, textarea, summary, .badge--topic, .rating, .card__ban';
 
 /**
  * Нажатие на карточку целиком открывает страницу пака.
@@ -1999,22 +2124,23 @@ function createCard(pack, options = {}) {
 		card.append(repeats);
 	}
 
-	if (pack.tags.length > 0) {
-		const tags = element('div', 'tags');
+	// Тегов на карточке больше нет.
+	//
+	// Стояли они строкой серых ярлыков под полосками и в лучшем случае повторяли
+	// то, что уже сказано выше: у аниме-пака «Аниме», у музыкального «Музыка»,
+	// у солянки — десяток слов вроде «Общие знания», «Разное», «Микс». Пишет их
+	// автор пака в редакторе, кто как умеет, и на вопрос «что это за пак» они
+	// отвечали хуже всего остального на карточке: хуже ярлыка тематики, хуже
+	// полоски долей, хуже строки от модели. А места занимали столько же.
+	//
+	// Отбор по темам никуда не делся — он в колонке фильтров слева, и там же
+	// видно, сколько паков у каждой темы. Пропало только перечисление их
+	// на самой карточке.
 
-		for (const tag of pack.tags) {
-			const chip = element('span', 'tag', tag);
-			chip.title = `Показать паки с темой «${tag}»`;
-			chip.addEventListener('click', () => pickFilter('tag', tag));
-			tags.append(chip);
-		}
-
-		card.append(tags);
-	}
-
-	// Описание от автора идёт сразу за темами: темы говорят, о чём пак, описание —
-	// что за ними стоит. Раньше оно лежало в «Подробнее», куда заглядывают в
-	// последнюю очередь, — и половина карточек выглядела так, будто их не описывали
+	// Описание от автора идёт сразу за полосками: полоски говорят, о чём пак,
+	// описание — что за ними стоит. Раньше оно лежало в «Подробнее», куда
+	// заглядывают в последнюю очередь, — и половина карточек выглядела так,
+	// будто их не описывали
 	const description = createDescription(pack, standalone);
 
 	if (description) {

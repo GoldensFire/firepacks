@@ -120,6 +120,18 @@ const VERSIONED = [
  */
 const ICON = 'favicon.ico';
 
+/**
+ * Он же в webp — тот значок, что стоит в самой вёрстке: и во вкладке, и в шапке
+ * рядом с названием сайта. Весит втрое меньше ico и не мылится на экранах
+ * повышенной плотности. Ico остаётся ради тех, кто вёрстку не читает вовсе:
+ * закладок, старых вкладок и поисковых роботов, которые просят /favicon.ico
+ * по имени.
+ */
+const ICON_WEBP = 'icon.webp';
+
+/** Как этот файл называется в корне проекта. */
+const ICON_WEBP_SOURCE = 'icon_Сжатый.webp';
+
 /** Отпечаток содержимого: восьми знаков хватает, чтобы имена не совпали. */
 const fingerprint = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 8);
 
@@ -168,6 +180,9 @@ const HEADERS = `# Собрано scripts/build-web.js
 ${VERSIONED.map(name => `/${name}\n  Cache-Control: public, max-age=31536000, immutable`).join('\n\n')}
 
 /favicon.ico
+  Cache-Control: public, max-age=604800
+
+/icon.webp
   Cache-Control: public, max-age=604800
 `;
 
@@ -226,6 +241,7 @@ async function main() {
 	// Значок лежит в корне проекта рядом с ярлыками, а не в папке сайта:
 	// дома его отдаёт сервер как /favicon.ico, здесь он просто там и лежит.
 	fs.copyFileSync(path.join(root, 'icon.ico'), path.join(publicPath, 'favicon.ico'));
+	fs.copyFileSync(path.join(root, ICON_WEBP_SOURCE), path.join(publicPath, ICON_WEBP));
 
 	// Отпечатки в ссылках. Считаются по уже скопированным файлам — по тем самым,
 	// которые уедут наверх, а не по их исходникам. Правится только вёрстка:
@@ -233,7 +249,7 @@ async function main() {
 	// их просят, и этого хватает, чтобы браузер взял новый файл вместо старого.
 	const stamps = new Map();
 
-	for (const name of [...VERSIONED, ICON]) {
+	for (const name of [...VERSIONED, ICON, ICON_WEBP]) {
 		const file = path.join(publicPath, name);
 
 		if (fs.existsSync(file)) {

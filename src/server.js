@@ -10,6 +10,7 @@ import {
 } from './config.js';
 import {
 	db, jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
+	SPECIAL_SHARE_SQL,
 } from './db.js';
 import { readPackList, matchPackList, askedNames, chunk, NAME_KEY_SQL } from './packlist.js';
 import { runSearch, warmSearch } from './search.js';
@@ -99,6 +100,15 @@ const SORTS = {
 	games: 'COALESCE(s.started_games, -1)',
 	questions: 'COALESCE(p.question_count, -1)',
 	size: 'COALESCE(p.size, -1)',
+	// Те же два процента, что стоят на карточке рядом со сложностью. Паки, где
+	// статистики нет, уходят в конец при любом направлении: -1 это не «ноль
+	// процентов», а «считать не по чему»
+	take: 'COALESCE(s.take_percent, -1)',
+	right: 'COALESCE(s.right_percent, -1)',
+	// Доли тематик, название и повторы франшизы из списка сортировок убраны,
+	// а отсюда — нет: по старым ссылкам (/?sort=name) люди ходят, и пусть они
+	// работают, как работали
+
 	anime: shareOf('anime'),
 	manga: shareOf('manga'),
 	games_share: shareOf('games'),
@@ -308,6 +318,25 @@ function toPackage(row) {
 	};
 }
 
+/**
+ * Что этот человек вообще прятал: «pack», «author», оба или ничего.
+ *
+ * Спрашивается затем, чтобы не спрашивать лишнего. Проверка чёрного списка —
+ * это два NOT EXISTS на каждую строку базы, один из них с подшиванием авторов,
+ * и стоит она шестьдесят миллисекунд на обходе одиннадцати тысяч паков, а счёт
+ * типов паков — все сто восемьдесят. Платилось это всеми и всегда, включая тех,
+ * у кого в списке ноль записей, — то есть почти всеми: прячут паки единицы,
+ * а колонка фильтров считает по шесть раз на запрос.
+ *
+ * Сам список крошечный и лежит по первичному ключу (user_id, kind, value),
+ * так что вопрос к нему обходится в микросекунды. Запоминать ответ не станем:
+ * спрятанный пак обязан пропасть из выдачи со следующего же обновления списка,
+ * а не через отведённое копилке время.
+ */
+const bannedKindsQuery = db.prepare('SELECT DISTINCT kind FROM blacklist WHERE user_id = ?');
+
+const bannedKinds = userId => new Set(userId ? bannedKindsQuery.all(userId).map(row => row.kind) : []);
+
 function buildWhere(query, userId) {
 	const conditions = [`p.status = 'ok'`];
 	const params = [];
@@ -318,13 +347,17 @@ function buildWhere(query, userId) {
 	//
 	// Страница управления списком просит показать спрятанное явно: иначе снять
 	// пак с чёрного списка можно было бы только через профиль.
-	if (userId && query.get('showBlacklisted') !== '1') {
+	const banned = query.get('showBlacklisted') === '1' ? new Set() : bannedKinds(userId);
+
+	if (banned.has('pack')) {
 		conditions.push(`NOT EXISTS (
 			SELECT 1 FROM blacklist b
 			WHERE b.user_id = ? AND b.kind = 'pack' AND b.value = ${PACK_KEY_SQL}
 		)`);
 		params.push(userId);
+	}
 
+	if (banned.has('author')) {
 		conditions.push(`NOT EXISTS (
 			SELECT 1 FROM blacklist b
 			JOIN pack_authors pa ON pa.author_key = b.value AND pa.package_id = p.id
@@ -427,6 +460,37 @@ function buildWhere(query, userId) {
 		params.push(...names, config.subjectPackShare);
 	}
 
+	// Три галочки про то, каким пак будет за столом, а не про что он.
+	//
+	// Стоят они рядом и работают вместе: «мало повторов», «мало спецвопросов»
+	// и «без паков про одну франшизу» отвечают на один и тот же вопрос — «дайте
+	// ровный пак на вечер, без перекосов». Порознь каждая отсекает свой перекос,
+	// вместе — все сразу, и потому ни одна не снимает соседнюю.
+	//
+	// Пороги те же самые, по которым числа на карточке красятся цветом
+	// (см. repeatWarnShare и specialWarnShare в settings.js): «мало» здесь
+	// значит ровно «столько, что карточка об этом молчит», а не отдельное число,
+	// про которое пришлось бы догадываться.
+	if (query.get('lowRepeats') === '1') {
+		conditions.push('COALESCE(p.repeat_share, 0) < ?');
+		params.push(config.repeatWarnShare);
+	}
+
+	// У пака без разобранных вопросов доли нет вовсе, и «мало» про него сказать
+	// нельзя: он не проходит, а не считается нулём
+	if (query.get('lowSpecials') === '1') {
+		conditions.push(`${SPECIAL_SHARE_SQL} < ?`);
+		params.push(config.specialWarnShare);
+	}
+
+	// Пак про одну франшизу — тот самый, которому карточка ставит ярлык «целиком
+	// про одно». Порог общий с фильтром subject (см. subjectPackShare): что сайт
+	// называет паком про одно, то эта галочка и прячет.
+	if (query.get('noFranchise') === '1') {
+		conditions.push('COALESCE(p.franchise_top_share, 0) < ?');
+		params.push(config.subjectPackShare);
+	}
+
 	if (query.get('hidePlayed') === '1') {
 		conditions.push('pl.package_id IS NULL');
 	}
@@ -467,6 +531,28 @@ const BASE_FROM = `
 	) r ON r.pack_key = ${PACK_KEY_SQL}
 `;
 
+/**
+ * То же начало, но для счёта, а не для выдачи: без оценок.
+ *
+ * Оценки подшиваются свёрнутыми по ключу пака — то есть целой группировкой всей
+ * таблицы ratings, — и в выдаче это оправдано: балл стоит на каждой карточке.
+ * В счёте же он не спрашивается ни разу, а платится сполна: обход всей базы
+ * с этим подшиванием стоит семьдесят миллисекунд вместо трёх, а подсчёт типов
+ * паков — сто восемьдесят вместо шести. Считов таких на один запрос шесть
+ * (найдено, сложности и четыре колонки фильтров), и вместе они складывались
+ * в полсекунды на ровном месте.
+ *
+ * Ни одно условие отбора оценок не касается — по ним не отбирают, только
+ * сортируют, — поэтому вычесть их из счёта можно молча.
+ */
+const COUNT_FROM = `
+	FROM packages p
+	LEFT JOIN stats s ON s.package_id = p.id
+	LEFT JOIN played pl ON pl.package_id = p.id
+	LEFT JOIN planned pn ON pn.package_id = p.id
+	LEFT JOIN temp.search_hits h ON h.package_id = p.id
+`;
+
 /** Своя оценка пака. Отдельным подзапросом: без входа спрашивать не о чем. */
 const MY_SCORE = `(SELECT score FROM ratings WHERE pack_key = ${PACK_KEY_SQL} AND user_id = ?) AS my_score`;
 
@@ -480,8 +566,32 @@ const MY_SCORE = `(SELECT score FROM ratings WHERE pack_key = ${PACK_KEY_SQL} AN
  * Галочка «показывать паки без оценки» тоже: здесь считаются только те, у кого
  * оценка есть.
  */
-function countLevels(query, userId) {
+/**
+ * Отбор, по которому считаются числа в колонке фильтров.
+ *
+ * От выдачи он отличается ровно одним: сыгранное в счёт не идёт. Колонка отвечает
+ * на вопрос «во что ещё не игранное тут можно сыграть», и число, в которое
+ * входят двести уже сыгранных паков, отвечает на него неправильно — человек
+ * жмёт на «Аниме, 812» и получает четырнадцать карточек.
+ *
+ * Исключение одно и оно очевидное: когда выбрано «только сыгранные», спрятать
+ * сыгранное значит обнулить всю колонку. Там счёт идёт по тому, что выбрано.
+ *
+ * Работает это, разумеется, только с отметками, которые доехали до базы: до входа
+ * они лежат в самом браузере, и сервер о них не знает (см. renderPlayedFilters).
+ */
+function countingQuery(query) {
 	const asked = new URLSearchParams(query);
+
+	if (asked.get('onlyPlayed') !== '1') {
+		asked.set('hidePlayed', '1');
+	}
+
+	return asked;
+}
+
+function countLevels(query, userId) {
+	const asked = countingQuery(query);
 	asked.delete('levels');
 	asked.set('unrated', '1');
 
@@ -489,7 +599,7 @@ function countLevels(query, userId) {
 
 	const rows = db.prepare(`
 		SELECT s.level AS level, COUNT(*) AS c
-		${BASE_FROM}
+		${COUNT_FROM}
 		WHERE ${where} AND s.level IS NOT NULL
 		GROUP BY s.level
 	`).all(...params);
@@ -501,6 +611,127 @@ function countLevels(query, userId) {
 	}
 
 	return counts;
+}
+
+/**
+ * Фильтры, от которых числа в колонке меняются. Нужны, чтобы отличить «человек
+ * ничего не выбирал» от всего остального: в первом случае числа по базе уже
+ * посчитаны в /api/facets, и пересчитывать их незачем (см. countFacets).
+ */
+const NARROWING = [
+	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
+	'onlyPlayed', 'onlyPlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
+];
+
+/**
+ * Сужена ли выборка хоть чем-нибудь. Вошедший сужает её самим фактом входа:
+ * у него есть чёрный список и отметки «сыграно», и общие числа по базе ему
+ * не годятся уже на первой странице.
+ */
+function narrowed(query, userId) {
+	return Boolean(userId)
+		|| query.get('unrated') !== '1'
+		|| Boolean(periodOf(query.get('sort') ?? 'added'))
+		|| NARROWING.some(name => (query.get(name) ?? '') !== '');
+}
+
+/**
+ * Числа у остальных фильтров при уже выбранных — то самое «фасетное» поведение:
+ * выбрал сложность «сложный», и у типа «Солянка» стоит, сколько сложных солянок,
+ * а не сколько солянок в базе вообще.
+ *
+ * Считается каждое число по всем фильтрам, КРОМЕ своего собственного. Иначе
+ * у выбранного типа стояло бы его же число, а у всех соседних нули, и переключиться
+ * было бы не на что — та же причина, по которой из подсчёта сложностей выброшена
+ * сама сложность.
+ *
+ * Ничего не выбрано — не считаем вовсе и возвращаем null: числа по всей базе
+ * уже посчитаны в /api/facets, а каждый такой подсчёт обходит всю отобранную
+ * часть базы целиком. Дома это доли секунды, наверху — прочитанные строки D1,
+ * то есть прямой расход по тарифу (см. cachedCounts в cf/src/library.js).
+ * Главную страницу, которую открывают чаще всего остального, это оставляет
+ * ровно такой же по цене, какой она была.
+ */
+function countFacets(query, userId) {
+	if (!narrowed(query, userId)) {
+		return null;
+	}
+
+	const base = countingQuery(query);
+
+	const whereFor = except => {
+		const asked = new URLSearchParams(base);
+		asked.delete(except);
+		return buildWhere(asked, userId);
+	};
+
+	const topics = whereFor('topic');
+	const languages = whereFor('lang');
+	const subjects = whereFor('subject');
+	const tags = whereFor('tag');
+
+	const topicCounts = {};
+
+	for (const row of db.prepare(`
+		SELECT COALESCE(p.primary_topic, 'unknown') AS t, COUNT(*) AS c
+		${COUNT_FROM} WHERE ${topics.where} GROUP BY t
+	`).all(...topics.params)) {
+		topicCounts[row.t] = row.c;
+	}
+
+	// Музыкальных считаем по доле, а не по ярлыку: у аниме-пака с опенингами
+	// ярлык будет «Аниме-пак», но в музыкальные он попасть должен — ровно так же,
+	// как их отбирает сам фильтр
+	topicCounts[MUSIC_KEY] = db.prepare(`
+		SELECT COUNT(*) AS c ${COUNT_FROM}
+		WHERE ${topics.where} AND p.primary_topic IS NOT NULL AND ${shareOf(MUSIC_KEY)} >= ?
+	`).get(...topics.params, config.musicThreshold).c;
+
+	const languageCounts = {};
+
+	for (const row of db.prepare(`
+		SELECT ${LANG_SQL} AS lang, COUNT(*) AS c
+		${COUNT_FROM} WHERE ${languages.where} GROUP BY lang
+	`).all(...languages.params)) {
+		languageCounts[row.lang] = row.c;
+	}
+
+	// Написания сводит groupSubjects — тот же, что и у общего списка: «Дота»
+	// и «Дота 2» это один тип пака и одна строка в колонке
+	const subjectRows = db.prepare(`
+		SELECT p.franchise_top AS name, COUNT(*) AS count
+		${COUNT_FROM}
+		WHERE ${subjects.where} AND p.franchise_top IS NOT NULL AND p.franchise_top_share >= ?
+		GROUP BY p.franchise_top
+	`).all(...subjects.params, config.subjectPackShare);
+
+	// Теги сведены по написаниям в JS, а не в SQL, и это не лень: LOWER() в SQLite
+	// умеет только латиницу, и «Аниме» с «аниме» остались бы двумя разными темами.
+	// Поэтому из базы приходит счёт по каждому написанию, а сводит их тот же код,
+	// что и в /api/facets, — по строчной букве.
+	const tagCounts = {};
+
+	for (const row of db.prepare(`
+		SELECT je.value AS tag, COUNT(*) AS c
+		${COUNT_FROM}, json_each(CASE WHEN json_valid(p.tags) THEN p.tags ELSE '[]' END) je
+		WHERE ${tags.where}
+		GROUP BY je.value
+	`).all(...tags.params)) {
+		const key = String(row.tag ?? '').trim().toLowerCase();
+
+		if (key) {
+			tagCounts[key] = (tagCounts[key] ?? 0) + row.c;
+		}
+	}
+
+	return {
+		topics: topicCounts,
+		languages: languageCounts,
+		subjects: groupSubjects(subjectRows)
+			.slice(0, config.subjectLimit)
+			.map(group => ({ name: group.name, key: group.key, count: group.count })),
+		tags: tagCounts,
+	};
 }
 
 function listPackages(query, userId) {
@@ -556,7 +787,7 @@ function listPackages(query, userId) {
 	const page = Math.max(parseInt(query.get('page') ?? '1', 10) || 1, 1);
 	const offset = (page - 1) * pageSize;
 
-	const total = db.prepare(`SELECT COUNT(*) AS c ${BASE_FROM} WHERE ${where}`).get(...params).c;
+	const total = db.prepare(`SELECT COUNT(*) AS c ${COUNT_FROM} WHERE ${where}`).get(...params).c;
 
 	// Своя оценка стоит в списке полей, то есть её параметр идёт ПЕРЕД теми,
 	// что собрал buildWhere: порядок здесь и есть порядок подстановки.
@@ -574,7 +805,16 @@ function listPackages(query, userId) {
 	// Числа сложностей считаются здесь же, а не отдельным запросом с сайта:
 	// они меняются ровно тогда же, когда меняется выдача, и вторая ходка
 	// на сервер ради них означала бы, что колонка слева на миг врёт
-	return { total, page, pageSize, levels: countLevels(query, userId), packages: rows.map(toPackage) };
+	return {
+		total,
+		page,
+		pageSize,
+		levels: countLevels(query, userId),
+		// Числа у остальных фильтров: считаются по уже выбранному, а не по всей базе.
+		// null значит «ничего не выбрано» — тогда годятся общие числа из /api/facets
+		counts: countFacets(query, userId),
+		packages: rows.map(toPackage),
+	};
 }
 
 /**
@@ -889,6 +1129,13 @@ function getFacets() {
 		hardRight: config.hardRightPercent,
 		franchiseMinThemes: config.franchiseMinThemes,
 		franchiseDominantShare: config.franchiseDominantShare,
+		// Пороги, по которым карточка красит числа повторов и спецвопросов,
+		// и по ним же отбирают галочки «мало повторов» и «мало спецвопросов»:
+		// «мало» на сайте значит ровно «столько, что карточка об этом молчит»
+		repeatWarnShare: config.repeatWarnShare,
+		repeatAlarmShare: config.repeatAlarmShare,
+		specialWarnShare: config.specialWarnShare,
+		specialAlarmShare: config.specialAlarmShare,
 		// Дополнительные типы паков и порог, с которого пак считается паком про одно.
 		// key — то же название латиницей и без номера части: по нему в колонке
 		// фильтров находится «Дота», когда набирают «dota»
@@ -1783,6 +2030,13 @@ const server = http.createServer(async (request, response) => {
 		// семь килобайт, и спросить про него лишний раз ничего не стоит.
 		if (url.pathname === '/favicon.ico') {
 			sendFile(response, config.iconPath, request);
+			return;
+		}
+
+		// Тот же значок, но webp: именно он стоит в вёрстке — и в шапке рядом
+		// с названием сайта, и ссылкой на значок вкладки (см. config.iconWebpPath)
+		if (url.pathname === '/icon.webp') {
+			sendFile(response, config.iconWebpPath, request);
 			return;
 		}
 

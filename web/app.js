@@ -16,6 +16,22 @@ const state = {
 	// Отобранное на будущий вечер. Полный список — в профиле, а здесь по нему
 	// можно искать теми же фильтрами, что и по всей библиотеке
 	onlyPlanned: false,
+	// Спрятанное в чёрный список показывается по просьбе: снять запрет проще
+	// всего на самой карточке, а до неё надо сперва добраться
+	showBlacklisted: false,
+	// Три отбора про то, каким пак окажется за столом, а не про то, о чём он.
+	// Работают вместе и по одному, ни один не спорит с остальными:
+	//
+	//   lowRepeats — повторов меньше repeatWarnShare пака;
+	//   lowSpecials — спецвопросов меньше specialWarnShare пака;
+	//   noFranchise — пак не про одну франшизу (порог тот же, по которому
+	//     карточка ставит ярлык «целиком про одно»).
+	//
+	// Пороги приезжают с сервера вместе с остальными настройками: те же самые
+	// числа красят цветом сами карточки, и расходиться им нельзя.
+	lowRepeats: false,
+	lowSpecials: false,
+	noFranchise: false,
 	// Тем, типов пака и языков можно выбрать сразу несколько: подходит тот пак,
 	// что попал хотя бы в один из выбранных
 	tags: new Set(),
@@ -41,6 +57,41 @@ const state = {
  */
 let levelCounts = {};
 
+/**
+ * Числа у остальных фильтров при уже выбранных. Приезжают вместе с выдачей
+ * и считаются по всем применённым фильтрам, кроме своего собственного: выбрал
+ * сложность «сложный» — и у типа «Солянка» стоит, сколько сложных солянок,
+ * а не сколько солянок в базе вообще.
+ *
+ * null значит «ничего не выбрано»: тогда годятся общие числа из /api/facets,
+ * и сервер не пересчитывает базу впустую (см. countFacets в src/server.js).
+ *
+ * Сыгранное в эти числа не входит никогда: колонка отвечает на вопрос «во что
+ * ещё не игранное тут можно сыграть». Считает это сервер, и только по тем
+ * отметкам, что до него доехали, — до входа они лежат в самом браузере.
+ */
+let facetCounts = null;
+
+/** Сколько паков этого типа при нынешних фильтрах. */
+const topicCount = key => (facetCounts ? facetCounts.topics[key] ?? 0 : facets.topics[key] ?? 0);
+
+/** Сколько паков на этом языке при нынешних фильтрах. */
+const languageCount = language => (facetCounts ? facetCounts.languages[language.key] ?? 0 : language.count);
+
+/** Сколько паков с этой темой при нынешних фильтрах. Сводятся темы по строчной букве. */
+const tagCount = tag => (facetCounts ? facetCounts.tags[tag.name.trim().toLowerCase()] ?? 0 : tag.count);
+
+/** Список типов «пак целиком про одно»: при выбранных фильтрах он свой. */
+const subjectList = () => (facetCounts ? facetCounts.subjects : facets.subjects ?? []);
+
+/**
+ * Как назвать число в подсказке. Пока фильтров нет, оно про всю базу и так
+ * и читается — «паков 812»; как только выборка сужена, то же самое число значит
+ * другое, и молчать об этом нельзя: «812» под выбранной сложностью выглядело бы
+ * обещанием, которого никто не давал.
+ */
+const countWord = count => (facetCounts ? `среди отобранных ${count}` : `паков ${count}`);
+
 // $, element, plural, formatNumber, formatSize, createLogo и createPlayLink живут в common.js,
 // а значки — в icons.js: icon(), topicIcon() и iconText().
 //
@@ -57,29 +108,6 @@ const LEVEL_ORDER = [4, 3, 2, 1];
  * от самых частых, и «без разметки» в самом конце: это не тип, а его отсутствие.
  */
 const TOPIC_ORDER = ['mixed', 'anime', 'manga', 'games', 'movies', 'cartoons', 'books', 'comics', 'music', 'sport', 'unknown'];
-
-/** Сортировки по популярности за период: подпись и длина окна в днях. */
-const PERIOD_NAMES = {
-	popular_week: 'за неделю',
-	popular_month: 'за месяц',
-	popular_quarter: 'за 3 месяца',
-	popular_half: 'за полгода',
-	popular_year: 'за год',
-};
-
-const PERIOD_DAYS = {
-	popular_week: 7,
-	popular_month: 30,
-	popular_quarter: 91,
-	popular_half: 182,
-	popular_year: 365,
-};
-
-/** Начало периода: «за год» — это паки, вышедшие после этой даты. */
-function periodStart(days) {
-	const date = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-	return date.toLocaleDateString('ru-RU');
-}
 
 /**
  * Нажали на автора, тип пака, тему или повтор прямо в карточке. Здесь, в самой
@@ -125,13 +153,16 @@ function onPlayedChange(pack) {
 
 	renderTopbarCounters(facets);
 
-	// Прятать сыгранное умеет только сервер: отбор идёт по базе, и местных
-	// отметок он не видит. Пока их не перенесли, карточка просто остаётся
-	// на месте отмеченной — это честнее, чем прятать её на одной странице
-	// и показывать на следующей.
-	if (serverMarks() && state.hidePlayed && pack.played) {
-		load();
-	}
+	// Выдача при этом не перезагружается, даже когда сыгранное спрятано.
+	// Раньше карточка исчезала прямо под рукой в тот же миг, когда её отметили:
+	// нажал не на ту — и не видно даже, на какой именно, а список под курсором
+	// успел сдвинуться, и следующее нажатие приходится в чужой пак. Отмечают
+	// же обычно несколько подряд, вернувшись со стола.
+	//
+	// Пропадёт отмеченный при первом же обновлении списка — на следующей
+	// странице или после любой правки фильтров. Так же ведёт себя и спрятанное
+	// в чёрный список, и снятое из планов: список меняется тогда, когда за ним
+	// пришли, а не тогда, когда в нём что-то отметили.
 }
 
 /**
@@ -183,6 +214,22 @@ function buildQuery() {
 
 	if (state.onlyPlanned) {
 		query.set('onlyPlanned', '1');
+	}
+
+	if (state.showBlacklisted) {
+		query.set('showBlacklisted', '1');
+	}
+
+	if (state.lowRepeats) {
+		query.set('lowRepeats', '1');
+	}
+
+	if (state.lowSpecials) {
+		query.set('lowSpecials', '1');
+	}
+
+	if (state.noFranchise) {
+		query.set('noFranchise', '1');
 	}
 
 	if (state.tags.size > 0) {
@@ -241,6 +288,39 @@ function renderPlayedFilters() {
 				+ 'Войдите через Discord — отметки переедут в учётную запись, и отбор заработает'
 			: '';
 	}
+}
+
+/**
+ * Галочки, за которыми не стоит ничего, кроме их собственного состояния: три
+ * «без перекосов» и чёрный список. Сводятся в одном месте потому, что снимать
+ * их умеет не только сама галочка — ещё и плашка над выдачей, и «Сбросить
+ * фильтры», и возврат по адресу со своими параметрами.
+ *
+ * Чёрный список среди них особый: показывать спрятанное можно только тому, кто
+ * умеет прятать, — вошедшему или всякому на своей машине (facets.localBlacklist).
+ * Остальным галочка гаснет и снимается: показывать ей нечего, а работающей
+ * притворяться незачем.
+ */
+function renderChecks() {
+	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise']) {
+		$(id).checked = state[id];
+	}
+
+	const locked = !canHide();
+
+	if (locked) {
+		state.showBlacklisted = false;
+	}
+
+	$('showBlacklisted').checked = state.showBlacklisted;
+	$('showBlacklisted').disabled = locked;
+
+	const row = $('blacklistRow');
+	row.classList.toggle('check--disabled', locked);
+	row.title = locked
+		? 'Чёрного списка ещё нет: прятать паки и авторов можно, войдя через Discord'
+		: 'Спрятанные паки и паки спрятанных авторов вернутся в выдачу — там же '
+			+ 'их можно и вернуть насовсем, знаком запрета на самой карточке';
 }
 
 /**
@@ -360,7 +440,7 @@ function renderTopics() {
 	// Порядок из TOPIC_ORDER остаётся запасным — им разнимаются равные числа,
 	// чтобы колонка не переставлялась сама собой при одинаковых счётчиках.
 	const order = TOPIC_ORDER
-		.map((key, index) => ({ key, index, count: facets.topics[key] ?? 0 }))
+		.map((key, index) => ({ key, index, count: topicCount(key) }))
 		.filter(item => item.count > 0 || state.topics.has(item.key))
 		.sort((a, b) => b.count - a.count || a.index - b.index);
 
@@ -376,7 +456,7 @@ function renderTopics() {
 		// Название берётся packName, а не name: в колонке стоит вопрос «какого
 		// типа пак», и отвечать на него надо «Аниме-пак», а не «Аниме» — слово
 		// «Аниме» называет тематику вопросов, и им же подписан кусок полоски долей.
-		button.title = `${info.packName}: паков ${count}. Можно отметить несколько типов сразу. `
+		button.title = `${info.packName}: ${countWord(count)}. Можно отметить несколько типов сразу. `
 			+ `Тип даётся паку, когда одна тематика занимает больше `
 			+ `${Math.round(facets.topicThreshold * 100)}% вопросов, иначе это солянка`;
 
@@ -428,7 +508,7 @@ function renderSubjects() {
 	// почти сплошь русские, а набирают их как придётся — «dota», «naruto». Ключ
 	// считает сервер (см. src/subject.js), он же без номера части, поэтому «dota»
 	// находит и «Доту», и «Доту 2» — то есть один и тот же тип пака.
-	const subjects = (facets.subjects ?? []).filter(item => !filter
+	const subjects = subjectList().filter(item => !filter
 		|| normalize(item.name).includes(filter)
 		|| (item.key ?? '').includes(filter));
 
@@ -468,10 +548,17 @@ function renderSubjects() {
 		container.append(button);
 	}
 
+	// Пусто по трём разным причинам, и говорить о них надо разное. Поиск ничего
+	// не нашёл — так и скажем. Фильтры не оставили ни одного пака про одно (так
+	// бывает от галочки «без паков про одну франшизу») — скажем про фильтры.
+	// И только когда не выбрано ничего, пустой список вправду значит «разметки
+	// ещё нет»: раньше эта строка стояла на все три случая разом
 	if (container.children.length === 0) {
 		container.append(element('p', 'hint', filter
 			? 'Ничего не нашлось.'
-			: 'Появятся, когда паки разметит Gemini: тип берётся из предмета тем.'));
+			: facetCounts
+				? 'Под выбранные фильтры не подошёл ни один пак про одно.'
+				: 'Появятся, когда паки разметит Gemini: тип берётся из предмета тем.'));
 	}
 }
 
@@ -484,7 +571,15 @@ function renderLanguages() {
 	const container = $('languages');
 	container.textContent = '';
 
-	for (const language of facets.languages ?? []) {
+	// Список языков короткий и всегда один и тот же, поэтому при выбранных
+	// фильтрах он не переставляется, а только меняет числа. Пропадает язык,
+	// которого в отобранном не осталось вовсе, — но не выбранный: снять его
+	// тогда было бы нечем
+	const languages = (facets.languages ?? [])
+		.map(language => ({ ...language, count: languageCount(language) }))
+		.filter(language => language.count > 0 || state.languages.has(language.key));
+
+	for (const language of languages) {
 		const button = element('button', 'level-toggle');
 		button.type = 'button';
 		button.setAttribute('aria-pressed', String(state.languages.has(language.key)));
@@ -515,18 +610,24 @@ function renderLanguages() {
 	}
 
 	if (container.children.length === 0) {
-		container.append(element('p', 'hint', 'Языки появятся, когда паки будут разобраны.'));
+		container.append(element('p', 'hint', facetCounts
+			? 'Под выбранные фильтры не подошёл ни один пак.'
+			: 'Языки появятся, когда паки будут разобраны.'));
 	}
 }
 
 /**
- * Подпись под сортировкой. «Самые популярные за год» — это паки, выложенные
- * в обсуждение за последний год, от самых играемых: датой считается время
- * сообщения ВК, из которого взят файл.
+ * Подпись под сортировкой. Есть она не у всякой: пишется только там, где
+ * порядок иначе выглядел бы случайным, — «по совпадению» без запроса
+ * и «по оценке» с её порогом показа.
+ *
+ * У подборок «популярное за …» подписи больше нет. Она объясняла, что период
+ * считается по дате сообщения ВК, а не по дате внутри файла, — объясняла всякий
+ * раз и всем подряд, занимая строку над выдачей. Название периода в самом списке
+ * сортировок говорит достаточно.
  */
 function renderSortHint() {
 	const hint = $('sortHint');
-	const days = PERIOD_DAYS[state.sort];
 
 	// У сортировки по умолчанию подписи нет: «Сначала новые» написано в самом
 	// списке, а объяснение, что новизна считается по времени сообщения ВК,
@@ -555,18 +656,7 @@ function renderSortHint() {
 		return;
 	}
 
-	if (!days) {
-		hint.textContent = '';
-		return;
-	}
-
-	const undated = facets.total - facets.datedPackages;
-	const skipped = undated > 0
-		? ` Паков с неразобранной датой сообщения в подборку не попадает: ${undated}.`
-		: '';
-
-	hint.textContent = `Паки, выложенные в обсуждение после ${periodStart(days)}, самые играемые сверху. `
-		+ `Считается по дате сообщения ВК, а не по дате внутри файла.${skipped}`;
+	hint.textContent = '';
 }
 
 /**
@@ -579,7 +669,15 @@ function renderTags() {
 	const filter = normalize($('tagSearch').value);
 	container.textContent = '';
 
-	const matching = facets.tags.filter(tag => !filter || normalize(tag.name).includes(filter));
+	// Числа и порядок — по нынешним фильтрам: список тем длинный, и первыми
+	// в нём должны стоять те, которых много среди отобранного, а не те, которых
+	// много в базе вообще. Написания сводит сервер, имена берутся общие
+	const matching = facets.tags
+		.map(tag => ({ name: tag.name, count: tagCount(tag) }))
+		.filter(tag => (tag.count > 0 || state.tags.has(tag.name))
+			&& (!filter || normalize(tag.name).includes(filter)))
+		.sort((a, b) => b.count - a.count);
+
 	const chosen = matching.filter(tag => state.tags.has(tag.name));
 	const rest = matching.filter(tag => !state.tags.has(tag.name));
 	const visible = [...chosen, ...rest.slice(0, 60)];
@@ -608,7 +706,7 @@ function renderTags() {
 	}
 
 	if (visible.length === 0) {
-		container.append(element('p', 'hint', 'Таких тем нет.'));
+		container.append(element('p', 'hint', filter ? 'Таких тем нет.' : 'Тем у отобранных паков не нашлось.'));
 	} else if (rest.length > 60) {
 		container.append(element('p', 'hint', `Показаны первые 60 из ${matching.length}. Уточните поиск.`));
 	}
@@ -634,6 +732,7 @@ function renderActiveFilters() {
 		chip.addEventListener('click', () => {
 			clear();
 			state.page = 1;
+			renderChecks();
 			renderLevels();
 			renderUnrated();
 			renderTopics();
@@ -679,6 +778,25 @@ function renderActiveFilters() {
 		add(`Предмет: ${state.franchise}`, () => { state.franchise = ''; });
 	}
 
+	// Три галочки «без перекосов» — такие же плашки, как и всё остальное: колонка
+	// на узком экране свёрнута, и почему паков вдруг стало вчетверо меньше,
+	// видно только отсюда
+	if (state.lowRepeats) {
+		add('Мало повторов', () => { state.lowRepeats = false; });
+	}
+
+	if (state.lowSpecials) {
+		add('Мало спецвопросов', () => { state.lowSpecials = false; });
+	}
+
+	if (state.noFranchise) {
+		add('Без паков про одну франшизу', () => { state.noFranchise = false; });
+	}
+
+	if (state.showBlacklisted) {
+		add('С чёрным списком', () => { state.showBlacklisted = false; });
+	}
+
 	// Кнопка «Фильтры» показывает их число: на узком экране сама колонка свёрнута,
 	// и по одним плашкам поверх выдачи всего набора не видно
 	renderFiltersToggle();
@@ -710,6 +828,10 @@ function countActiveFilters() {
 		+ (state.hidePlayed || state.onlyPlayed || !serverMarks() ? 0 : 1)
 		+ (state.onlyPlayed ? 1 : 0)
 		+ (state.onlyPlanned ? 1 : 0)
+		+ (state.lowRepeats ? 1 : 0)
+		+ (state.lowSpecials ? 1 : 0)
+		+ (state.noFranchise ? 1 : 0)
+		+ (state.showBlacklisted ? 1 : 0)
 		+ (state.unrated || state.levels.size > 0 ? 0 : 1);
 }
 
@@ -761,9 +883,21 @@ async function load(started = null) {
 	shownCards = [];
 	renderActiveFilters();
 
-	// Числа сложностей считаются по остальным фильтрам и приходят вместе с выдачей
+	// Числа в колонке фильтров считаются по остальным фильтрам и приезжают вместе
+	// с выдачей: меняются они ровно тогда же, когда меняется сама выдача, и вторая
+	// ходка на сервер ради них означала бы, что колонка слева на миг врёт.
+	//
+	// data.counts приходит только тогда, когда выборка чем-то сужена: иначе годятся
+	// общие числа из /api/facets, а каждый такой подсчёт обходит базу целиком
+	// (см. countFacets в src/server.js).
 	levelCounts = data.levels ?? {};
+	facetCounts = data.counts ?? null;
+
 	renderLevels();
+	renderTopics();
+	renderSubjects();
+	renderLanguages();
+	renderTags();
 
 	if (data.packages.length === 0) {
 		grid.append(element('div', 'empty', 'Ничего не нашлось. Попробуйте ослабить фильтры.'));
@@ -884,6 +1018,18 @@ function bind() {
 		load();
 	});
 
+	// Три «без перекосов» и чёрный список: одна и та же работа на четверых —
+	// переключить своё состояние и перезапросить выдачу. Спорить им не с чем,
+	// поэтому ни одна не снимает соседнюю
+	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted']) {
+		$(id).addEventListener('change', event => {
+			state[id] = event.target.checked;
+			state.page = 1;
+			renderActiveFilters();
+			load();
+		});
+	}
+
 	let tagTimer = null;
 
 	$('tagSearch').addEventListener('input', () => {
@@ -945,6 +1091,10 @@ function resetFilters() {
 	state.hidePlayed = true;
 	state.onlyPlayed = false;
 	state.onlyPlanned = false;
+	state.showBlacklisted = false;
+	state.lowRepeats = false;
+	state.lowSpecials = false;
+	state.noFranchise = false;
 	state.tags.clear();
 	state.topics.clear();
 	state.languages.clear();
@@ -964,6 +1114,7 @@ function resetFilters() {
 	$('sort').value = 'added';
 	$('dir').value = 'desc';
 
+	renderChecks();
 	renderLevels();
 	renderUnrated();
 	renderPlayedFilters();
@@ -1013,6 +1164,10 @@ function readUrlState() {
 	// целиком, а здесь по нему можно искать теми же фильтрами, что и по всей базе
 	state.onlyPlanned = query.get('onlyPlanned') === '1';
 	state.onlyPlayed = query.get('onlyPlayed') === '1';
+	state.showBlacklisted = query.get('showBlacklisted') === '1';
+	state.lowRepeats = query.get('lowRepeats') === '1';
+	state.lowSpecials = query.get('lowSpecials') === '1';
+	state.noFranchise = query.get('noFranchise') === '1';
 
 	// Сыгранное спрятано само собой, и снять это можно только адресом: /?hidePlayed=0
 	// стоит в ссылках профиля, которые ведут в библиотеку как раз к сыгранному.
@@ -1114,6 +1269,7 @@ async function start() {
 	renderTopbar(facets);
 	aimUpdateLink();
 
+	renderChecks();
 	renderLevels();
 	renderUnrated();
 	renderPlayedFilters();

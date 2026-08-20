@@ -259,3 +259,61 @@ export const PACK_KEY_SQL = `CASE
 	WHEN COALESCE(TRIM(p.pack_id), '') = '' THEN CAST(p.id AS TEXT)
 	ELSE TRIM(p.pack_id) || CHAR(10) || TRIM(COALESCE(p.name, ''))
 END`;
+
+/**
+ * Какая часть вопросов пака приходится на повторы франшиз — тем же счётом,
+ * каким это число выводит карточка (см. createFranchises в web/card.js).
+ *
+ * Лежит готовым числом в колонке packages.repeat_share: считать его на лету
+ * из сохранённого JSON выходит слишком дорого. Обход json_each по всей таблице
+ * стоит четверть секунды, а колонка фильтров спрашивает его пять раз кряду —
+ * полторы секунды на одно нажатие галочки, и это дома; наверху те же строки
+ * ещё и считаны по тарифу D1.
+ *
+ * Отсюда пара «функция и её SQL-двойник», как у ключа пака строкой ниже:
+ * функция считает число при разборе, SQL — при дозаливке колонки в базу,
+ * созданную прежней версией (см. src/db.js). Расходиться им нельзя.
+ *
+ * Из счёта выброшено то же самое, что не показывает и карточка:
+ *
+ *   область («Футбол», «Вторая мировая») — повтором не бывает: викторина
+ *     из областей и состоит, и «География ×5» о паке не говорит ничего;
+ *   предмет самого пака (доля от subjectPackShare и выше) — у пака про Гарри
+ *     Поттера «Гарри Поттер ×27» не наблюдение, а пересказ названия числом.
+ *
+ * Доли франшиз пересекаются (одна тема бывает и про то, и про это), поэтому
+ * сумма изредка переваливает за единицу. Порогам это не мешает: они спрашивают
+ * «много ли», а не «сколько ровно».
+ *
+ * @param {Array} franchises сохранённый список повторов пака
+ * @param {number} own порог subjectPackShare
+ */
+export function repeatShare(franchises, own) {
+	return (franchises ?? [])
+		.filter(item => item?.kind !== 'area' && (item?.share ?? 0) < own)
+		.reduce((sum, item) => sum + (item.share ?? 0), 0);
+}
+
+/**
+ * SQL-двойник. Зовётся один раз — при дозаливке колонки, — и потому в нём стоит
+ * имя таблицы, а не готовый псевдоним: в UPDATE псевдонима нет.
+ *
+ * @param {number} own порог subjectPackShare
+ * @param {string} table к чьим полям обращаться
+ */
+export const repeatShareSql = (own, table = 'p') => `COALESCE((
+	SELECT SUM(json_extract(value, '$.share'))
+	FROM json_each(CASE WHEN json_valid(${table}.franchises) THEN ${table}.franchises ELSE '[]' END)
+	WHERE COALESCE(json_extract(value, '$.kind'), '') <> 'area'
+		AND json_extract(value, '$.share') < ${Number(own)}
+), 0)`;
+
+/**
+ * Какая часть вопросов пака — спецвопросы. У пака без разобранных вопросов
+ * ответа нет: делить не на что, и ноль тут означал бы «спецвопросов нет»,
+ * а это другое.
+ */
+export const SPECIAL_SHARE_SQL = `CASE
+	WHEN COALESCE(p.question_count, 0) > 0 AND p.special_count IS NOT NULL
+	THEN p.special_count * 1.0 / p.question_count
+END`;

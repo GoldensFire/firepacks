@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
-import { jsonOrDefault, buildTagsKey, buildAuthorKey, splitAuthors } from './keys.js';
+import { jsonOrDefault, buildTagsKey, buildAuthorKey, splitAuthors, repeatShareSql } from './keys.js';
 
 // Ключи пака и чтение его полей лежат в keys.js: тот файл ничего не знает
 // про node:sqlite, и его читает двойник сайта на Cloudflare Workers (см. cf/).
@@ -285,9 +285,24 @@ for (const [name, definition] of [
 	// (см. --upgrade в indexer.js). NULL значит «размечено до появления колонки».
 	['topics_model', 'TEXT'],
 	['summary_model', 'TEXT'],
+	// Какая часть вопросов пака приходится на повторы франшиз. Число выводимое —
+	// оно целиком считается из franchises, — но лежит готовым нарочно: по нему
+	// отбирает галочка «мало повторов», а колонка фильтров спрашивает это пять
+	// раз кряду. Считать его на лету значило бы обходить json_each по всей
+	// таблице шесть раз на каждое нажатие (см. repeatShare в keys.js).
+	['repeat_share', 'REAL'],
 ]) {
 	if (!existingColumns.has(name)) {
 		db.exec(`ALTER TABLE packages ADD COLUMN ${name} ${definition}`);
+
+		// Только что добавленную долю повторов сразу и заполняем. Иначе она
+		// осталась бы пустой у всей базы до ближайшего полного пересчёта разметки,
+		// то есть месяцами, — а галочка «мало повторов» всё это время показывала бы
+		// вместо ровных паков всю базу подряд. Считается один раз, четверть секунды
+		// на одиннадцати тысячах паков, и больше к этому возвращаться не приходится
+		if (name === 'repeat_share') {
+			db.exec(`UPDATE packages SET repeat_share = ${repeatShareSql(config.subjectPackShare, 'packages')}`);
+		}
 	}
 }
 

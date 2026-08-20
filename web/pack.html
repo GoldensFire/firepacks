@@ -9,7 +9,12 @@
 	     строчки, которые встают на место этой отметки. -->
 	<title>Пак — SIFirePacks</title>
 	<!--pack-meta-->
-	<link rel="icon" href="/favicon.ico" sizes="any">
+	<!-- Значок сайта — webp: весит втрое меньше прежнего ico и не мылится
+	     на экранах повышенной плотности. Ico остаётся ссылкой ниже ради тех,
+	     кто webp не понимает, и лежит по /favicon.ico для закладок и роботов,
+	     которые вёрстку не читают вовсе. -->
+	<link rel="icon" href="/icon.webp" type="image/webp">
+	<link rel="alternate icon" href="/favicon.ico" sizes="any">
 	<link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -26,7 +31,7 @@
 	<header class="topbar">
 		<div class="topbar__inner">
 			<a class="brand" href="/" title="На главную страницу библиотеки">
-				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
+				<span class="brand__mark" aria-hidden="true"><img src="/icon.webp" alt="" width="30" height="30"></span>
 				<span class="brand__text">SIFirePacks</span>
 			</a>
 

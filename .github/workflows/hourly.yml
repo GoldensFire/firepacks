@@ -74,8 +74,18 @@ jobs:
 
       # Чем уменьшать обложки новых паков. Готовые копии приезжают вместе
       # с базой, но у пака, разобранного этим самым обходом, их ещё нет.
+      #
+      # Со сроком и с правом не получиться — по той же причине, что и в ночном
+      # обходе: apt умеет ждать чужой замок бесконечно, и обход, который весь
+      # должен уложиться в пару минут, висел бы на этом до предохранителя.
       - name: Поставить ImageMagick
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends imagemagick ffmpeg
+        timeout-minutes: 5
+        continue-on-error: true
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -o DPkg::Lock::Timeout=60 update -qq
+          sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y --no-install-recommends imagemagick ffmpeg
 
       - run: npm ci
 
@@ -136,11 +146,15 @@ jobs:
       # Кладём базу обратно в любом случае — даже если обход оборвался: разобранное
       # до обрыва не надо делать заново. Если база не приехала, класть нечего,
       # и трогать лежащее на полке нельзя ни в коем случае.
+      #
+      # Без --force по той же причине, что и в ночном обходе: этот ходит раз
+      # в час и потому чаще всех попадает на полку, с которой домашняя машина
+      # только что ушла вперёд. Затирать её нельзя — сливаем (см. scripts/state.js).
       - name: Вернуть базу на полку
         if: always() && steps.state.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node --no-warnings scripts/state.js push --force
+        run: node --no-warnings scripts/state.js push
 
       - name: Отчёт об обходе
         if: always()

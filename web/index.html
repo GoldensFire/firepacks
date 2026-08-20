@@ -3,10 +3,10 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>FirePacks — библиотека паков для «Своей игры» (SIGame)</title>
+	<title>SIFirePacks — библиотека паков для «Своей игры» (SIGame)</title>
 
 	<!-- Описание для поисковой выдачи: это первое, что человек читает под ссылкой,
-	     и «FirePacks» ему не говорит ничего. Сказать надо словами, которые он
+	     и «SIFirePacks» ему не говорит ничего. Сказать надо словами, которые он
 	     и набирает: паки для Своей игры, скачать, сложность, темы. -->
 	<meta name="description" content="Библиотека паков для «Своей игры» (SIGame): более 11 000 пакетов вопросов с уровнем сложности по статистике игр, тематикой, темами и авторами. Поиск по названию, автору и содержимому, отметки о сыгранном, скачивание и игра онлайн.">
 
@@ -17,9 +17,9 @@
 	<link rel="canonical" href="/">
 
 	<meta property="og:type" content="website">
-	<meta property="og:site_name" content="FirePacks">
+	<meta property="og:site_name" content="SIFirePacks">
 	<meta property="og:locale" content="ru_RU">
-	<meta property="og:title" content="FirePacks — библиотека паков для «Своей игры»">
+	<meta property="og:title" content="SIFirePacks — библиотека паков для «Своей игры»">
 	<meta property="og:description" content="Более 11 000 паков SIGame с уровнем сложности, тематикой и поиском по содержимому.">
 	<meta property="og:url" content="/">
 	<meta name="twitter:card" content="summary">
@@ -48,7 +48,7 @@
 		<div class="topbar__inner">
 			<a class="brand" href="/" title="На главную страницу библиотеки">
 				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
-				<span class="brand__text">FirePacks</span>
+				<span class="brand__text">SIFirePacks</span>
 			</a>
 
 			<!-- Поиск ищет по нажатию, а не по каждой набранной букве. Пока он искал
@@ -269,6 +269,41 @@
 			<button id="reset" class="button button--ghost">Сбросить фильтры</button>
 		</aside>
 	</main>
+
+	<!-- Разделы библиотеки — ссылками, и это не украшение подвала.
+	     
+	     У каждой тематики теперь своя страница со своим заголовком и своим
+	     текстом (см. /topic/anime и src/meta.js), но попасть на неё поисковику
+	     было неоткуда: в колонке фильтров слева стоят галочки, а не ссылки,
+	     и отбор там живёт в адресе главной, canonical которой указывает
+	     на неё же саму. Страницы разделов оказывались известны только карте
+	     сайта — то есть висели в стороне от самого сайта.
+
+	     Здесь они висят на главной, а главная — самая весомая страница из всех,
+	     какие у сайта есть. Человеку это тоже не лишнее: «покажите аниме-паки»
+	     решается одним нажатием, без разворачивания колонки фильтров.
+
+	     Список написан руками, а не собран скриптом, нарочно: ссылки должны
+	     стоять в самой вёрстке, до всякого JS, — ради того всё и затевалось. -->
+	<footer class="sections">
+		<h2 class="sections__title">Разделы библиотеки</h2>
+
+		<nav class="sections__links" aria-label="Разделы библиотеки">
+			<a href="/topic/anime">Аниме-паки</a>
+			<a href="/topic/games">Паки по играм</a>
+			<a href="/topic/movies">Паки по кино и сериалам</a>
+			<a href="/topic/music">Музыкальные паки</a>
+			<a href="/topic/cartoons">Паки по мультфильмам</a>
+			<a href="/topic/mixed">Солянки и паки на эрудицию</a>
+			<a href="/topic/sport">Паки по спорту</a>
+			<a href="/topic/books">Паки по книгам</a>
+			<a href="/topic/manga">Паки по манге и манхве</a>
+			<a href="/topic/comics">Паки по комиксам</a>
+			<a href="/subjects">Паки целиком про одно</a>
+			<a href="/top">Топ паков за 3 месяца</a>
+			<a href="/authors">Топ авторов</a>
+		</nav>
+	</footer>
 
 	<script src="/common.js"></script>
 	<script src="/icons.js"></script>

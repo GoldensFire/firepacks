@@ -4,6 +4,7 @@
 //   node scripts/state.js sync     подогнать здешнее под полку (это делает запуск сайта)
 //   node scripts/state.js pull     забрать полку к себе
 //   node scripts/state.js push     отдать своё на полку
+//   node scripts/state.js merge <файл>  влить разметку из другой копии базы
 //
 // Зачем это вообще. Ночной обход переехал в GitHub Actions, а там нет ничего
 // постоянного: каждая ночь начинается с пустой машины, которая через двадцать
@@ -36,6 +37,19 @@
 // Обратный ход один и он же единственный: выкладка на сайт (scripts/deploy-cf.js)
 // после удачной заливки сама кладёт базу на полку. То есть наверх уезжает не
 // «что-то, над чем тут работали», а ровно то, что уже стоит на сайте.
+//
+// ── Чего «полка главная» не означает ──
+//
+// Что работу этой машины можно выбросить. Разметку делает не только полка:
+// здесь запускают обновление базы, и это самая дорогая работа в проекте —
+// не по времени, а по суточной квоте Gemini. Поэтому подмена базы её больше
+// не выбрасывает, а переносит, и отправка на полку — не затирает, а сливает.
+// Правило в обе стороны одно: у кого разметка свежее, того и ответ, кто бы
+// её ни сделал (см. MARKUP, carryMarkup и mergeShelf ниже).
+//
+// Всё остальное по-прежнему решает полка целиком: строки паков, статистика,
+// авторы, отметка о выгрузке. Спорить тут не о чем — их собирает обход
+// обсуждений, а он один и тот же с обеих сторон.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -90,6 +104,49 @@ const MARK = path.join(root, 'data', 'state-mark.json');
  * и заливкой не трогаются вовсе (см. cf/schema.sql).
  */
 const PERSONAL = ['users', 'sessions', 'ratings', 'played', 'blacklist'];
+
+/**
+ * Работа Gemini, которую нельзя терять при подмене базы.
+ *
+ * Полка — главная, и это правильно во всём, кроме одного: разметку делает
+ * не только полка. Её делает и эта машина, когда здесь запускают обновление
+ * базы, и работа эта самая дорогая, какая в проекте есть, — не по времени,
+ * а по суточной квоте, которой на всё про всё пятьсот запросов.
+ *
+ * До сих пор она пропадала молча и целиком. 18 августа 2026 здесь домолотили
+ * очередь до 291 неразмеченного пака; наверх это уехало, а на полку — нет
+ * (полку в тот же час переписал ежечасный обход, и push отказался её затирать).
+ * Вечером запуск сайта сверился с полкой, увёл здешнюю базу в sibase.prev.db
+ * и поставил на её место полочную — с 923 неразмеченными. Шестьсот тридцать
+ * два пака разметки выброшено, и не сказано об этом ни слова: сверка сравнивает
+ * число разобранных паков, а разобраны были все и там, и там.
+ *
+ * Поэтому теперь при подмене разметка переносится, а не выбрасывается. Правило
+ * одно и то же в обе стороны: у кого отметка времени свежее, того и разметка.
+ * Кто её сделал — эта машина или ночной обход — значения не имеет и иметь
+ * не должно.
+ *
+ * Разбито на два куска потому, что делаются они порознь и порознь же отмечаются:
+ * ярлык с долями ставит шаг «разметка», описание с аудиторией — шаг «описание»,
+ * и пак сплошь и рядом имеет одно без другого.
+ */
+const MARKUP = [
+	{
+		name: 'разметка',
+		at: 'topics_at',
+		columns: [
+			'topic_shares', 'primary_topic', 'primary_share', 'topics_at', 'topics_version', 'topics_model',
+			'franchises', 'franchise_top', 'franchise_top_share', 'other_kinds',
+			'genres', 'genre_topic', 'forms', 'form_topic', 'form_coverage',
+			'language_ai', 'decades', 'decade_coverage', 'origins', 'origin_coverage',
+		],
+	},
+	{
+		name: 'описание',
+		at: 'summary_at',
+		columns: ['summary', 'summary_at', 'summary_model', 'audience_from', 'audience_to', 'audience_male', 'audience_at'],
+	},
+];
 
 const command = process.argv[2] ?? 'status';
 const force = process.argv.includes('--force');
@@ -350,6 +407,21 @@ const columnsOf = (db, schema, table) =>
 	db.prepare('SELECT name FROM pragma_table_info(?, ?)').all(table, schema).map(row => row.name);
 
 /**
+ * Один и тот же ли это пак в двух базах.
+ *
+ * По source_key, а не по номеру строки, и это важно. Номер раздаёт AUTOINCREMENT
+ * той базы, в которой пак завели, — то есть той машины, которая нашла его первой.
+ * Обе машины ведут счёт от общей полки, но находят новое порознь, и стоит им
+ * найти разное, как один и тот же номер окажется у разных паков. Разметку тогда
+ * перенесло бы не туда, и заметить это было бы нечем.
+ *
+ * source_key — это документ ВК («doc-133214983_438981105»), то есть сам файл.
+ * По нему пак узнаёт и индексатор (см. knownDocument в src/indexer.js), и он же
+ * во всей базе неповторим.
+ */
+const SAME_PACK = 'src.packages.source_key = main.packages.source_key';
+
+/**
  * Вернуть на место то, что принадлежит этой машине: входы, отметки, оценки
  * (см. PERSONAL). Приехавшая база везёт их слепком с прошлого раза, и без этого
  * шага каждая сверка выкидывала бы из-под пользователя его же вход.
@@ -396,6 +468,117 @@ function carryPersonal() {
 	}
 }
 
+/**
+ * Перенести в базу-приёмник ту разметку из базы-источника, которая там свежее
+ * (см. MARKUP). Работает в обе стороны и обе стороны зовут её одинаково:
+ * при подмене базы источник — отодвинутая здешняя, приёмник — приехавшая
+ * с полки; при отправке наоборот.
+ *
+ * Сравниваются отметки времени, а не «пусто или нет»: пак, размеченный здесь
+ * вчера, не должен затирать разметку, сделанную полкой сегодня. NULL у источника
+ * не переносится никогда — это не «свежий пустой ответ», а «не спрашивали».
+ *
+ * Паки, которых в приёмнике нет, пропускаются молча: разметка без пака никому
+ * не нужна, а перенос пака целиком — не дело этой руки.
+ *
+ * @returns {{name: string, moved: number}[]} что и сколько перенесено
+ */
+function carryMarkup(from, into) {
+	if (!fs.existsSync(from) || !fs.existsSync(into)) {
+		return [];
+	}
+
+	const db = new DatabaseSync(into);
+	const done = [];
+
+	try {
+		db.exec(`ATTACH '${sqlPath(from)}' AS src`);
+
+		const here = columnsOf(db, 'main', 'packages');
+		const there = columnsOf(db, 'src', 'packages');
+
+		for (const part of MARKUP) {
+			// Колонки, которые есть в обеих: базы бывают разного возраста, и та,
+			// что постарше, попросту не знает про недавно заведённое.
+			const shared = part.columns.filter(column => here.includes(column) && there.includes(column));
+
+			if (!shared.includes(part.at)) {
+				continue;
+			}
+
+			// Свежее — это строго новее. Равные отметки времени означают одну
+			// и ту же работу, приехавшую двумя путями, и трогать её незачем.
+			const fresher = `src.packages.${part.at} IS NOT NULL
+				AND (main.packages.${part.at} IS NULL OR src.packages.${part.at} > main.packages.${part.at})`;
+
+			const assign = shared.map(column => `"${column}" = (SELECT "${column}" FROM src.packages WHERE ${SAME_PACK})`);
+
+			db.exec('BEGIN');
+
+			db.exec(`
+				UPDATE main.packages SET ${assign.join(', ')}
+				WHERE EXISTS (SELECT 1 FROM src.packages WHERE ${SAME_PACK} AND ${fresher})
+			`);
+
+			const moved = db.prepare('SELECT changes() AS c').get().c;
+			db.exec('COMMIT');
+
+			if (moved > 0) {
+				done.push({ name: part.name, moved });
+			}
+		}
+
+		// Расход квоты — тоже общее знание, и терять его нельзя ни в какую сторону.
+		// Считает Google по своим суткам и по всему ключу разом, а тратят ключ обе
+		// машины; больший расход за день и есть правда о нём. Знай ночь про это,
+		// она не потратила бы двадцать минут на запросы, которым заранее отказано.
+		db.exec(`
+			INSERT INTO main.gemini_usage (day, model, requests, quota_hits)
+			SELECT day, model, requests, quota_hits FROM src.gemini_usage
+			WHERE true
+			ON CONFLICT (day, model) DO UPDATE SET
+				requests = MAX(requests, excluded.requests),
+				quota_hits = MAX(quota_hits, excluded.quota_hits)
+		`);
+
+		// Пределы моделей — то же самое, только свежесть тут по seen_at: это
+		// не расход, а то, что Gemini сказал про модель, когда его в последний раз
+		// об этом спросили. Колонки перечисляются не списком, а сверкой: unavailable
+		// и note заведены позже самой таблицы, и в базе постарше их может не быть.
+		const limitColumns = columnsOf(db, 'main', 'gemini_limits')
+			.filter(column => columnsOf(db, 'src', 'gemini_limits').includes(column));
+
+		if (limitColumns.includes('model') && limitColumns.includes('seen_at')) {
+			const list = limitColumns.map(column => `"${column}"`).join(', ');
+			const set = limitColumns.filter(column => column !== 'model')
+				.map(column => `"${column}" = excluded."${column}"`).join(', ');
+
+			db.exec(`
+				INSERT INTO main.gemini_limits (${list}) SELECT ${list} FROM src.gemini_limits
+				WHERE true
+				ON CONFLICT (model) DO UPDATE SET ${set}
+				WHERE excluded.seen_at > gemini_limits.seen_at
+			`);
+		}
+
+		db.exec('DETACH src');
+	} catch (error) {
+		console.error(`Не вышло перенести разметку: ${error.message}`);
+		console.error('База при этом целая, но часть разметки могла остаться только в старой копии.');
+	} finally {
+		db.close();
+	}
+
+	return done;
+}
+
+/** Одной строкой: что перенеслось. Молчит, когда переносить было нечего. */
+function sayCarried(done, where) {
+	if (done.length > 0) {
+		console.log(`Перенесено ${where}: ${done.map(part => `${part.name} — ${part.moved} паков`).join(', ')}.`);
+	}
+}
+
 function showStatus() {
 	const here = localStamp();
 	const there = remoteAsset();
@@ -439,6 +622,12 @@ function pull() {
 
 	unpack();
 	carryPersonal();
+
+	// Разметку, сделанную здесь, приехавшая база не отменяет: у кого свежее,
+	// того и ответ (см. MARKUP). Без этой строки всякая сверка выбрасывала бы
+	// всё, что здесь размечено с прошлого раза, — молча и целиком.
+	sayCarried(carryMarkup(prevPath, dbPath), 'из здешней базы');
+
 	writeMark(there);
 
 	fs.rmSync(path.join(root, WORK), { force: true });
@@ -467,6 +656,59 @@ function pull() {
 	console.log('Готово. База и обложки — те же, что на сайте.');
 }
 
+/**
+ * Забрать с полки одну только базу — во временное место, не трогая здешнюю, —
+ * и влить из неё в здешнюю ту разметку, которой здесь нет или которая здесь
+ * старее (см. carryMarkup). Нужно перед отправкой, когда полка успела уйти
+ * вперёд: то, что мы сейчас положим, не должно стереть чужую работу.
+ *
+ * Сливается именно разметка, а не всё подряд. Паки, которых здесь нет вовсе,
+ * этой рукой не переносятся: перенос строки пака тянет за собой авторов,
+ * статистику и отметку о выгрузке, и делать это вслепую опаснее, чем не делать.
+ * Пропасть таким паком может только то, что полка нашла в обсуждении за те
+ * часы, пока здесь шла работа, — а обсуждение читается заново каждый час,
+ * и следующий же обход найдёт его снова.
+ */
+function mergeShelf() {
+	const stage = path.join(root, STAGE);
+	fs.rmSync(stage, { recursive: true, force: true });
+	fs.rmSync(path.join(root, WORK), { force: true });
+
+	try {
+		if (run('gh', ['release', 'download', TAG, '--pattern', ASSET, '--output', WORK, '--clobber']).code !== 0) {
+			console.error('Не вышло скачать полку для слияния. Отправка отменена: лучше ничего, чем поверх чужого.');
+			process.exit(1);
+		}
+
+		fs.mkdirSync(stage, { recursive: true });
+
+		// Только база: обложки полки здешним не мешают и сливать их незачем —
+		// они и так складываются, а не подменяются (разворачивается свёрток
+		// поверх, ничего не удаляя).
+		if (run('tar', ['-xzf', WORK, '-C', STAGE, 'data/sibase.db']).code !== 0) {
+			console.error('Не вышло развернуть полку для слияния. Отправка отменена.');
+			process.exit(1);
+		}
+
+		const shelfDb = path.join(stage, 'data', 'sibase.db');
+		sayCarried(carryMarkup(shelfDb, dbPath), 'с полки');
+
+		const mine = contentOf(dbPath);
+		const theirs = contentOf(shelfDb);
+
+		// Паки, которых здесь нет: сказать о них надо, а перенести — не этой рукой.
+		// Молчать нельзя, потому что после отправки они с полки пропадут до тех пор,
+		// пока обход не найдёт их в обсуждении заново.
+		if (mine && theirs && theirs.packs > mine.packs) {
+			console.log(`Внимание: на полке паков больше (${theirs.packs} против ${mine.packs}).`);
+			console.log('Разметка их перенесена, сами строки — нет: их подберёт ближайший обход обсуждений.');
+		}
+	} finally {
+		fs.rmSync(stage, { recursive: true, force: true });
+		fs.rmSync(path.join(root, WORK), { force: true });
+	}
+}
+
 function push() {
 	const here = localStamp();
 
@@ -479,22 +721,22 @@ function push() {
 	const there = remoteAsset();
 	const mark = readMark();
 
-	// Полка сменилась с тех пор, как здешняя база с неё приехала: ночной обход
-	// уже сложил туда свою работу, и наша копия её не содержит. Затирать такое
-	// нельзя — это ровно тот случай, когда пропадает целая ночь разбора.
-	if (there && mark && mark.id !== assetId(there) && !force) {
-		console.error(`На полке уже не тот свёрток, с которого сюда приехала база (полка от ${when(there.updatedAt)}).`);
-		console.error('Сначала заберите её: npm run sync. Затирать полку — только с --force.');
-		process.exit(1);
-	}
+	// Полка сменилась с тех пор, как здешняя база с неё приехала: пока здесь
+	// работали, ежечасный или ночной обход сложил туда своё. Отправить наше как
+	// есть — значит стереть это чужое; отказаться — значит потерять своё, потому
+	// что здешнее рано или поздно перетрёт ближайшая сверка. Оба исхода были
+	// в живую (см. MARKUP), поэтому здесь теперь не отказ, а слияние.
+	const moved = Boolean(there) && (mark
+		? mark.id !== assetId(there)
+		// Отметки нет вовсе (первый раз, чужая машина, руками положенная база) —
+		// судим по старинке, по времени файла.
+		: here.at < new Date(there.updatedAt));
 
-	// Отметки нет вовсе (первый раз, чужая машина, руками положенная база) —
-	// тогда судим по старинке, по времени файла: своё старее полки означает,
-	// что где-то её уже дополнили, а здесь лежит копия до этого.
-	if (there && !mark && here.at < new Date(there.updatedAt) && !force) {
-		console.error(`На полке база новее здешней (${when(there.updatedAt)} против ${when(here.at)}).`);
-		console.error('Сначала заберите её: npm run sync. Затирать полку — только с --force.');
-		process.exit(1);
+	if (moved && force) {
+		console.log(`Полка ушла вперёд (свёрток от ${when(there.updatedAt)}), но велено затереть её как есть.`);
+	} else if (moved) {
+		console.log(`Полка ушла вперёд (свёрток от ${when(there.updatedAt)}). Сливаю с ней здешнее…`);
+		mergeShelf();
 	}
 
 	console.log('Складываю свёрток…');
@@ -568,6 +810,56 @@ function sync() {
 	pull();
 }
 
+/**
+ * Влить разметку из другой копии базы в здешнюю: `node scripts/state.js merge <файл>`.
+ *
+ * Рука, которой чинят уже случившееся. Обычно перенос идёт сам — при сверке
+ * и при отправке на полку, — но копия с потерянной работой может лежать где
+ * угодно: в data/sibase.prev.db (туда её отодвигает сверка), в старом свёртке,
+ * на другой машине. Отсюда отдельная команда: скажи, откуда взять, — возьмёт.
+ *
+ * Правило то же самое, что и везде: переносится только то, что в названной
+ * копии свежее здешнего. Испортить здешнюю разметку этим нельзя.
+ */
+function merge(file) {
+	if (!file) {
+		console.error('Скажите, из какой копии вливать: node scripts/state.js merge data/sibase.prev.db');
+		process.exit(1);
+	}
+
+	const from = path.resolve(root, file);
+
+	if (!fs.existsSync(from)) {
+		console.error(`Нет такого файла: ${from}`);
+		process.exit(1);
+	}
+
+	if (!fs.existsSync(dbPath)) {
+		console.error('Здешней базы нет — вливать не во что.');
+		process.exit(1);
+	}
+
+	const before = contentOf(dbPath);
+	const done = carryMarkup(from, dbPath);
+
+	if (done.length === 0) {
+		console.log(`В ${path.relative(root, from)} нет разметки свежее здешней. Ничего не менял.`);
+		return;
+	}
+
+	sayCarried(done, `из ${path.relative(root, from)}`);
+
+	const after = contentOf(dbPath);
+
+	if (before && after) {
+		console.log(`Разобранных паков: было ${before.ready}, стало ${after.ready} (перенос их не трогает).`);
+	}
+
+	console.log('');
+	console.log('Дальше это надо увезти наверх, иначе оно так и останется только здесь:');
+	console.log('  npm run deploy');
+}
+
 if (command === 'status') {
 	requireGh();
 	showStatus();
@@ -577,7 +869,9 @@ if (command === 'status') {
 	pull();
 } else if (command === 'push') {
 	push();
+} else if (command === 'merge') {
+	merge(process.argv[3]);
 } else {
-	console.error(`Не знаю команды «${command}». Есть status, sync, pull и push.`);
+	console.error(`Не знаю команды «${command}». Есть status, sync, pull, push и merge.`);
 	process.exit(1);
 }

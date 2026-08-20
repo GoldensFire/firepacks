@@ -3,14 +3,13 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>Топ пакетов для «Своей игры» за 3 месяца — FirePacks</title>
-	<meta name="description" content="Самые играемые паки SIGame за последние три месяца: по десятке в каждой категории — солянки, аниме-паки, игропаки, кинопаки, мультпаки, музпаки и всё остальное.">
-	<link rel="canonical" href="/top">
-	<meta property="og:type" content="website">
-	<meta property="og:site_name" content="FirePacks">
-	<meta property="og:locale" content="ru_RU">
-	<meta property="og:title" content="Топ пакетов для «Своей игры» за 3 месяца">
-	<meta property="og:description" content="По десять самых играемых паков в каждой категории: солянки, аниме, игры, кино, мультики, музыка и остальное.">
+	<!-- Заголовок вкладки, описание для выдачи, канонический адрес и разметку
+	     Schema.org подставляет сюда сервер — той же рукой, что и на страницах
+	     разделов: список самых играемых паков он же и кладёт в саму страницу,
+	     а описание, собранное при сборке, разошлось бы с ним при первой правке.
+	     См. topLanding и injectLandingMeta в src/meta.js. -->
+	<title>Лучшие паки для «Своей игры» — топ паков SIGame за 3 месяца</title>
+	<!--landing-meta-->
 	<link rel="icon" href="/favicon.ico" sizes="any">
 	<link rel="stylesheet" href="/style.css">
 </head>
@@ -29,7 +28,7 @@
 		<div class="topbar__inner">
 			<a class="brand" href="/" title="На главную страницу библиотеки">
 				<span class="brand__mark" aria-hidden="true"><img src="/favicon.ico" alt="" width="30" height="30"></span>
-				<span class="brand__text">FirePacks</span>
+				<span class="brand__text">SIFirePacks</span>
 			</a>
 
 			<!-- Поиск ищет по нажатию, а не по каждой набранной букве. Пока он искал
@@ -80,8 +79,15 @@
 
 	<main class="top">
 		<div class="top__head">
-			<h1 class="top__heading">Топ пакетов за 3 месяца</h1>
-			<p class="hint" id="hint">Загрузка…</p>
+			<!-- Заголовок и подпись написаны прямо здесь, а не подставляются
+			     сервером, как на страницах разделов: они у топа всегда одни
+			     и те же, а скрипт всё равно перепишет подпись, дописав к ней
+			     дату начала периода (см. renderHint в web/top.js). Тому, кто
+			     скриптов не выполняет, остаётся то, что стоит здесь, — и это
+			     должно быть законченным текстом, а не словом «Загрузка…». -->
+			<h1 class="top__heading">Лучшие паки для «Своей игры» за 3 месяца</h1>
+			<p class="hint" id="hint">Паки для «Своей игры» (SIGame), выложенные за последние три
+				месяца, самые играемые сверху — по числу начатых игр из статистики SIGame.</p>
 		</div>
 
 		<!-- Быстрый выбор категории. Это и есть вся страница: нажали на категорию —
@@ -90,7 +96,16 @@
 		     свои, те же самые, что у типов паков в библиотеке. -->
 		<nav class="top-tabs" id="tabs" aria-label="Категории"></nav>
 
-		<div id="list" class="grid top-list"></div>
+		<!-- Внутри — заготовка от сервера: два десятка самых играемых паков
+		     ссылками и дорожка в разделы библиотеки. Скрипт затирает её первым же
+		     делом (box.textContent = '' в show) и рисует на этом месте настоящие
+		     карточки выбранной вкладки, поэтому человек её не увидит вовсе.
+
+		     Заготовка нарочно без вкладок: разложить топ по семи категориям —
+		     это семь запросов к базе на одно открытие, а тому, кто читает
+		     страницу без скриптов, нужен один честный список, а не одна вкладка
+		     из семи. -->
+		<div id="list" class="grid top-list"><!--landing-body--></div>
 	</main>
 
 	<script src="/common.js"></script>

@@ -68,3 +68,50 @@ export function packIdFromPath(pathname) {
 	const found = /^\/pack\/(\d+)(?:[-/].*)?$/.exec(pathname);
 	return found ? parseInt(found[1], 10) : null;
 }
+
+/**
+ * Адрес страницы тематики: /topic/anime.
+ *
+ * Ключ здесь тот же, что в базе и в отборе выдачи (primary_topic), и в адрес
+ * он попадает как есть: он и так латиницей, и придумывать ему второе написание
+ * значило бы держать перевод в двух местах. Множественного числа в «/topic/»
+ * нет нарочно — страница про одну тематику, как /pack/ про один пак.
+ */
+export const topicPath = key => `/topic/${key}`;
+
+/** Ключ тематики из адреса. Ничего, кроме самого ключа, после /topic/ не бывает. */
+export function topicKeyFromPath(pathname) {
+	const found = /^\/topic\/([a-z]+)\/?$/.exec(pathname);
+	return found ? found[1] : null;
+}
+
+/**
+ * Кусок адреса по ключу типа пака: «counter strike» → «counter-strike».
+ *
+ * Ключ считает src/subject.js, и он уже сведён к латинице и словам через
+ * пробел. Здесь остаётся только то, что можно писать в адресе: пробелы
+ * становятся чёрточками, всё остальное выбрасывается.
+ *
+ * Пустая строка — законный ответ: у предмета, чьё название целиком не латиница
+ * и не цифры (иероглифы такие в базе есть), адреса не будет вовсе, и страницы
+ * ему не полагается.
+ */
+export function subjectSlug(key) {
+	return String(key ?? '')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '');
+}
+
+/** Адрес страницы типа пака: /subjects/dota. Продолжение списка, лежащего в /subjects. */
+export const subjectPath = key => `/subjects/${subjectSlug(key)}`;
+
+/**
+ * Кусок адреса после /subjects/. Сам по себе он ничего не открывает: ключи
+ * типов сведены и лежат в базе, и найти по этому куску нужную группу может
+ * только тот, у кого весь список на руках (см. subjectBySlug в src/meta.js).
+ */
+export function subjectSlugFromPath(pathname) {
+	const found = /^\/subjects\/([a-z0-9-]+)\/?$/.exec(pathname);
+	return found ? found[1] : null;
+}

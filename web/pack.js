@@ -49,7 +49,7 @@ function renderMissing() {
 	empty.append(back);
 
 	box.append(empty);
-	document.title = 'Пак не найден — FirePacks';
+	document.title = 'Пак не найден — SIFirePacks';
 }
 
 async function start() {

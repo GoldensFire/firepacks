@@ -16,11 +16,17 @@ import {
 	listPackages, getPackage, getFacets, getSubjects, getTopAuthors, getProfile, listSitemap,
 	setPlayed, setPlayedKeys, isPlayedPack, playedCount,
 	setPlanned, setPlannedKeys, plannedCount,
-	matchList, namePacks,
+	matchList, namePacks, landingPacks, listSubjectGroups,
 } from './library.js';
 
-import { packIdFromPath } from '../../src/slug.js';
-import { injectPackMeta, buildSitemap, buildRobots } from '../../src/meta.js';
+import { settings } from '../../src/settings.js';
+import { packIdFromPath, topicKeyFromPath, subjectSlugFromPath } from '../../src/slug.js';
+
+import {
+	injectPackMeta, injectLandingMeta, buildSitemap, buildRobots,
+	TOPIC_PAGES, TOPIC_PAGE_KEYS, subjectPages, subjectBySlug,
+	topicLanding, subjectLanding, topLanding,
+} from '../../src/meta.js';
 
 import {
 	hasDiscord, currentUser, startLogin, finishLogin, logout,
@@ -57,6 +63,54 @@ const CACHEABLE = new Set(['/api/packages', '/api/facets', '/api/subjects', '/ap
 const SITEMAP_TTL = 86400;
 
 /**
+ * Сколько паков раздела попадает в саму страницу.
+ *
+ * Два десятка — это ровно та мера, при которой список остаётся списком: он
+ * говорит, что в разделе есть, и даёт поисковику два десятка настоящих ссылок
+ * на паки, а всё остальное лежит в библиотеке, куда со страницы ведёт ссылка.
+ * Больше не нужно ни человеку (он всё равно уйдёт в библиотеку с фильтрами),
+ * ни поисковику — сотня ссылок на странице весит больше, чем стоит.
+ */
+const LANDING_SIZE = 24;
+
+/**
+ * Сколько готовая страница раздела лежит в кэше Cloudflare.
+ *
+ * Час, а не пять минут, как у выдачи: страница раздела — самый дорогой по базе
+ * запрос из тех, что открывают руками. Порядок в ней по числу игр, а число игр
+ * лежит не в указателе, и чтобы отдать двадцать четыре строки, база перебирает
+ * все паки раздела — у солянок это семь тысяч. Меняется же список медленно:
+ * новый пак попадает в верхушку раздела не в тот час, когда появился, а когда
+ * его начнут играть. Час устаревания тут не стоит ничего.
+ */
+const LANDING_TTL = 3600;
+
+/**
+ * Файлы, которыми Google и Яндекс проверяют, что сайт наш.
+ *
+ * Лежат они в статике и уезжают наверх байт в байт (см. RAW в
+ * scripts/build-web.js), но досюда доходить не должны были вовсе — а доходят,
+ * и вот почему. Cloudflare раздаёт статику со снятым «.html»: по /subjects он
+ * отдаёт subjects.html, и это ровно то, на чём держатся адреса страниц сайта.
+ * Правило это обоюдное — спросили с расширением, получите отсылку на адрес
+ * без него, — и на этих двух файлах оно оборачивается против нас: поисковик
+ * приходит ровно по тому адресу, который сам же и выдал, с «.html» на конце,
+ * а получает не файл, а 307.
+ *
+ * Содержимое по отсылке правильное, и подтверждение однажды прошло. Но Google
+ * проверяет права заново и время от времени, а отсылку вместо файла считает
+ * основанием их снять — и снятые права означают потерянный доступ к Search
+ * Console вместе со всей статистикой запросов. Поэтому эти два адреса отвечают
+ * сами: тот же самый файл, но сразу и с кодом 200.
+ *
+ * Имена не выдуманы и переименованию не подлежат: у Google это имя выдано им
+ * самим, у Яндекса — «yandex_<код>.html» (см. тот же RAW в build-web.js).
+ * Названы они и здесь, и в run_worker_first (см. wrangler.jsonc): без второго
+ * места запрос до сюда бы не дошёл — Cloudflare ответил бы отсылкой раньше.
+ */
+const VERIFY = new Set(['/googlec52a37e47b9088a6.html', '/yandex_42c0743c2b5d2eb6.html']);
+
+/**
  * Вошёл ли пришедший — по печенью, без похода в базу. Именно этим решается,
  * можно ли брать общий ответ и класть в него свой: у вошедшего в выдаче
  * его собственное — своя оценка, свои отметки, свой чёрный список, — и общая
@@ -88,6 +142,63 @@ async function readJson(request) {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Какой раздел открыт по этому адресу и что о нём известно. Ничего не подошло —
+ * null, и адрес пойдёт дальше своим чередом, к «страница не найдена».
+ *
+ * Разделов три вида, и данные им нужны разные:
+ *
+ *   /topic/anime   — сколько таких паков всего, знает готовый ответ /api/facets:
+ *                    он и так лежит у изолята, и второй раз считать то же самое
+ *                    было бы платой ни за что;
+ *   /subjects/dota — какая группа стоит за куском адреса, знает сведение типов
+ *                    (см. src/subject.js): в адресе ключ, а отбор идёт по имени;
+ *   /top           — своего числа у топа нет, он и есть свой список.
+ */
+async function landingFor(db, url) {
+	const topic = topicKeyFromPath(url.pathname);
+
+	if (topic) {
+		if (!TOPIC_PAGES[topic]) {
+			return null;
+		}
+
+		const [facets, packs] = await Promise.all([
+			getFacets(db),
+			landingPacks(db, `topic=${encodeURIComponent(topic)}&unrated=1`, LANDING_SIZE),
+		]);
+
+		return topicLanding(topic, facets.topics?.[topic] ?? packs.length, packs);
+	}
+
+	const slug = subjectSlugFromPath(url.pathname);
+
+	if (slug) {
+		const page = subjectBySlug(await listSubjectGroups(db), slug);
+
+		if (!page) {
+			return null;
+		}
+
+		// Отбор по названию группы, а не по ключу: сводит написания сама выдача
+		const packs = await landingPacks(db,
+			`subject=${encodeURIComponent(page.name)}&unrated=1`, LANDING_SIZE);
+
+		return subjectLanding(page, packs, settings.subjectPackShare);
+	}
+
+	if (url.pathname === '/top') {
+		// Все категории вместе — тем эта заготовка и отличается от того, что
+		// нарисует скрипт: он разложит топ по вкладкам, а до скриптов честнее
+		// показать общий список, чем одну вкладку из семи.
+		const packs = await landingPacks(db, 'sort=popular_quarter&unrated=1', LANDING_SIZE);
+
+		return topLanding(packs);
+	}
+
+	return null;
 }
 
 export default {
@@ -329,6 +440,70 @@ export default {
 				});
 			}
 
+			// Подтверждение прав на сайт: тот же файл из статики, но своим
+			// адресом и кодом 200, а не отсылкой на адрес без «.html» (см. VERIFY).
+			if (VERIFY.has(url.pathname)) {
+				const asset = await env.ASSETS.fetch(new URL(url.pathname.replace(/\.html$/, ''), url));
+
+				return new Response(asset.body, {
+					status: 200,
+					headers: {
+						'Content-Type': 'text/html; charset=utf-8',
+						'Cache-Control': `public, max-age=${SITEMAP_TTL}`,
+					},
+				});
+			}
+
+			// ————— страницы разделов: /topic/anime, /subjects/dota, /top —————
+			//
+			// Ради них всё и затевалось. Раньше раздел жил отбором в адресе
+			// библиотеки (/?topic=anime), а canonical у той страницы стоял на «/» —
+			// то есть на языке поисковика все отборы были одной и той же главной,
+			// и на «паки своя игра аниме» у сайта не было своей страницы вовсе.
+			// Теперь есть: свой адрес, свой заголовок, свой текст и свой canonical.
+			//
+			// Готовая страница ложится в общий кэш Cloudflare на час: собирается
+			// она дороже всех прочих, а меняется медленнее всех прочих
+			// (см. LANDING_TTL). Личного в ней нет ничего — оценки и отметки
+			// страница спрашивает сама, уже в браузере.
+			//
+			// Похож ли адрес на раздел — решается до всякой базы: иначе кэш,
+			// ради которого всё и затевалось, проверялся бы уже после того,
+			// как страница собрана.
+			const sectionPath = topicKeyFromPath(url.pathname) !== null
+				|| subjectSlugFromPath(url.pathname) !== null
+				|| url.pathname === '/top';
+
+			if (request.method === 'GET' && sectionPath) {
+				const cached = await cache.match(request);
+
+				if (cached) {
+					return cached;
+				}
+
+				const landing = await landingFor(env.DB, url);
+
+				if (landing) {
+					// Топ живёт в своей вёрстке со своими вкладками, у остальных
+					// разделов одна на всех: списком паков они отличаются, а не
+					// устройством (см. web/landing.html)
+					const page = await env.ASSETS.fetch(
+						new URL(landing.kind === 'top' ? '/top.html' : '/landing.html', url));
+
+					const html = injectLandingMeta(await page.text(), landing, url.origin);
+
+					const response = new Response(html, {
+						headers: {
+							'Content-Type': 'text/html; charset=utf-8',
+							'Cache-Control': `public, max-age=${LANDING_TTL}`,
+						},
+					});
+
+					ctx.waitUntil(cache.put(request, response.clone()));
+					return response;
+				}
+			}
+
 			// Карта сайта. Без неё отдельные страницы паков поисковику взять
 			// неоткуда: постраничность выдачи сделана кнопками, а не ссылками,
 			// и обойти её ползая по ссылкам нельзя.
@@ -339,7 +514,16 @@ export default {
 					return found;
 				}
 
-				const body = buildSitemap(await listSitemap(env.DB), url.origin);
+				// Разделы едут в карту вместе с паками: сами по себе они
+				// поисковику неоткуда взяться — ссылки на них стоят на страницах
+				// таких же разделов, а первую из них найти неоткуда
+				const [rows, groups] = await Promise.all([listSitemap(env.DB), listSubjectGroups(env.DB)]);
+				const facets = await getFacets(env.DB);
+
+				const body = buildSitemap(rows, url.origin, {
+					topics: TOPIC_PAGE_KEYS.filter(key => (facets.topics?.[key] ?? 0) > 0),
+					subjects: subjectPages(groups),
+				});
 
 				const response = new Response(body, {
 					headers: {

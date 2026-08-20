@@ -3649,3 +3649,45 @@ a.authors__row:hover {
 		display: none;
 	}
 }
+
+/* Разделы библиотеки — ссылками, под выдачей.
+
+   Стоит это в подвале главной и решает две задачи разом. Поисковику — путь
+   к страницам тематик: колонка фильтров слева сделана галочками, а не ссылками,
+   и до /topic/anime ползая по сайту было не добраться (см. подвал в
+   web/index.html). Человеку — короткий путь к тому же самому: «покажите
+   аниме-паки» без разворачивания колонки.
+
+   Строкой в поток, а не сеткой: ссылок чуть больше десятка, длина у них разная,
+   и сетка из них выходит дырявой на любой ширине. */
+.sections {
+	max-width: 100rem;
+	margin: 0 auto;
+	padding: 0 1.25rem 1.5rem;
+	border-top: 1px solid var(--border);
+	padding-top: 1.25rem;
+}
+
+.sections__title {
+	margin: 0 0 0.6rem;
+	font-size: 0.9rem;
+	color: var(--text-muted);
+	font-weight: 600;
+}
+
+.sections__links {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem 1rem;
+}
+
+.sections__links a {
+	color: var(--text-muted);
+	text-decoration: none;
+	border-bottom: 1px solid transparent;
+}
+
+.sections__links a:hover {
+	color: var(--text);
+	border-bottom-color: var(--border);
+}

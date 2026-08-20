@@ -12,7 +12,7 @@
 //      а не установке: посетителей тут много, см. cf/schema.sql.
 
 import {
-	settings, thumbName, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
+	settings, thumbName, logoUrl, LEVELS, TOPICS, SPECIAL_NAMES, LANGUAGE_NAMES, MUSIC_KEY, OTHER_KINDS, GENRES,
 	FORMS, ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
 } from '../../src/settings.js';
 import { jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL } from '../../src/keys.js';
@@ -232,7 +232,7 @@ function toPackage(row, counts) {
 		// на лету здесь нечем и не нужно: обложки уезжают наверх готовыми
 		// (см. scripts/build-web.js) и отдаются Cloudflare из статики, без участия
 		// Worker. Имя копии — то же, что там: общий thumbName из settings.js.
-		logo: row.logo_state === 'ok' && row.logo_file ? `/logos/thumb/${thumbName(row.logo_file)}` : null,
+		logo: row.logo_state === 'ok' && row.logo_file ? logoUrl(thumbName(row.logo_file)) : null,
 		topicShares: jsonOrDefault(row.topic_shares, {}),
 		primaryTopic: row.primary_topic,
 		primaryShare: row.primary_share,
@@ -644,6 +644,109 @@ export async function listPackages(db, query, userId) {
 		packages: rows.results.map(row => toPackage(row, counts)),
 	};
 }
+
+/**
+ * Во сколько раз больше строк спросить, чтобы после отсева копий осталось
+ * сколько просили.
+ *
+ * Один и тот же пак лежит в базе столькими строками, сколько раз его
+ * перезаливали в обсуждение, и у самых играемых таких строк бывает с десяток:
+ * верхушка аниме-раздела на семь строк из двенадцати состояла из одного и того
+ * же пака под одним и тем же названием. Втрое — с запасом, и стоит это почти
+ * ничего: строки всё равно перебираются все, лишними оказываются только те,
+ * что доехали до кода.
+ */
+const COPIES = 3;
+
+/**
+ * Одна строка на название: остаётся та, что стоит выше по порядку, — то есть
+ * самая играемая.
+ *
+ * Сводится по названию, а не по ключу пака, и это не небрежность. Ключ разводит
+ * копии одного файла, но верхушку раздела портят не только они: у МакКайлы
+ * одиннадцать разных паков названы одинаково — «Вопросы SIGame», — ключи
+ * у них разные, а в списке ссылок это одиннадцать одинаковых строк подряд.
+ * Читающему видно название, по названию и сводим.
+ *
+ * Сама выдача так не делает нарочно: там у каждого пака своя карточка с датой,
+ * автором и обложкой, и различить их есть чем. Здесь же голый список ссылок,
+ * и различать в нём нечем.
+ */
+function dedupeCopies(rows, limit) {
+	const seen = new Set();
+	const kept = [];
+
+	for (const row of rows) {
+		const key = String(row.name ?? '').trim().toLowerCase() || row.pack_key;
+
+		if (seen.has(key)) {
+			continue;
+		}
+
+		seen.add(key);
+		kept.push(row);
+
+		if (kept.length >= limit) {
+			break;
+		}
+	}
+
+	return kept;
+}
+
+/**
+ * Верхушка списка для страницы раздела — /topic/anime, /subjects/dota, /top.
+ *
+ * Зачем отдельно от listPackages. Той нужно всё: счётчик «найдено», числа
+ * по сложностям, свои отметки, оценки, доли тематик, обложки — три запроса
+ * и полторы сотни столбцов на строку. Странице раздела из этого нужны шесть
+ * полей и два десятка строк: она рисует не карточки, а список ссылок для
+ * поисковика, и настоящие карточки поверх него потом дорисует браузер
+ * (см. web/landing.js). Платить за остальное незачем — у D1 прочитанное
+ * считано по тарифу.
+ *
+ * Отбор при этом собирается тем же самым buildWhere, что и у библиотеки,
+ * и из той же строки параметров (topic=anime, subject=Дота): список раздела
+ * обязан совпасть с тем, что покажет библиотека по ссылке «все паки раздела»,
+ * а два набора условий разошлись бы на первой же тонкости — вроде музыки,
+ * которая отбирается долей, а не ярлыком.
+ *
+ * @param {string} filter отбор строкой запроса: «topic=anime»
+ * @param {number} limit сколько строк оставить
+ */
+export async function landingPacks(db, filter, limit) {
+	const query = new URLSearchParams(filter);
+	const { where, params } = buildWhere(query, null, null, await subjectGroups(db));
+
+	// Порядок — самые играемые сверху. Не «самые новые»: раздел отвечает на
+	// вопрос «что тут вообще стоит взять», а свежесть видна в библиотеке,
+	// куда со страницы и ведёт ссылка.
+	const { results } = await db.prepare(`
+		SELECT p.id, p.name, p.file_name, p.authors, p.question_count, s.level, s.started_games,
+			${PACK_KEY_SQL} AS pack_key
+		FROM packages p LEFT JOIN stats s ON s.package_id = p.id
+		WHERE ${where}
+		ORDER BY COALESCE(s.started_games, -1) DESC, p.id DESC
+		LIMIT ?
+	`).bind(...params, limit * COPIES).all();
+
+	return dedupeCopies(results, limit).map(row => ({
+		id: row.id,
+		name: row.name ?? row.file_name,
+		authors: splitAuthors(jsonOrDefault(row.authors, [])),
+		questionCount: row.question_count,
+		levelName: row.level ? LEVELS[row.level]?.name ?? null : null,
+		startedGames: row.started_games,
+	}));
+}
+
+/**
+ * Сведённые типы паков — тем, кто снаружи: страницам /subjects/… надо знать,
+ * какая группа стоит за куском адреса, и по какому названию её отбирать.
+ * Ответ лежит в той же копилке изолята, что и у колонки фильтров, — лишней
+ * ходки в базу страница не стоит.
+ */
+export const listSubjectGroups = db => subjectGroups(db);
 
 /**
  * Один пак по номеру строки — для его отдельной страницы (/pack/…).

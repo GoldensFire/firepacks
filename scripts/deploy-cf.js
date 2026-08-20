@@ -269,7 +269,10 @@ function shelve() {
 	if (result.status !== 0) {
 		console.error('');
 		console.error('На полку база не легла. Сайт при этом обновлён — расходится только полка.');
-		console.error('Положить руками: npm run state:push (а если полка новее — npm run state:push -- --force).');
+		console.error('Положить руками: npm run state:push.');
+		console.error('');
+		console.error('Не откладывайте: пока на полке лежит прежнее, здешняя разметка живёт');
+		console.error('только здесь, и ближайшая сверка при запуске сайта уведёт её в sibase.prev.db.');
 	}
 }
 

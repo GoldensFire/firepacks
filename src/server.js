@@ -6,7 +6,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import {
 	config, TOPICS_VERSION, LEVELS, TOPICS, MUSIC_KEY, SPECIAL_NAMES, LANGUAGE_NAMES, OTHER_KINDS, GENRES,
-	FORMS, ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN,
+	FORMS, ORIGINS, ORIGIN_TOPICS, DECADE_TOPICS, DECADE_MIN, logoUrl,
 } from './config.js';
 import {
 	db, jsonOrDefault, roundsForApi, buildAuthorKey, splitAuthors, packKey, PACK_KEY_SQL, LOCAL_USER_ID,
@@ -14,8 +14,12 @@ import {
 import { readPackList, matchPackList, askedNames, chunk, NAME_KEY_SQL } from './packlist.js';
 import { runSearch, warmSearch } from './search.js';
 import { groupSubjects, subjectMatches } from './subject.js';
-import { packSlug, packIdFromPath } from './slug.js';
-import { injectPackMeta, buildSitemap, buildRobots } from './meta.js';
+import { packSlug, packIdFromPath, topicKeyFromPath, subjectSlugFromPath } from './slug.js';
+import {
+	injectPackMeta, injectLandingMeta, buildSitemap, buildRobots,
+	TOPIC_PAGES, TOPIC_PAGE_KEYS, subjectPages, subjectBySlug,
+	topicLanding, subjectLanding, topLanding,
+} from './meta.js';
 import {
 	startUpdate, startDeploy, stopUpdate, updateState, subscribe, updateModels, UPDATE_STEPS,
 } from './updater.js';
@@ -226,7 +230,7 @@ function toPackage(row) {
 		// Карточке нужен квадратик 72×72, а не заставка на весь экран, поэтому
 		// сюда идёт адрес уменьшенной копии (см. thumbs.js). Оригинал никуда
 		// не делся и по-прежнему лежит на /logos/<файл>.
-		logo: row.logo_state === 'ok' && row.logo_file ? `/logos/thumb/${row.logo_file}` : null,
+		logo: row.logo_state === 'ok' && row.logo_file ? logoUrl(row.logo_file) : null,
 		topicShares: jsonOrDefault(row.topic_shares, {}),
 		primaryTopic: row.primary_topic,
 		primaryShare: row.primary_share,
@@ -592,6 +596,118 @@ function getPackage(id, userId) {
 	`).get(userId ?? null, id);
 
 	return row ? toPackage(row) : null;
+}
+
+/**
+ * Верхушка списка для страницы раздела — /topic/anime, /subjects/dota, /top.
+ *
+ * Отбор собирается тем же самым buildWhere, что и у выдачи, и из той же строки
+ * параметров: список раздела обязан совпасть с тем, что покажет библиотека
+ * по ссылке «все паки раздела», а два набора условий разошлись бы на первой же
+ * тонкости — вроде музыки, которая отбирается долей, а не ярлыком.
+ *
+ * Полей берётся ровно шесть: страница рисует не карточки, а список ссылок
+ * для поисковика, и настоящие карточки поверх него дорисует потом браузер
+ * (см. web/landing.js). Двойник на Cloudflare делает то же самое и по той же
+ * причине, только там она весомее — у D1 прочитанные строки считаны по тарифу
+ * (см. landingPacks в cf/src/library.js).
+ *
+ * @param {string} filter отбор строкой запроса: «topic=anime»
+ * @param {number} limit сколько строк оставить
+ */
+function landingPacks(filter, limit) {
+	const { where, params } = buildWhere(new URLSearchParams(filter), null);
+
+	// Порядок — самые играемые сверху. Не «самые новые»: раздел отвечает
+	// на вопрос «что тут вообще стоит взять», а свежесть видна в библиотеке,
+	// куда со страницы и ведёт ссылка.
+	const rows = db.prepare(`
+		SELECT p.id, p.name, p.file_name, p.authors, p.question_count, s.level, s.started_games,
+			${PACK_KEY_SQL} AS pack_key
+		FROM packages p LEFT JOIN stats s ON s.package_id = p.id
+		WHERE ${where}
+		ORDER BY COALESCE(s.started_games, -1) DESC, p.id DESC
+		LIMIT ?
+	`).all(...params, limit * LANDING_COPIES);
+
+	// Одна строка на название. Верхушку раздела портят и перезаливы одного
+	// файла, и разные паки, названные одинаково: у МакКайлы одиннадцать пакетов
+	// зовутся «Вопросы SIGame», и в списке ссылок это одиннадцать одинаковых
+	// строк подряд. Сама выдача так не делает нарочно — там у каждого своя
+	// карточка с датой, автором и обложкой, — но здесь голый список ссылок,
+	// и различать в нём нечем (см. dedupeCopies в cf/src/library.js).
+	const seen = new Set();
+
+	return rows.filter(row => {
+		const key = String(row.name ?? '').trim().toLowerCase() || row.pack_key;
+
+		if (seen.has(key) || seen.size >= limit) {
+			return false;
+		}
+
+		seen.add(key);
+		return true;
+	}).map(row => ({
+		id: row.id,
+		name: row.name ?? row.file_name,
+		authors: splitAuthors(jsonOrDefault(row.authors, [])),
+		questionCount: row.question_count,
+		levelName: row.level ? LEVELS[row.level]?.name ?? null : null,
+		startedGames: row.started_games,
+	}));
+}
+
+/** Сколько паков раздела попадает в саму страницу. Столько же, сколько наверху. */
+const LANDING_SIZE = 24;
+
+/**
+ * Во сколько раз больше строк спросить, чтобы после отсева копий осталось
+ * сколько просили. Втрое — с запасом; то же число и по той же причине стоит
+ * у двойника на Cloudflare (см. COPIES в cf/src/library.js).
+ */
+const LANDING_COPIES = 3;
+
+/**
+ * Какой раздел открыт по этому адресу. Ничего не подошло — null, и адрес пойдёт
+ * дальше своим чередом. Устроено ровно как у двойника на Cloudflare
+ * (см. landingFor в cf/src/index.js): страницы разделов там и там одни и те же.
+ */
+function landingFor(pathname) {
+	const topic = topicKeyFromPath(pathname);
+
+	if (topic) {
+		if (!TOPIC_PAGES[topic]) {
+			return null;
+		}
+
+		const packs = landingPacks(`topic=${encodeURIComponent(topic)}&unrated=1`, LANDING_SIZE);
+
+		return topicLanding(topic, getFacets().topics?.[topic] ?? packs.length, packs);
+	}
+
+	const slug = subjectSlugFromPath(pathname);
+
+	if (slug) {
+		const page = subjectBySlug(subjectGroups(), slug);
+
+		if (!page) {
+			return null;
+		}
+
+		// Отбор по названию группы, а не по ключу: сводит написания сама выдача
+		const packs = landingPacks(`subject=${encodeURIComponent(page.name)}&unrated=1`, LANDING_SIZE);
+
+		return subjectLanding(page, packs, config.subjectPackShare);
+	}
+
+	if (pathname === '/top') {
+		// Все категории вместе — тем эта заготовка и отличается от того, что
+		// нарисует скрипт: он разложит топ по вкладкам, а до скриптов честнее
+		// показать общий список, чем одну вкладку из семи.
+		return topLanding(landingPacks('sort=popular_quarter&unrated=1', LANDING_SIZE));
+	}
+
+	return null;
 }
 
 /** Все паки для карты сайта: только то, из чего складывается адрес и дата. */
@@ -1706,11 +1822,39 @@ const server = http.createServer(async (request, response) => {
 			return;
 		}
 
+		// ————— страницы разделов: /topic/anime, /subjects/dota, /top —————
+		//
+		// Раньше раздел жил отбором в адресе библиотеки (/?topic=anime), а canonical
+		// у той страницы стоял на «/» — то есть на языке поисковика все отборы были
+		// одной и той же главной, и на «паки своя игра аниме» у сайта не было своей
+		// страницы вовсе. Теперь есть: свой адрес, свой заголовок, свой текст.
+		const landing = landingFor(url.pathname);
+
+		if (landing) {
+			// Топ живёт в своей вёрстке со своими вкладками, у остальных разделов
+			// одна на всех: списком паков они отличаются, а не устройством
+			const template = landing.kind === 'top' ? 'top.html' : 'landing.html';
+			const html = fs.readFileSync(path.join(config.webPath, template), 'utf8');
+
+			sendBody(response, 200, { 'Content-Type': MIME['.html'] },
+				Buffer.from(injectLandingMeta(html, landing, origin)), request);
+			return;
+		}
+
 		// Карта сайта. Без неё отдельные страницы паков поисковику взять неоткуда:
 		// постраничность выдачи сделана кнопками, и обойти её по ссылкам нельзя.
 		if (url.pathname === '/sitemap.xml') {
 			const rows = sitemapQuery.all().map(row => ({ id: row.id, name: row.name ?? row.file_name, vk_ts: row.vk_ts }));
-			const body = buildSitemap(rows, origin);
+
+			// Разделы едут в карту вместе с паками: сами по себе они поисковику
+			// неоткуда взяться — ссылки на них стоят на страницах таких же
+			// разделов, а первую из них найти неоткуда
+			const topics = getFacets().topics ?? {};
+
+			const body = buildSitemap(rows, origin, {
+				topics: TOPIC_PAGE_KEYS.filter(key => (topics[key] ?? 0) > 0),
+				subjects: subjectPages(subjectGroups()),
+			});
 
 			sendBody(response, 200, { 'Content-Type': 'application/xml; charset=utf-8' }, Buffer.from(body), request);
 			return;

@@ -2,21 +2,21 @@
 	"version": "0.0.1",
 	"configurations": [
 		{
-			"name": "firepacks",
+			"name": "sifirepacks",
 			"runtimeExecutable": "node",
 			"runtimeArgs": ["--no-warnings", "scripts/start.js"],
 			"port": 3000,
 			"autoPort": true
 		},
 		{
-			"name": "firepacks-asis",
+			"name": "sifirepacks-asis",
 			"runtimeExecutable": "node",
 			"runtimeArgs": ["--no-warnings", "scripts/start.js", "--no-sync"],
 			"port": 3000,
 			"autoPort": true
 		},
 		{
-			"name": "firepacks-cloudflare",
+			"name": "sifirepacks-cloudflare",
 			"runtimeExecutable": "npx",
 			"runtimeArgs": ["wrangler", "dev", "--port", "8787"],
 			"port": 8787

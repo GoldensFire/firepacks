@@ -34,15 +34,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$taskName = 'FirePacks: ночной обход базы'
+$taskName = 'SIFirePacks: ночной обход базы'
+
+# Как задание называлось до переименования сайта. Имя в Планировщике — это
+# не подпись, а ключ: заведи мы новое, не сняв старого, и обходов стало бы
+# два — оба по одной базе, оба каждую ночь. Поэтому старое снимается всюду,
+# где мы трогаем новое, и снимается молча: у того, кто заводит задание
+# впервые, снимать нечего.
+$oldTaskName = 'FirePacks: ночной обход базы'
 $root = Split-Path -Parent $PSScriptRoot
 
 if ($Remove) {
-	if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-		Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-		Write-Host "Задание «$taskName» снято."
+	$found = $false
+
+	foreach ($name in @($taskName, $oldTaskName)) {
+		if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+			Unregister-ScheduledTask -TaskName $name -Confirm:$false
+			Write-Host "Задание «$name» снято."
+			$found = $true
+		}
 	}
-	else {
+
+	if (-not $found) {
 		Write-Host "Задания «$taskName» и не было."
 	}
 
@@ -90,9 +103,16 @@ if ($Wake) {
 
 $settings = New-ScheduledTaskSettingsSet @settingsArgs
 
+# Задание под прежним именем снимаем до того, как заведём новое: иначе на машине,
+# где обход уже заведён, их окажется два.
+if (Get-ScheduledTask -TaskName $oldTaskName -ErrorAction SilentlyContinue) {
+	Unregister-ScheduledTask -TaskName $oldTaskName -Confirm:$false
+	Write-Host "Прежнее задание «$oldTaskName» снято: сайт переименован."
+}
+
 Register-ScheduledTask -TaskName $taskName `
 	-Action $action -Trigger $trigger -Settings $settings `
-	-Description 'Собирает базу FirePacks (ВК, разбор паков, статистика, Gemini) и выкладывает её на Cloudflare.' `
+	-Description 'Собирает базу SIFirePacks (ВК, разбор паков, статистика, Gemini) и выкладывает её на Cloudflare.' `
 	-Force | Out-Null
 
 Write-Host ''

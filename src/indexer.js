@@ -2389,8 +2389,8 @@ async function refreshAnalysis() {
 }
 
 const updatePlagiarism = db.prepare(`
-	UPDATE packages SET plagiarism_kind = ?, plagiarism_share = ?, plagiarism_sources = ?,
-		rounds = ?, plagiarism_at = ? WHERE id = ?
+	UPDATE packages SET plagiarism_kind = ?, plagiarism_share = ?, plagiarism_questions = ?,
+		plagiarism_sources = ?, rounds = ?, plagiarism_at = ? WHERE id = ?
 `);
 
 /**
@@ -2526,6 +2526,7 @@ function checkPlagiarism() {
 		updatePlagiarism.run(
 			verdict?.kind ?? null,
 			verdict?.share ?? null,
+			verdict?.questions ?? null,
 			JSON.stringify(verdict?.sources ?? []),
 			markStolenThemes(stored, verdict?.places ?? []) ?? stored,
 			now,
@@ -2534,6 +2535,7 @@ function checkPlagiarism() {
 	};
 
 	let cleared = 0;
+	let questions = 0;
 	const kinds = { pack: 0, compiled: 0, partial: 0 };
 
 	for (const [id, verdict] of verdicts) {
@@ -2545,6 +2547,7 @@ function checkPlagiarism() {
 
 		save(id, verdict);
 		kinds[verdict.kind]++;
+		questions += verdict.questions;
 	}
 
 	for (const id of marked) {
@@ -2562,6 +2565,7 @@ function checkPlagiarism() {
 	say('plagiarism', `отмечено ${kinds.pack + kinds.compiled + kinds.partial}: копий ${kinds.pack}, `
 		+ `солянок ${kinds.compiled}, с заметной долей чужого ${kinds.partial}`
 		+ `${cleared > 0 ? `; метка снята у ${cleared}` : ''}`);
+	say('plagiarism', `чужих вопросов в отмеченных паках ${questions}`);
 }
 
 /** Пересчитывает уровни по уже сохранённым числам — нужен после правки порогов в настройках. */

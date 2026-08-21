@@ -82,6 +82,12 @@ export function themeFingerprint(name, sample) {
  * Повторы внутри одного пака схлопываются: тема, стоящая в паке дважды, — это
  * одна тема, и считать её за две значило бы дарить долю тому, кто повторился.
  * Место запоминается за всеми повторами сразу, чтобы метку получили оба.
+ *
+ * Вместе с местом запоминается и число вопросов темы — то самое, которое
+ * разбор посчитал в файле (см. parseRounds в src/siq.js). Доля считается
+ * по темам, а человек спрашивает про вопросы: «сколько их тут чужих». Взять
+ * их потом неоткуда — от пака к концу разбора остаются одни отпечатки, — так
+ * что число едет рядом с местом, по четыре байта на тему.
  */
 export function packThemes(rounds) {
 	const themes = new Map();
@@ -96,12 +102,21 @@ export function packThemes(rounds) {
 				return;
 			}
 
+			// У темы, записанной строкой, числа вопросов нет вовсе: так хранили
+			// до появления образцов. Ноль здесь честнее выдуманной пятёрки —
+			// пак с такими темами просто промолчит про вопросы (см. карточку)
+			const place = {
+				round: roundIndex,
+				theme: themeIndex,
+				questions: typeof theme === 'string' ? 0 : (theme?.questions ?? 0),
+			};
+
 			const known = themes.get(fp);
 
 			if (known) {
-				known.push([roundIndex, themeIndex]);
+				known.push(place);
 			} else {
-				themes.set(fp, [[roundIndex, themeIndex]]);
+				themes.set(fp, [place]);
 			}
 		});
 	});
@@ -299,6 +314,22 @@ export function reviewPlagiarism(rows, limits) {
 		const ranked = [...byDonor.entries()].sort((a, b) => b[1] - a[1] || a[0].id - b[0].id);
 		const top = ranked[0][1] / marks.length;
 
+		// Где в раундах стоят заимствованные темы и чьи они. Отсюда шаг
+		// проставляет полю src номер донора: у солянки эти номера разные,
+		// и каждая украденная тема получает свою ссылку
+		const places = marks.flatMap(({ fp, donor }) => entry.themes.get(fp).map(place => ({
+			round: place.round,
+			theme: place.theme,
+			source: donor.id,
+			questions: place.questions,
+		})));
+
+		// Сколько чужих вопросов в паке. Складывается по местам, а не по темам,
+		// и разница тут есть: тема, поставленная в пак дважды, — это две темы
+		// на столе и двойной набор вопросов, хотя доля считает её за одну.
+		// Спрашивают-то именно про вопросы: «на скольких чужих сыграют»
+		const questions = places.reduce((sum, place) => sum + place.questions, 0);
+
 		verdicts.set(entry.id, {
 			// Три ступени, а не «да/нет».
 			//
@@ -316,6 +347,11 @@ export function reviewPlagiarism(rows, limits) {
 			share: round(share),
 			borrowed: marks.length,
 			total: own.length,
+			// Число чужих вопросов, а не доля: доля у пака уже есть, и вторая,
+			// посчитанная по другому знаменателю, только сбивала бы с толку.
+			// Ноль значит «не знаем» — так бывает у паков, разобранных до того,
+			// как темы стали храниться объектами
+			questions,
 			// Название донора лежит рядом с номером нарочно: адрес страницы пака
 			// складывается из номера и названия (см. packSlug в src/slug.js), и без
 			// названия карточке пришлось бы ходить в D1 за каждым донором отдельно
@@ -325,14 +361,7 @@ export function reviewPlagiarism(rows, limits) {
 				n,
 				share: round(n / marks.length),
 			})),
-			// Где в раундах стоят заимствованные темы и чьи они. Отсюда шаг
-			// проставляет полю src номер донора: у солянки эти номера разные,
-			// и каждая украденная тема получает свою ссылку
-			places: marks.flatMap(({ fp, donor }) => entry.themes.get(fp).map(([r, t]) => ({
-				round: r,
-				theme: t,
-				source: donor.id,
-			}))),
+			places,
 		});
 
 		stats.flagged++;

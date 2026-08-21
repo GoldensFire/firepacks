@@ -305,6 +305,10 @@ function toPackage(row, counts) {
 			? {
 				kind: row.plagiarism_kind,
 				share: row.plagiarism_share,
+				// Сколько вопросов пака стоит в заимствованных темах. Ноль
+				// значит «неизвестно» — так у паков, разобранных до того, как
+				// у темы появилось число вопросов, — и карточка тогда молчит
+				questions: row.plagiarism_questions ?? 0,
 				sources: jsonOrDefault(row.plagiarism_sources, [])
 					.map(source => ({ ...source, slug: packSlug(source.name) })),
 			}

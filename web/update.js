@@ -7,7 +7,10 @@
 // всех остальных, а два одинаковых element() расходятся при первой же правке.
 
 /** Шаги, отмеченные при первом открытии: обычный полный проход без служебных. */
-const DEFAULT_STEPS = new Set(['vk', 'parse', 'stats', 'topics', 'summary']);
+// Плагиат отмечен вместе с остальным обычным набором: сети он не касается,
+// стоит секунды и обязан идти следом за разбором — новый пак меняет старшинство
+// у тех, кого уже проверили (см. checkPlagiarism в src/indexer.js)
+const DEFAULT_STEPS = new Set(['vk', 'parse', 'stats', 'topics', 'summary', 'plagiarism']);
 
 const selected = new Set();
 let steps = [];

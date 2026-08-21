@@ -521,6 +521,16 @@ function buildWhere(query, userId, hits, groups = [], bans = null) {
 		params.push(userId);
 	}
 
+	// …и обратный ему отбор, той же парой, что «скрыть сыгранные» и «только
+	// сыгранные»: библиотеку листают за новым паком, а отложенное на этот вопрос
+	// уже ответило. Условие то же самое, только с NOT — и так же, как соседнее,
+	// только для вошедшего: без входа отметки лежат в самом браузере, база о них
+	// не знает, и прятать ей нечего (галочка там гаснет, см. renderPlayedFilters).
+	if (userId && query.get('hidePlanned') === '1') {
+		conditions.push(`NOT EXISTS (SELECT 1 FROM planned pn WHERE pn.user_id = ? AND pn.pack_key = ${PACK_KEY_SQL})`);
+		params.push(userId);
+	}
+
 	// Отсечка по времени появления в обсуждении живёт здесь, а не в сортировке:
 	// иначе счётчик «найдено» считал бы паки, которых в выдаче нет.
 	const period = periodOf(query.get('sort') ?? 'added');
@@ -580,7 +590,7 @@ function levelsQuery(db, query, userId, hits, groups, bans) {
  */
 const NARROWING = [
 	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
-	'onlyPlayed', 'onlyPlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
+	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
 ];
 
 /**

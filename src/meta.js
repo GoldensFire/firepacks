@@ -908,6 +908,6 @@ export function buildRobots(origin) {
 		// у /topic/anime и /subjects/dota адрес без параметров, свой заголовок
 		// и свой canonical на самих себя (см. injectLandingMeta).
 		+ `Clean-param: topic&levels&lang&tag&author&franchise&subject&sort&dir&page&pageSize`
-		+ `&search&unrated&hidePlayed&onlyPlayed&onlyPlanned&login /\n\n`
+		+ `&search&unrated&hidePlayed&onlyPlayed&onlyPlanned&hidePlanned&login /\n\n`
 		+ `Sitemap: ${origin}/sitemap.xml\n`;
 }

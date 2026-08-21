@@ -16,6 +16,11 @@ const state = {
 	// Отобранное на будущий вечер. Полный список — в профиле, а здесь по нему
 	// можно искать теми же фильтрами, что и по всей библиотеке
 	onlyPlanned: false,
+	// Обратный ему отбор: убрать отложенное с глаз. Нужен тем, кто листает
+	// библиотеку за НОВЫМ паком — то, что уже отобрано на вечер, на этот вопрос
+	// ответило. Снятым с самого начала нарочно: запланированное, в отличие
+	// от сыгранного, ещё не сыграно, и прятать его без просьбы нельзя
+	hidePlanned: false,
 	// Спрятанное в чёрный список показывается по просьбе: снять запрет проще
 	// всего на самой карточке, а до неё надо сперва добраться
 	showBlacklisted: false,
@@ -137,10 +142,13 @@ function pinMarks(mark) {
 	state.hidePlayed = false;
 	state.onlyPlayed = mark === 'played';
 	state.onlyPlanned = mark === 'planned';
+	// Список запланированного не может прятать сам себя
+	state.hidePlanned = false;
 
 	$('hidePlayed').checked = false;
 	$('onlyPlayed').checked = state.onlyPlayed;
 	$('onlyPlanned').checked = state.onlyPlanned;
+	$('hidePlanned').checked = false;
 }
 
 const LEVEL_ORDER = [4, 3, 2, 1];
@@ -260,6 +268,10 @@ function buildQuery() {
 		query.set('onlyPlanned', '1');
 	}
 
+	if (state.hidePlanned) {
+		query.set('hidePlanned', '1');
+	}
+
 	if (state.showBlacklisted) {
 		query.set('showBlacklisted', '1');
 	}
@@ -314,7 +326,7 @@ function buildQuery() {
 function renderPlayedFilters() {
 	const locked = !serverMarks();
 
-	for (const id of ['hidePlayed', 'onlyPlayed', 'onlyPlanned']) {
+	for (const id of ['hidePlayed', 'onlyPlayed', 'onlyPlanned', 'hidePlanned']) {
 		const input = $(id);
 		input.disabled = locked;
 
@@ -841,6 +853,12 @@ function renderActiveFilters() {
 		add('С чёрным списком', () => { state.showBlacklisted = false; });
 	}
 
+	// Спрятанное отложенное — такая же плашка: на узком экране колонка свёрнута,
+	// и почему знакомый пак пропал из выдачи, видно только отсюда
+	if (state.hidePlanned) {
+		add('Без запланированного', () => { state.hidePlanned = false; });
+	}
+
 	// Кнопка «Фильтры» показывает их число: на узком экране сама колонка свёрнута,
 	// и по одним плашкам поверх выдачи всего набора не видно
 	renderFiltersToggle();
@@ -872,6 +890,7 @@ function countActiveFilters() {
 		+ (pinned || state.hidePlayed || state.onlyPlayed || !serverMarks() ? 0 : 1)
 		+ (state.onlyPlayed && pinned !== 'played' ? 1 : 0)
 		+ (state.onlyPlanned && pinned !== 'planned' ? 1 : 0)
+		+ (state.hidePlanned ? 1 : 0)
 		+ (state.lowRepeats ? 1 : 0)
 		+ (state.lowSpecials ? 1 : 0)
 		+ (state.noFranchise ? 1 : 0)
@@ -1025,11 +1044,25 @@ function submitSearch() {
 }
 
 /**
- * Порядок «по возрастанию/по убыванию» у сортировки по совпадению не спрашивают:
- * снизу там то, что подошло меньше всего, и показывать это первым незачем.
+ * Порядок выдачи. Кнопка, а не список из двух пунктов: направлений всего два,
+ * и раскрывать ради выбора между ними список означало три действия там, где
+ * хватает одного.
+ *
+ * Подпись говорит, что будет по нажатию, — как и у всех кнопок сайта. Стрелка,
+ * наоборот, показывает нынешний порядок: она поворачивается меткой aria-pressed
+ * (см. .dir-toggle в style.css), и по ней видно, как список стоит сейчас.
+ *
+ * У сортировки по совпадению порядок не спрашивают вовсе: снизу там то, что
+ * подошло меньше всего, и показывать это первым незачем — кнопка гаснет.
  */
 function renderSortDirection() {
-	$('dir').disabled = state.sort === 'relevance';
+	const button = $('dir');
+	const up = state.dir === 'asc';
+
+	button.disabled = state.sort === 'relevance';
+	button.setAttribute('aria-pressed', String(up));
+	$('dirLabel').textContent = up ? 'По убыванию' : 'По возрастанию';
+	button.title = up ? 'Сейчас по возрастанию' : 'Сейчас по убыванию';
 }
 
 function bind() {
@@ -1078,10 +1111,32 @@ function bind() {
 	});
 
 	// «Только запланированные» ни с чем не спорит: отложить можно и сыгранный пак,
-	// и неоценённый, — поэтому соседние галочки эта не снимает
+	// и неоценённый, — поэтому соседние галочки эта не снимает. Кроме одной:
+	// «показать только отложенное» и «спрятать отложенное» вместе не оставляют
+	// ни одного пака, и стоять отмеченными разом им нельзя
 	$('onlyPlanned').addEventListener('change', event => {
 		state.onlyPlanned = event.target.checked;
+
+		if (state.onlyPlanned) {
+			state.hidePlanned = false;
+			$('hidePlanned').checked = false;
+		}
+
 		state.page = 1;
+		renderActiveFilters();
+		load();
+	});
+
+	$('hidePlanned').addEventListener('change', event => {
+		state.hidePlanned = event.target.checked;
+
+		if (state.hidePlanned) {
+			state.onlyPlanned = false;
+			$('onlyPlanned').checked = false;
+		}
+
+		state.page = 1;
+		renderActiveFilters();
 		load();
 	});
 
@@ -1119,9 +1174,10 @@ function bind() {
 		load();
 	});
 
-	$('dir').addEventListener('change', event => {
-		state.dir = event.target.value;
+	$('dir').addEventListener('click', () => {
+		state.dir = state.dir === 'asc' ? 'desc' : 'asc';
 		state.page = 1;
+		renderSortDirection();
 		load();
 	});
 
@@ -1158,6 +1214,7 @@ function resetFilters() {
 	state.hidePlayed = true;
 	state.onlyPlayed = false;
 	state.onlyPlanned = false;
+	state.hidePlanned = false;
 	state.showBlacklisted = false;
 	state.lowRepeats = false;
 	state.lowSpecials = false;
@@ -1176,10 +1233,10 @@ function resetFilters() {
 	$('hidePlayed').checked = true;
 	$('onlyPlayed').checked = false;
 	$('onlyPlanned').checked = false;
+	$('hidePlanned').checked = false;
 	$('tagSearch').value = '';
 	$('subjectSearch').value = '';
 	$('sort').value = 'added';
-	$('dir').value = 'desc';
 
 	// «Сбросить» возвращает страницу к тому, как она открывается, — а в профиле
 	// она открывается списком той вкладки, на которой стоят
@@ -1236,6 +1293,7 @@ function readUrlState() {
 	// Из профиля ведёт ссылка «показать запланированное в библиотеке»: там список
 	// целиком, а здесь по нему можно искать теми же фильтрами, что и по всей базе
 	state.onlyPlanned = query.get('onlyPlanned') === '1';
+	state.hidePlanned = !state.onlyPlanned && query.get('hidePlanned') === '1';
 	state.onlyPlayed = query.get('onlyPlayed') === '1';
 	state.showBlacklisted = query.get('showBlacklisted') === '1';
 	state.lowRepeats = query.get('lowRepeats') === '1';
@@ -1261,6 +1319,7 @@ function readUrlState() {
 	$('sort').value = state.sort;
 	renderSortDirection();
 	$('onlyPlanned').checked = state.onlyPlanned;
+	$('hidePlanned').checked = state.hidePlanned;
 	$('onlyPlayed').checked = state.onlyPlayed;
 	$('hidePlayed').checked = state.hidePlayed;
 }
@@ -1394,7 +1453,6 @@ async function mountLibrary(packages = null) {
 	// Сортировка в списке и сортировка в state должны совпадать с первого мига:
 	// в библиотеке их сводит разбор адреса, а профиль открывает списки без него
 	$('sort').value = state.sort;
-	$('dir').value = state.dir;
 	renderSortDirection();
 
 	renderChecks();

@@ -1,10 +1,42 @@
+/* Цвета сайта собраны здесь все до одного, и это не аккуратность ради
+   аккуратности: тема переключается сменой ровно этого набора и ничего больше
+   (см. :root[data-theme="light"] ниже и applyTheme в web/common.js). Голый цвет,
+   написанный где-нибудь в правиле, в светлой теме останется тёмным — и станет
+   дырой посреди белой страницы. Поэтому их тут нет: даже «ничей серый» кусок
+   полоски долей и обводка звёзд названы именем.
+
+   Тёмная тема — та, что была всегда, и она же остаётся по умолчанию: сайт
+   открывают вечером, перед игрой. Светлая включается кнопкой в шапке и живёт
+   в самом браузере — выбранная однажды, она встречает и завтра. */
 :root {
+	/* Родные части браузера — полосы прокрутки, галочки, списки — красит он сам,
+	   и знать, во что, ему неоткуда. Без этой строки в светлой теме оставались
+	   бы чёрные выпадающие списки. */
+	color-scheme: dark;
+
 	--bg: #0e1015;
 	--bg-panel: #171a21;
 	--bg-panel-2: #1d212a;
+	/* Подсветка строки под курсором и залитого переключателя сложности. Раньше
+	   стояла голым цветом в двух местах — и в светлой теме была бы кляксой */
+	--bg-hover: #202634;
 	--border: #272c37;
+	/* Та же рамка, но под курсором: на тон заметнее обычной */
+	--border-strong: #39404f;
 	--text: #e7e9ef;
 	--text-muted: #8b93a7;
+	/* Ничей цвет: куски полоски долей, которым цвета не досталось, «прочее»
+	   и точки подписей к ним */
+	--neutral: #333a49;
+	--neutral-soft: #7f8a9c;
+	--neutral-text: #4d566b;
+	/* Обводка звёзд оценки. Звёзды лежат и на карточке, и поверх обложки,
+	   и пустая звезда цвета рамки на панели почти не видна: тонкий контур
+	   вокруг глифа держит её на любом фоне (см. .rating__stars) */
+	--star-stroke: rgba(231, 233, 239, .5);
+	/* Тени всплывающих кусков: меню чёрного списка, плашка «пак спрятан» */
+	--shadow: var(--shadow);
+	--shadow-soft: var(--shadow-soft);
 	--accent: #4f8cff;
 	--easy: #3fb950;
 	--medium: #d9a33a;
@@ -35,6 +67,52 @@
 	--sport: #3fb95a;
 	--mixed: #1fdca4;
 	--radius: 0.625rem;
+}
+
+/* Светлая тема. Тот же самый набор имён, другие значения — и больше ничего:
+   ни одного правила вёрстки здесь не переписывается, потому что переписывать
+   нечего (см. пояснение к :root выше).
+
+   Цвета тематик и сложностей приглушены нарочно. На тёмной странице они горят
+   как надо, а те же самые на белой — светлые буквы на светлом: «Лёгкий» цвета
+   #3fb950 на #ffffff читается хуже, чем серый. Смысл цвета при этом сохранён:
+   аниме остаётся малиновым, игры бирюзовыми, музыка розовой, — узнаётся тип
+   по-прежнему не читая подписи, просто на полтона глубже.
+
+   Ставит метку скрипт в самой шапке страницы, до первой отрисовки: попади она
+   туда позже, светлая тема моргала бы тёмной при каждом открытии. */
+:root[data-theme="light"] {
+	color-scheme: light;
+
+	--bg: #f2f4f9;
+	--bg-panel: #ffffff;
+	--bg-panel-2: #eef1f7;
+	--bg-hover: #e4e9f3;
+	--border: #d8dde8;
+	--border-strong: #b3bccd;
+	--text: #161a22;
+	--text-muted: #5b6478;
+	--neutral: #c2c9d8;
+	--neutral-soft: #939cae;
+	--neutral-text: #868fa2;
+	--star-stroke: rgba(22, 26, 34, .45);
+	--shadow: rgba(23, 31, 51, .18);
+	--shadow-soft: rgba(23, 31, 51, .14);
+	--accent: #2560d4;
+	--easy: #1c8a36;
+	--medium: #9c6e0f;
+	--hard: #bf5a11;
+	--very-hard: #cf3a30;
+	--anime: #cc0f48;
+	--manga: #cf4f18;
+	--games: #0c8899;
+	--movies: #1c9646;
+	--cartoons: #6f24cf;
+	--books: #ad7217;
+	--comics: #274dcc;
+	--music: #ce2c7d;
+	--sport: #2b8c41;
+	--mixed: #0d9370;
 }
 
 * {
@@ -307,6 +385,10 @@ a.brand:hover .brand__text {
 	   у самих клеток — и вместе с ней исчезнет мишень. */
 	display: inline-flex;
 	align-items: center;
+	/* Промежуток между подписью и числом. Двоеточие с пробелом в самой строке
+	   его не даёт: клетка счётчика — flex, а flex съедает крайние пробелы
+	   у своих кусков, и «Паков:» слипалось с «11 480». */
+	gap: 0.3125rem;
 	white-space: nowrap;
 }
 
@@ -508,7 +590,7 @@ a.brand:hover .brand__text {
 .level-toggle[aria-pressed="true"] {
 	color: var(--text);
 	border-color: currentColor;
-	background: #202634;
+	background: var(--bg-hover);
 }
 
 .level--easy .dot { background: var(--easy); }
@@ -591,7 +673,7 @@ a.brand:hover .brand__text {
 
 .checklist__row:hover {
 	color: var(--text);
-	background: #202634;
+	background: var(--bg-hover);
 }
 
 .checklist__row input {
@@ -760,6 +842,28 @@ a.brand:hover .brand__text {
 	margin: 0;
 }
 
+/* Порядок выдачи — кнопка, а не список из двух пунктов. Выбирать там всегда
+   было не из чего: «по убыванию» и «по возрастанию» — это одно и то же решение,
+   принятое в одну или другую сторону, и раскрывать ради него список, читать два
+   пункта и целиться в один из них — три действия там, где хватает одного.
+   Стрелка показывает нынешний порядок, подпись — что будет по нажатию. */
+.dir-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.375rem;
+	white-space: nowrap;
+}
+
+/* Стрелка переворачивается поворотом, а не подменой значка: так видно, что это
+   то же самое, повёрнутое в другую сторону, — и переключение читается движением */
+.dir-toggle .icon {
+	transition: transform .15s;
+}
+
+.dir-toggle[aria-pressed="true"] .icon {
+	transform: rotate(180deg);
+}
+
 /* Кнопка, разворачивающая колонку фильтров. На широком экране колонка стоит
    рядом с выдачей и видна всегда — кнопки там нет вовсе. */
 
@@ -853,6 +957,46 @@ a.brand:hover .brand__text {
    для :empty уже содержимое. */
 .account:empty {
 	min-width: 9.9375rem;
+}
+
+/* Переключатель темы. Стоит последним в шапке, за уголком входа: это настройка
+   самого сайта, а не его содержимого, и ей место с краю, а не между ссылками
+   на топы. Значок один и меняется по теме — солнце в тёмной, месяц в светлой:
+   рисует он не то, что сейчас, а то, что будет по нажатию.
+
+   Подписи рядом нет нарочно: в шапке и так тесно, а значок солнца и месяца
+   не нуждается в переводе. Тому, кто читает голосом, подпись остаётся
+   в aria-label, и меняется она вместе со значком (см. applyTheme в common.js). */
+.theme-toggle {
+	flex: none;
+	padding: 0.4375rem;
+	border-color: transparent;
+	background: none;
+	color: var(--text-muted);
+	transition: border-color .15s, background .15s, color .15s;
+}
+
+.theme-toggle:hover {
+	background: var(--bg-panel-2);
+	border-color: var(--border);
+	color: var(--text);
+}
+
+/* Оба значка нарисованы прямо в вёрстке, и лишний прячется правилом, а не
+   скриптом. Причина та же, что и у кнопки поиска рядом: кнопка стоит в шапке
+   и нужна с первого мига — рисуй её скрипт, и до его загрузки на месте кнопки
+   была бы пустая рамка. А заодно значок не моргает при переключении: меняется
+   метка на странице, и правило само показывает нужный. */
+.theme-toggle__moon {
+	display: none;
+}
+
+:root[data-theme="light"] .theme-toggle__sun {
+	display: none;
+}
+
+:root[data-theme="light"] .theme-toggle__moon {
+	display: block;
 }
 
 /* Значок и имя — одна мишень, а не две стоящие рядом. Целятся в них всегда
@@ -1022,7 +1166,7 @@ a.brand:hover .brand__text {
 }
 
 .card:hover {
-	border-color: #39404f;
+	border-color: var(--border-strong);
 }
 
 /* Нажимается вся карточка, а не одно название: мишень величиной с пол-экрана
@@ -1078,7 +1222,7 @@ a.brand:hover .brand__text {
 	background: var(--bg-panel-2);
 	border: 1px solid var(--very-hard);
 	border-radius: var(--radius);
-	box-shadow: 0 0.625rem 1.875rem rgba(0, 0, 0, .5);
+	box-shadow: 0 0.625rem 1.875rem var(--shadow);
 	text-align: center;
 }
 
@@ -1306,6 +1450,23 @@ a.brand:hover .brand__text {
 	margin-top: auto;
 }
 
+/* Пустой кусок во всю ширину: всё, что стоит за ним, начинается с новой строки.
+   Ставится между процентами статистики и типом пака (см. createBadges
+   в web/card.js) — «Средний · 62.4% отвечали · 78.1% правильных · Аниме-пак»
+   в одну строку не влезало никогда и переносилось где придётся, разрывая то
+   пару «число — подпись», то сам ярлык. Строка со сложностью и процентами
+   теперь своя, строка с типом пака — своя. */
+.badges__break {
+	flex-basis: 100%;
+	height: 0;
+}
+
+/* Имя автора — настоящая ссылка (см. web/card.js), но выглядеть обычной синей
+   ссылкой ей нельзя: стоит она в шапке карточки, где синим набрано название,
+   и два синих слова подряд читались бы одним. Отсюда приглушённый цвет
+   и пунктир снизу вместо подчёркивания — тот же вид, что был у кнопки на её
+   месте. Подчёркивание, которое браузер рисует ссылкам при наведении, снято
+   по той же причине: под пунктиром оно вторая черта. */
 .author-link {
 	padding: 0;
 	border: none;
@@ -1318,6 +1479,7 @@ a.brand:hover .brand__text {
 
 .author-link:hover {
 	color: var(--accent);
+	text-decoration: none;
 }
 
 /* Знак запрета у самого имени автора. Ростом ровно с имя — строка от него
@@ -1583,6 +1745,17 @@ a.brand:hover .brand__text {
 	user-select: none;
 }
 
+/* Тонкий контур вокруг звезды — и залитой, и пустой. Нужен обеим, но по разным
+   причинам: пустая звезда набрана цветом рамки и на панели почти не видна,
+   а залитая стоит на карточке сыгранного пака поверх приглушённого фона.
+   Контур обводит глиф снаружи (paint-order), а не съедает его край изнутри:
+   иначе мелкие звёзды в строке стали бы тоньше, чем были. */
+.rating__track,
+.rating__fill {
+	-webkit-text-stroke: 0.5px var(--star-stroke);
+	paint-order: stroke fill;
+}
+
 .rating__track {
 	color: var(--border);
 }
@@ -1607,7 +1780,7 @@ a.brand:hover .brand__text {
 
 .rating__stars--active:hover .rating__track,
 .rating__stars:focus-visible .rating__track {
-	color: #3a4152;
+	color: var(--border-strong);
 }
 
 .rating__stars--preview .rating__fill {
@@ -1685,7 +1858,7 @@ a.brand:hover .brand__text {
 	background: var(--bg-panel-2);
 	border: 1px solid var(--border);
 	border-radius: 0.5rem;
-	box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, .45);
+	box-shadow: 0 0.5rem 1.5rem var(--shadow-soft);
 }
 
 .hide__item {
@@ -1747,16 +1920,17 @@ a.hide__item--login:hover {
 	color: var(--very-hard);
 }
 
-/* Числа, у которых есть «слишком много»: повторы и спецвопросы.
-   Порог первый — оранжевым, второй — красным, теми же цветами, какими на сайте
-   набраны «сложный» и «очень сложный». Классы общие на двоих нарочно: правило
-   одно (см. alarmClass в web/card.js), разные у них только пороги. */
-.value--warn { color: var(--hard); }
+/* Числа, у которых есть «слишком много»: повторы и спецвопросы. Первый порог —
+   жёлтым, второй — красным: светофор читается без подписи, а оранжевый, стоявший
+   тут раньше, от красного на мелком шрифте не отличался вовсе. Классы общие
+   на двоих нарочно: правило одно (см. alarmClass в web/card.js), разные у них
+   только пороги. */
+.value--warn { color: var(--medium); }
 .value--alarm { color: var(--very-hard); }
 
 /* Значок красится вместе с числом: в строке мелких цифр под карточкой одна
    покрасневшая цифра теряется, а значок с цифрой — уже пятно */
-.value--warn .icon { stroke: var(--hard); }
+.value--warn .icon { stroke: var(--medium); }
 .value--alarm .icon { stroke: var(--very-hard); }
 
 /* Повторы франшиз: к чему пак возвращается снова и снова */
@@ -1782,6 +1956,14 @@ a.hide__item--login:hover {
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
 }
+
+/* За порогом цвет принадлежит порогу. Оба класса стоят на одном элементе, вес
+   у них равный, и побеждал тот, что ниже по файлу, — то есть здешний обычный.
+   Выходило, что число повторов красилось всегда одинаково, сколько бы их
+   ни было: десятая часть пака и четверть его выглядели ровно одним и тем же.
+   Та же беда была у спецвопросов, и лечится она там так же (см. .meta__specials). */
+.repeats__total.value--warn { color: var(--medium); }
+.repeats__total.value--alarm { color: var(--very-hard); }
 
 .repeats__item {
 	display: inline-flex;
@@ -1882,7 +2064,7 @@ a.hide__item--login:hover {
 	height: 0.4375rem;
 	border-radius: 50%;
 	/* То же, что и у куска полоски: точка без цвета в подписи выглядит опечаткой */
-	background: #333a49;
+	background: var(--neutral);
 }
 
 .shares__bar {
@@ -1902,7 +2084,7 @@ a.hide__item--login:hover {
 	   не дали: кусок без заливки — это дыра в полоске, и выглядит она поломкой,
 	   а серый кусок с подписью читается честно. Стоит выше именных правил
 	   нарочно — они перебивают его порядком, а не весом */
-	background: #333a49;
+	background: var(--neutral);
 	transition: filter .15s;
 	cursor: help;
 }
@@ -1918,7 +2100,7 @@ a.hide__item--login:hover {
 .shares__part--cartoons { background: var(--cartoons); }
 .shares__part--books { background: var(--books); }
 .shares__part--comics { background: var(--comics); }
-.shares__part--other { background: #333a49; }
+.shares__part--other { background: var(--neutral); }
 
 /* «Прочее» музпака — это и есть музыка (см. otherPart в web/card.js), и цвет
    у этого куска музыкальный: подпись «Музыка» на сером ничьём куске читалась
@@ -1942,7 +2124,7 @@ a.hide__item--login:hover {
 .shares__part--kind-tech { background: #6f7fd8; }
 .shares__part--kind-art { background: #c07ad0; }
 .shares__part--kind-food { background: #e08b3a; }
-.shares__part--kind-life { background: #7f8a9c; }
+.shares__part--kind-life { background: var(--neutral-soft); }
 /* Оружие и армия. Цвета у него не было вовсе — вид завели, а строку сюда добавить
    забыли, — и до тех пор, пока «прочее» шло одним куском, это не было видно.
    Теперь виды делят кусок между собой, и безымянный цвет стал бы дырой в полоске */
@@ -1957,7 +2139,7 @@ a.hide__item--login:hover {
 .shares__part--form-manhwa { background: #b8608f; }
 .shares__part--form-manhua { background: #8f5fb0; }
 .shares__part--form-webtoon { background: #d08a5f; }
-.shares__part--form-ranobe { background: #7f8a9c; }
+.shares__part--form-ranobe { background: var(--neutral-soft); }
 .shares__part--form-film { background: var(--movies); }
 .shares__part--form-series { background: #4f7fb8; }
 .shares__part--form-show { background: #3fa8a0; }
@@ -2018,7 +2200,7 @@ a.hide__item--login:hover {
 .shares__part--genre-quest       { background: #8fa83f; } /* квесты и визуальные новеллы */
 .shares__part--genre-simulator   { background: #a9762f; } /* симуляторы */
 .shares__part--genre-tabletop    { background: #4f9fa8; } /* настольные */
-.shares__part--genre-mobile      { background: #7f8a9c; } /* мобильные */
+.shares__part--genre-mobile      { background: var(--neutral-soft); } /* мобильные */
 .shares__part--genre-retro       { background: #c07ad0; } /* ретро и классика */
 .shares__part--genre-indie       { background: #3fa95a; } /* инди / инди и авторские / инди и альтернатива */
 .shares__part--genre-superhero   { background: #d8563f; } /* супергерои */
@@ -2047,13 +2229,13 @@ a.hide__item--login:hover {
 .shares__part--genre-athletics   { background: #e0873a; } /* лёгкая атлетика */
 .shares__part--genre-winter      { background: #d0619b; } /* зимние виды */
 .shares__part--genre-olympics    { background: #6f7fd8; } /* Олимпиады и турниры */
-.shares__part--genre-chess       { background: #7f8a9c; } /* шахматы и настольный спорт */
+.shares__part--genre-chess       { background: var(--neutral-soft); } /* шахматы и настольный спорт */
 .shares__part--genre-anisong     { background: #d8563f; } /* опенинги и аниме-музыка */
 .shares__part--genre-gaming      { background: #3f8fd8; } /* музыка из игр */
 .shares__part--genre-soundtrack  { background: #c9a13a; } /* саундтреки кино */
 .shares__part--genre-kpop        { background: #9b62d0; } /* K-pop */
 .shares__part--genre-rap         { background: #a9762f; } /* рэп и хип-хоп */
-.shares__part--genre-metal       { background: #7f8a9c; } /* метал */
+.shares__part--genre-metal       { background: var(--neutral-soft); } /* метал */
 .shares__part--genre-punk        { background: #3fb5b0; } /* панк и эмо */
 .shares__part--genre-rock        { background: #e0873a; } /* рок */
 .shares__part--genre-electronic  { background: #d0619b; } /* электроника */
@@ -2067,7 +2249,7 @@ a.hide__item--login:hover {
 
 /* Всё, чего по отдельности набралось меньше порога: не «не посчитано», а «всего
    понемногу», и цвет у него такой же ничей, как у «прочего» наверху */
-.shares__part--genre-rest { background: #333a49; }
+.shares__part--genre-rest { background: var(--neutral); }
 
 /* Десятилетия. Цвет — по самому времени: одна шкала от холодного к тёплому,
    от давнего к свежему. Куски в полоске идут по порядку лет, и градиент читается
@@ -2106,7 +2288,7 @@ a.hide__item--login:hover {
 
 /* Виды содержимого. Цвета нарочно свои, не тематические: две полоски стоят
    вплотную, и одинаковый оттенок в них читался бы как одно и то же */
-.shares__part--text { background: #4d566b; }
+.shares__part--text { background: var(--neutral-text); }
 .shares__part--image { background: #7d6cc4; }
 /* Звук больше не берёт цвет музыки, хотя раньше брал. Полоски стоят вплотную,
    и одинаковый цвет читался как одно и то же — а это разные вещи: наверху
@@ -2295,7 +2477,7 @@ a.hide__item--login:hover {
 	border: 1px solid var(--border);
 	border-radius: 999px;
 	background: var(--bg-panel-2);
-	box-shadow: 0 0.625rem 1.875rem rgba(0, 0, 0, .5);
+	box-shadow: 0 0.625rem 1.875rem var(--shadow);
 	color: var(--text);
 	font-size: 0.8125rem;
 	text-align: center;
@@ -2774,7 +2956,7 @@ a.hide__item--login:hover {
 
 .tab:hover {
 	color: var(--text);
-	border-color: #39404f;
+	border-color: var(--border-strong);
 }
 
 /* Выбранная вкладка залита цветом целиком, а не подчёркнута: рядом с ней стоит
@@ -3297,10 +3479,18 @@ a.hide__item--login:hover {
 }
 
 /* Спецвопросы, которых в паке есть хоть сколько-то: число заметнее остальных
-   в этой строке — оно меняет игру сильнее, чем размер файла */
+   в этой строке — оно меняет игру сильнее, чем всё прочее в ней */
 .meta__specials {
 	color: var(--medium);
 }
+
+/* …но за порогом цвет принадлежит порогу, а не этому правилу. Оба класса стоят
+   на одном и том же элементе, вес у них равный, и побеждал тот, что ниже
+   по файлу, — то есть жёлтый. Выходило, что красным наливался один значок,
+   а число рядом с ним оставалось прежним: перебор был виден хуже всего там,
+   где он написан числом. */
+.meta__specials.value--warn { color: var(--medium); }
+.meta__specials.value--alarm { color: var(--very-hard); }
 
 /* Оценивать можно только сыгранное: звёзды до отметки не нажимаются */
 

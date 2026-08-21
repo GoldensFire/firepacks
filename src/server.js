@@ -505,6 +505,13 @@ function buildWhere(query, userId) {
 		conditions.push('pn.package_id IS NOT NULL');
 	}
 
+	// …и обратный ему отбор, той же парой, что «скрыть сыгранные» и «только
+	// сыгранные»: библиотеку листают за новым паком, а отложенное на этот вопрос
+	// уже ответило и место в выдаче занимает зря
+	if (query.get('hidePlanned') === '1') {
+		conditions.push('pn.package_id IS NULL');
+	}
+
 	// Отсечка по времени появления в обсуждении живёт здесь, а не в сортировке:
 	// иначе счётчик «найдено» считал бы паки, которых в выдаче нет.
 	const period = periodOf(query.get('sort') ?? 'added');
@@ -620,7 +627,7 @@ function countLevels(query, userId) {
  */
 const NARROWING = [
 	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
-	'onlyPlayed', 'onlyPlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
+	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
 ];
 
 /**

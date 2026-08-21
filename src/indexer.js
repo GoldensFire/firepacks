@@ -256,8 +256,10 @@ const freshSince = freshDays > 0 ? Date.now() - freshDays * 86_400_000 : null;
  * означало бы обновить у него одну только разметку.
  *
  * @param {string} alias как назван packages в этом запросе
+ * @param {boolean} keepUnparsed пропускать ли сквозь отсечку по свежести паки,
+ *        которые так и не разобраны (см. ниже)
  */
-function targetSql(alias = 'p') {
+function targetSql(alias = 'p', { keepUnparsed = false } = {}) {
 	const parts = [];
 	const params = [];
 
@@ -265,9 +267,30 @@ function targetSql(alias = 'p') {
 	// «свежие» — это сужение, а не ещё один способ назвать паки. Вместе
 	// с `--packs` она означала бы «названные, и притом свежие», но вместе их
 	// никто не задаёт, а разбирать этот случай отдельно незачем
-	const fresh = freshSince === null
+	//
+	// keepUnparsed — исключение ровно для разбора, и заведено оно по живому
+	// случаю. Ежечасный обход ходит с `--fresh=1` и сроком в пять минут на первый
+	// проход. 20 августа 2026 он нашёл в хвосте пять новых паков, четыре успел
+	// разобрать, а на пятом («Своя охота», сообщение 902) время кончилось. Пак
+	// остался в базе строкой со статусом «new» — без имени, без вопросов, без
+	// разметки, то есть невидимым для сайта. А через час, когда обход пришёл
+	// снова, сообщение с ним уже перевалило за сутки, и в очередь разбора этот
+	// пак не попал ни в тот час, ни в любой следующий: отсечка по vk_ts судит
+	// о паке по дате сообщения, а не по тому, сделана ли по нему работа.
+	// Подобрать его могла только ночь, которая ходит без отсечки, — а ночь
+	// в те дни срывалась на выкладке. Пак провисел в базе невидимым двое суток.
+	//
+	// Поэтому неразобранное сквозь отсечку проходит всегда. Это не расширение
+	// работы: «new» — это дырка в библиотеке, а не старый пак, до которого
+	// когда-нибудь дойдут руки. Очередь по-прежнему идёт с самых свежих
+	// (см. NEWEST_FIRST), и вчерашний недоделок встаёт в её конец, а не начало.
+	const stale = freshSince === null
 		? ''
-		: ` AND ${alias}.vk_ts IS NOT NULL AND ${alias}.vk_ts >= ${freshSince}`;
+		: `${alias}.vk_ts IS NOT NULL AND ${alias}.vk_ts >= ${freshSince}`;
+
+	const fresh = stale === ''
+		? ''
+		: ` AND (${keepUnparsed ? `${alias}.status = 'new' OR ` : ''}${stale})`;
 
 	if (onlyPacks.length > 0) {
 		parts.push(`${alias}.id IN (${onlyPacks.map(() => '?').join(',')})`);
@@ -414,8 +437,14 @@ function priorityOrderSql(step) {
 	};
 }
 
-/** Что написать в шапке шага про отбор паков. */
-function queueNote(withPriority = true) {
+/**
+ * Что написать в шапке шага про отбор паков.
+ *
+ * @param withPriority называть ли порядок очереди
+ * @param keepUnparsed ходит ли шаг с послаблением для неразобранного: тогда
+ *        «только выложенное за сутки» — не вся правда, и об этом сказано прямо
+ */
+function queueNote(withPriority = true, keepUnparsed = false) {
 	const parts = [];
 
 	if (onlyPacks.length > 0) {
@@ -427,7 +456,8 @@ function queueNote(withPriority = true) {
 	}
 
 	if (freshSince !== null) {
-		parts.push(`только выложенное за ${freshDays} ${freshDays === 1 ? 'сутки' : 'суток'}`);
+		parts.push(`только выложенное за ${freshDays} ${freshDays === 1 ? 'сутки' : 'суток'}`
+			+ (keepUnparsed ? ' и всё неразобранное' : ''));
 	}
 
 	if (withPriority && priorityAuthors.length > 0) {
@@ -1355,7 +1385,9 @@ async function parsePackages() {
 	}
 
 	const placeholders = statuses.map(() => '?').join(',');
-	const target = targetSql();
+	// Единственный шаг, который ходит с keepUnparsed: неразобранный пак не должен
+	// стареть мимо очереди (см. targetSql)
+	const target = targetSql('p', { keepUnparsed: true });
 
 	// Пометка recheck — это перезалитые файлы: пак давно разобран и стоит «ok»,
 	// но в сообщении обсуждения лежит уже другой архив (см. syncComment).
@@ -1369,7 +1401,7 @@ async function parsePackages() {
 
 	const params = [...statuses, ...target.params];
 
-	say('parse', `в очереди ${pending.all(...params).length}${queueNote(false)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+	say('parse', `в очереди ${pending.all(...params).length}${queueNote(false, true)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
 	let ok = 0;
 	let failed = 0;

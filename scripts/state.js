@@ -657,17 +657,155 @@ function pull() {
 }
 
 /**
- * Забрать с полки одну только базу — во временное место, не трогая здешнюю, —
- * и влить из неё в здешнюю ту разметку, которой здесь нет или которая здесь
- * старее (см. carryMarkup). Нужно перед отправкой, когда полка успела уйти
- * вперёд: то, что мы сейчас положим, не должно стереть чужую работу.
+ * Перенести с полки паки, которых здесь нет вовсе, — вместе с их статистикой
+ * и авторами.
  *
- * Сливается именно разметка, а не всё подряд. Паки, которых здесь нет вовсе,
- * этой рукой не переносятся: перенос строки пака тянет за собой авторов,
- * статистику и отметку о выгрузке, и делать это вслепую опаснее, чем не делать.
- * Пропасть таким паком может только то, что полка нашла в обсуждении за те
- * часы, пока здесь шла работа, — а обсуждение читается заново каждый час,
- * и следующий же обход найдёт его снова.
+ * Раньше этого не делалось, и на месте переноса стояло рассуждение: перенос
+ * строки пака тянет за собой авторов, статистику и отметку о выгрузке, делать
+ * это вслепую опаснее, чем не делать, а пропавший пак всё равно найдётся —
+ * обсуждение читается заново каждый час.
+ *
+ * Найдётся он и вправду. Беда в том, чем он найдётся: новой строкой с новым
+ * номером. Номера раздаёт AUTOINCREMENT (см. SAME_PACK), и «тот же файл под
+ * другим номером» — это не мелочь учёта, а две поломки разом.
+ *
+ * Первая: наверху этот пак уже лежит под прежним номером, и заливка, вставляя
+ * его под новым, натыкается на запрет повторов по source_key. Весь файл
+ * отвергается целиком, а с ним и вся ночная работа (см. writeGuard
+ * в scripts/export-d1.js — там же и разбор ночи на 20 августа 2026).
+ *
+ * Вторая: пак теряет всё, что было сделано по нему до пропажи. Он приходит
+ * заново со статусом «new» — без разбора, без разметки, без описания, — и его
+ * заново разбирают, заново размечают и заново описывают, тратя на это ту самую
+ * суточную квоту Gemini, которой всегда не хватает. А если разобрать не успеют
+ * (у ежечасного обхода на первый проход пять минут), пак так и повиснет
+ * невидимой строкой. Ровно это случилось с «Своей охотой» из сообщения 902:
+ * 20 августа она была разобрана ночью, потеряна при слиянии, найдена заново
+ * в 15:31, не разобрана по сроку — и провисела в базе двое суток.
+ *
+ * Поэтому теперь переносится и сама строка. Номер сохраняется, если он здесь
+ * свободен, — а он свободен почти всегда: обе машины считают от общей полки,
+ * и расходятся их номера только на том, что каждая нашла сама. Занят — пак
+ * заводится под новым, и это по-прежнему лучше, чем потерять его совсем.
+ */
+function carryPacks(from, into) {
+	const nothing = { packs: 0, renumbered: 0 };
+
+	if (!fs.existsSync(from) || !fs.existsSync(into)) {
+		return nothing;
+	}
+
+	const db = new DatabaseSync(into);
+	let packs = 0;
+	let renumbered = 0;
+
+	try {
+		db.exec(`ATTACH '${sqlPath(from)}' AS src`);
+
+		// Общие колонки: базы бывают разного возраста, и та, что постарше,
+		// попросту не знает про недавно заведённое (то же правило, что
+		// в carryMarkup)
+		const shared = table => {
+			const there = columnsOf(db, 'src', table);
+			return columnsOf(db, 'main', table).filter(column => there.includes(column));
+		};
+
+		const packColumns = shared('packages');
+
+		if (!packColumns.includes('source_key') || !packColumns.includes('id')) {
+			return nothing;
+		}
+
+		const quoted = columns => columns.map(column => `"${column}"`).join(', ');
+		const holes = columns => columns.map(() => '?').join(', ');
+
+		const strangers = db.prepare(`
+			SELECT ${quoted(packColumns)} FROM src.packages s
+			WHERE NOT EXISTS (SELECT 1 FROM main.packages m WHERE m.source_key = s.source_key)
+		`).all();
+
+		if (strangers.length === 0) {
+			return nothing;
+		}
+
+		const bare = packColumns.filter(column => column !== 'id');
+		const keepNumber = db.prepare(`INSERT INTO main.packages (${quoted(packColumns)}) VALUES (${holes(packColumns)})`);
+		const newNumber = db.prepare(`INSERT INTO main.packages (${quoted(bare)}) VALUES (${holes(bare)})`);
+		const numberTaken = db.prepare('SELECT 1 AS yes FROM main.packages WHERE id = ?');
+
+		// Статистика и авторы — по номеру пака, и номер этот здешний, а не тот,
+		// под которым пак лежал на полке
+		const statColumns = shared('stats');
+		const authorColumns = shared('pack_authors');
+
+		const takeStats = statColumns.includes('package_id')
+			? db.prepare(`SELECT ${quoted(statColumns)} FROM src.stats WHERE package_id = ?`)
+			: null;
+
+		const putStats = takeStats
+			? db.prepare(`INSERT OR REPLACE INTO main.stats (${quoted(statColumns)}) VALUES (${holes(statColumns)})`)
+			: null;
+
+		const takeAuthors = authorColumns.includes('package_id')
+			? db.prepare(`SELECT ${quoted(authorColumns)} FROM src.pack_authors WHERE package_id = ?`)
+			: null;
+
+		const putAuthors = takeAuthors
+			? db.prepare(`INSERT OR REPLACE INTO main.pack_authors (${quoted(authorColumns)}) VALUES (${holes(authorColumns)})`)
+			: null;
+
+		const move = (row, columns, from, to) => columns.map(column => (column === 'package_id' ? to : row[column]));
+
+		db.exec('BEGIN');
+
+		for (const row of strangers) {
+			const free = numberTaken.get(row.id) === undefined;
+			let id = row.id;
+
+			if (free) {
+				keepNumber.run(...packColumns.map(column => row[column]));
+			} else {
+				id = Number(newNumber.run(...bare.map(column => row[column])).lastInsertRowid);
+				renumbered++;
+			}
+
+			for (const stat of takeStats?.all(row.id) ?? []) {
+				putStats.run(...move(stat, statColumns, row.id, id));
+			}
+
+			for (const author of takeAuthors?.all(row.id) ?? []) {
+				putAuthors.run(...move(author, authorColumns, row.id, id));
+			}
+
+			packs++;
+		}
+
+		db.exec('COMMIT');
+		db.exec('DETACH src');
+	} catch (error) {
+		try {
+			db.exec('ROLLBACK');
+		} catch {
+			// откатывать было нечего — значит, до начала записи дело и не дошло
+		}
+
+		console.error(`Не вышло перенести паки с полки: ${error.message}`);
+		console.error('База при этом целая; пропавшие паки подберёт ближайший обход обсуждений.');
+
+		return nothing;
+	} finally {
+		db.close();
+	}
+
+	return { packs, renumbered };
+}
+
+/**
+ * Забрать с полки одну только базу — во временное место, не трогая здешнюю, —
+ * и влить из неё в здешнюю то, чего здесь нет: разметку посвежее (carryMarkup)
+ * и паки, которых здесь нет вовсе (carryPacks). Нужно перед отправкой, когда
+ * полка успела уйти вперёд: то, что мы сейчас положим, не должно стереть
+ * чужую работу.
  */
 function mergeShelf() {
 	const stage = path.join(root, STAGE);
@@ -693,15 +831,11 @@ function mergeShelf() {
 		const shelfDb = path.join(stage, 'data', 'sibase.db');
 		sayCarried(carryMarkup(shelfDb, dbPath), 'с полки');
 
-		const mine = contentOf(dbPath);
-		const theirs = contentOf(shelfDb);
+		const carried = carryPacks(shelfDb, dbPath);
 
-		// Паки, которых здесь нет: сказать о них надо, а перенести — не этой рукой.
-		// Молчать нельзя, потому что после отправки они с полки пропадут до тех пор,
-		// пока обход не найдёт их в обсуждении заново.
-		if (mine && theirs && theirs.packs > mine.packs) {
-			console.log(`Внимание: на полке паков больше (${theirs.packs} против ${mine.packs}).`);
-			console.log('Разметка их перенесена, сами строки — нет: их подберёт ближайший обход обсуждений.');
+		if (carried.packs > 0) {
+			console.log(`Забрано с полки паков, которых здесь не было: ${carried.packs}`
+				+ `${carried.renumbered > 0 ? ` (из них ${carried.renumbered} с новым номером — прежний тут занят)` : ''}.`);
 		}
 	} finally {
 		fs.rmSync(stage, { recursive: true, force: true });

@@ -1274,7 +1274,71 @@ function createBadges(pack) {
 		));
 	}
 
+	// Метка «эти темы уже встречались» — последней в ряду нарочно. Остальные
+	// ярлыки говорят, чем пак ЯВЛЯЕТСЯ, и читаются первыми; этот говорит,
+	// что с ним не так, и его место после них.
+	const clue = createPlagiarismBadge(pack);
+
+	if (clue) {
+		badges.append(clue);
+	}
+
 	return badges;
+}
+
+/**
+ * Метка пака, чьи темы почти целиком уже стояли в чужом паке, выложенном раньше,
+ * — со ссылкой на тот пак.
+ *
+ * ————— почему тут не написано «плагиат» —————
+ *
+ * Потому что правило этого не знает. Оно говорит ровно одно: такие же темы
+ * с такими же ответами встречались раньше у другого человека. Вор это или
+ * соавтор — двое ведущих играют вместе и выкладывают паки каждый со своей
+ * страницы под своей подписью, — не различит никакой признак (см. src/plagiarism.js).
+ * Совпадение показать честно, назвать его воровством — нет: обвинение сайт
+ * выносить не вправе, а человек, увидев оба пака, рассудит сам.
+ *
+ * Цвет метке дан свой, не «очень сложного»: красный на этом сайте уже занят
+ * сложностью, и метка в нём читалась бы как ещё одна оценка пака.
+ */
+function createPlagiarismBadge(pack) {
+	const mark = pack.plagiarism;
+
+	if (!mark) {
+		return null;
+	}
+
+	const top = mark.sources[0] ?? null;
+	const percent = Math.round((mark.share ?? 0) * 100);
+	const compiled = mark.kind === 'compiled';
+
+	// Ссылкой, а не кнопкой: за ней стоит другая страница, а не отбор выдачи,
+	// и открыть её в соседней вкладке человек вправе обычным способом.
+	// Донора нет только у метки, доставшейся паку по ошибке, — тогда простой
+	// текст: ярлык-ссылка, ведущий в никуда, хуже отсутствующего
+	const badge = element(top ? 'a' : 'span', 'badge badge--clue');
+
+	if (top) {
+		badge.href = packHref(top);
+	}
+
+	badge.append(icon('copy'), element('span', null, compiled
+		? 'Темы из чужих паков'
+		: 'Темы встречались раньше'));
+
+	// Числа и имена — в подсказке. В самой метке их нет нарочно: ярлык читают
+	// мельком, и «96,8%» в нём выглядит точностью, которой у правила нет
+	badge.title = compiled
+		? `${percent}% тем этого пака уже стояли в чужих паках, выложенных раньше. `
+			+ `Больше всего — в «${top.name}»: ${top.n} ${plural(top.n, 'тема', 'темы', 'тем')}. `
+			+ 'У каждой темы своя ссылка в «Подробнее». '
+			+ 'Это не обязательно воровство: соавторы выкладывают паки каждый со своей страницы'
+		: `${percent}% тем этого пака уже стояли в паке «${top?.name ?? '—'}», выложенном раньше. `
+			+ 'Это не обязательно воровство: соавторы выкладывают паки каждый со своей страницы. '
+			+ 'Нажмите, чтобы открыть тот пак';
+
+	return badge;
 }
 
 /**
@@ -2244,13 +2308,45 @@ function createCard(pack, options = {}) {
 	if (pack.rounds.length > 0) {
 		const roundsBox = element('div');
 
+		// Откуда взята каждая тема: номер лежит у самой темы (поле src), а имя
+		// и кусок адреса — в списке доноров пака. Разложены они так нарочно —
+		// у солянки доноров пять, и таскать имя с каждой из тридцати тем значило
+		// бы возить одно и то же название по шесть раз (см. src/plagiarism.js).
+		//
+		// Донор, не попавший в список: у пака их бывает больше пяти, а список
+		// хранит пятерых. Тогда остаётся номер, и ссылка собирается по одному
+		// номеру — /pack/2770 открывается ничуть не хуже, просто без названия
+		// в адресе (см. packIdFromPath в src/slug.js)
+		const donors = new Map((pack.plagiarism?.sources ?? []).map(source => [source.id, source]));
+
 		for (const round of pack.rounds) {
 			const item = element('div', 'round');
 			const name = element('b', null, round.name);
 			item.append(name);
 
 			if (round.themes.length > 0) {
-				item.append(document.createTextNode(`: ${round.themes.map(theme => theme.name).join(', ')}`));
+				item.append(document.createTextNode(': '));
+
+				round.themes.forEach((theme, index) => {
+					if (index > 0) {
+						item.append(document.createTextNode(', '));
+					}
+
+					if (!theme.src) {
+						item.append(document.createTextNode(theme.name));
+						return;
+					}
+
+					const donor = donors.get(theme.src) ?? null;
+					const link = element('a', 'round__clue', theme.name);
+
+					link.href = packHref({ id: theme.src, slug: donor?.slug ?? '' });
+					link.title = donor
+						? `Эта тема уже стояла в паке «${donor.name}», выложенном раньше`
+						: 'Эта тема уже стояла в паке, выложенном раньше';
+
+					item.append(link);
+				});
 			}
 
 			roundsBox.append(item);

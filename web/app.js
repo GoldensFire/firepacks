@@ -30,13 +30,16 @@ const state = {
 	//   lowRepeats — повторов меньше repeatWarnShare пака;
 	//   lowSpecials — спецвопросов меньше specialWarnShare пака;
 	//   noFranchise — пак не про одну франшизу (порог тот же, по которому
-	//     карточка ставит ярлык «целиком про одно»).
+	//     карточка ставит ярлык «целиком про одно»);
+	//   hidePlagiarism — темы пака почти целиком уже стояли в чужом паке,
+	//     выложенном раньше (см. src/plagiarism.js).
 	//
 	// Пороги приезжают с сервера вместе с остальными настройками: те же самые
 	// числа красят цветом сами карточки, и расходиться им нельзя.
 	lowRepeats: false,
 	lowSpecials: false,
 	noFranchise: false,
+	hidePlagiarism: false,
 	// Тем, типов пака и языков можно выбрать сразу несколько: подходит тот пак,
 	// что попал хотя бы в один из выбранных
 	tags: new Set(),
@@ -288,6 +291,10 @@ function buildQuery() {
 		query.set('noFranchise', '1');
 	}
 
+	if (state.hidePlagiarism) {
+		query.set('hidePlagiarism', '1');
+	}
+
 	if (state.tags.size > 0) {
 		query.set('tag', [...state.tags].join(','));
 	}
@@ -358,7 +365,7 @@ function renderPlayedFilters() {
  * притворяться незачем.
  */
 function renderChecks() {
-	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise']) {
+	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism']) {
 		$(id).checked = state[id];
 	}
 
@@ -849,6 +856,10 @@ function renderActiveFilters() {
 		add('Без паков про одну франшизу', () => { state.noFranchise = false; });
 	}
 
+	if (state.hidePlagiarism) {
+		add('Без копий чужих паков', () => { state.hidePlagiarism = false; });
+	}
+
 	if (state.showBlacklisted) {
 		add('С чёрным списком', () => { state.showBlacklisted = false; });
 	}
@@ -894,6 +905,7 @@ function countActiveFilters() {
 		+ (state.lowRepeats ? 1 : 0)
 		+ (state.lowSpecials ? 1 : 0)
 		+ (state.noFranchise ? 1 : 0)
+		+ (state.hidePlagiarism ? 1 : 0)
 		+ (state.showBlacklisted ? 1 : 0)
 		+ (state.unrated || state.levels.size > 0 ? 0 : 1);
 }
@@ -1140,10 +1152,10 @@ function bind() {
 		load();
 	});
 
-	// Три «без перекосов» и чёрный список: одна и та же работа на четверых —
+	// Четыре «без перекосов» и чёрный список: одна и та же работа на пятерых —
 	// переключить своё состояние и перезапросить выдачу. Спорить им не с чем,
 	// поэтому ни одна не снимает соседнюю
-	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted']) {
+	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism', 'showBlacklisted']) {
 		$(id).addEventListener('change', event => {
 			state[id] = event.target.checked;
 			state.page = 1;
@@ -1219,6 +1231,7 @@ function resetFilters() {
 	state.lowRepeats = false;
 	state.lowSpecials = false;
 	state.noFranchise = false;
+	state.hidePlagiarism = false;
 	state.tags.clear();
 	state.topics.clear();
 	state.languages.clear();
@@ -1299,6 +1312,7 @@ function readUrlState() {
 	state.lowRepeats = query.get('lowRepeats') === '1';
 	state.lowSpecials = query.get('lowSpecials') === '1';
 	state.noFranchise = query.get('noFranchise') === '1';
+	state.hidePlagiarism = query.get('hidePlagiarism') === '1';
 
 	// Сыгранное спрятано само собой, и снять это можно только адресом: /?hidePlayed=0
 	// стоит в ссылках профиля, которые ведут в библиотеку как раз к сыгранному.

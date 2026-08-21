@@ -287,6 +287,24 @@ function toPackage(row, counts) {
 		decadeCoverage: row.decade_coverage,
 		origins: jsonOrDefault(row.origins, []),
 		originCoverage: row.origin_coverage,
+		// Кто у кого списал (см. src/plagiarism.js). null — «под правило
+		// не подошёл», и это не то же самое, что «проверен и чист»: карточка
+		// про такой пак не пишет ничего.
+		//
+		// Доноры едут готовым списком, вместе с названием и куском адреса.
+		// Ради этого они там и лежат: имея один номер, карточка вынуждена была
+		// бы спрашивать название каждого донора отдельно — лишняя прочитанная
+		// строка на каждый показ, а наверху они ещё и считаны по тарифу D1.
+		// Кусок адреса считается здесь же и тем же packSlug, что и у самого
+		// пака: второго набора правил перевода на сайте нет (см. src/slug.js)
+		plagiarism: row.plagiarism_kind
+			? {
+				kind: row.plagiarism_kind,
+				share: row.plagiarism_share,
+				sources: jsonOrDefault(row.plagiarism_sources, [])
+					.map(source => ({ ...source, slug: packSlug(source.name) })),
+			}
+			: null,
 		// Чем всё это посчитано: версия правил разметки и модель, которая её делала.
 		// Карточка пишет их мелко и бледно в самом низу — не ради красоты, а чтобы
 		// по любому странному проценту было видно, старой ли он разметки и какой
@@ -495,6 +513,16 @@ function buildWhere(query, userId, hits, groups = [], bans = null) {
 		params.push(settings.repeatWarnShare);
 	}
 
+	// Четвёртая галочка того же ряда, и вопрос у неё тот же — «дайте пак, который
+	// стоит вечера». Пак, чьи темы почти целиком уже стояли в чужом паке, вечера
+	// не стоит по самой понятной причине: за столом это будет вторая игра в те же
+	// вопросы. Метку ставит шаг plagiarism (см. src/plagiarism.js), и слова
+	// «плагиат» галочка не говорит нарочно — правило не отличает вора
+	// от соавтора, а выдача не суд.
+	if (query.get('hidePlagiarism') === '1') {
+		conditions.push('p.plagiarism_kind IS NULL');
+	}
+
 	if (query.get('lowSpecials') === '1') {
 		conditions.push(`${SPECIAL_SHARE_SQL} < ?`);
 		params.push(settings.specialWarnShare);
@@ -590,7 +618,8 @@ function levelsQuery(db, query, userId, hits, groups, bans) {
  */
 const NARROWING = [
 	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
-	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'showBlacklisted',
+	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism',
+	'showBlacklisted',
 ];
 
 /**

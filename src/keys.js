@@ -48,13 +48,26 @@ export function normalizeRounds(value) {
  * строчка сайта не читает. Число вопросов темы и вид раунда сайт не читает тоже.
  *
  * Индексатору и разметке достаётся полный вид: они ходят в базу, а не сюда.
+ *
+ * Единственное, что проезжает сквозь этот отбор кроме названия, — `src`, номер
+ * пака, в котором эта тема стояла раньше (см. src/plagiarism.js). Одно число
+ * на украденную тему, и стоит оно того: у солянки доноры разные, и без него
+ * карточке пришлось бы либо молчать про то, откуда взята каждая тема, либо
+ * возить наверх целую таблицу происхождения. Образец при этом остаётся дома
+ * по-прежнему — он и есть то тяжёлое, ради чего этот отбор написан.
  */
 export function roundsForApi(value) {
 	return jsonOrDefault(value, []).map(round => ({
 		name: round.name ?? '',
-		themes: (round.themes ?? []).map(theme => (typeof theme === 'string'
-			? { name: theme }
-			: { name: theme.name ?? '' })),
+		themes: (round.themes ?? []).map(theme => {
+			if (typeof theme === 'string') {
+				return { name: theme };
+			}
+
+			return theme.src
+				? { name: theme.name ?? '', src: theme.src }
+				: { name: theme.name ?? '' };
+		}),
 	}));
 }
 

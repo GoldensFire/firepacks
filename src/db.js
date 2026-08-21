@@ -177,6 +177,25 @@ CREATE TABLE IF NOT EXISTS blacklist (
 	added_at INTEGER NOT NULL,
 	PRIMARY KEY (user_id, kind, value)
 );
+
+/* Откуда взят отдельный вопрос: где он встретился раньше всего.
+   Заводится только на заимствованное, поэтому таблица маленькая.
+
+   Наверх не едет и ехать не должна. Даже при скромных пяти процентах
+   заимствований это семьдесят тысяч строк — почти вся суточная норма записи
+   в D1 ради подробности, которую сайту негде показать: мельче темы он
+   не рисует ничего (см. roundsForApi в src/keys.js). Место ей — страница
+   обновления базы, то есть у владельца.
+
+   Заполнять её станет этап 1, когда у паков появятся отпечатки вопросов
+   (question_fp); заведена она здесь заранее, чтобы правка схемы, требующая
+   полной перезаливки в D1, случилась один раз, а не два. */
+CREATE TABLE IF NOT EXISTS question_origin (
+	package_id INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
+	ord INTEGER NOT NULL,
+	source_id INTEGER NOT NULL,
+	PRIMARY KEY (package_id, ord)
+);
 `);
 
 /**
@@ -291,6 +310,25 @@ for (const [name, definition] of [
 	// раз кряду. Считать его на лету значило бы обходить json_each по всей
 	// таблице шесть раз на каждое нажатие (см. repeatShare в keys.js).
 	['repeat_share', 'REAL'],
+	// Кто у кого списал (см. src/plagiarism.js). Метка стоит только у тех паков,
+	// что подошли под правило: NULL в plagiarism_kind — это «под правило
+	// не подошёл», а вовсе не «проверен и чист», и сайт про такой пак не пишет
+	// ничего. Значения: pack — копия одного пака, compiled — солянка из чужих.
+	['plagiarism_kind', 'TEXT'],
+	// Какая часть своих тем нашлась у соседей
+	['plagiarism_share', 'REAL'],
+	// Откуда взято: [{id, name, n, share}], до пяти доноров от крупного к мелкому.
+	// Название донора лежит рядом с номером нарочно — адрес его страницы
+	// складывается из номера и названия (см. packSlug в src/slug.js), и без
+	// названия карточке пришлось бы ходить в D1 за каждым донором отдельно.
+	// Заполняется только у отмеченных паков: одиннадцать строк по паре сотен
+	// байт, вес на базу нулевой
+	['plagiarism_sources', `TEXT NOT NULL DEFAULT '[]'`],
+	// Когда проверяли. По ней видно, чей приговор устарел после переразбора
+	// (см. шаг plagiarism в indexer.js); наверх она едет, но в отпечаток строки
+	// не входит — иначе каждая ночь увозила бы в D1 всю базу целиком
+	// (см. scripts/export-d1.js)
+	['plagiarism_at', 'INTEGER'],
 ]) {
 	if (!existingColumns.has(name)) {
 		db.exec(`ALTER TABLE packages ADD COLUMN ${name} ${definition}`);
@@ -361,6 +399,11 @@ db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_topic ON packages (status, pr
 	db.exec(`CREATE INDEX IF NOT EXISTS ${langIndex} ON packages (status, language_ai, language)`);
 }
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_tags ON packages (status, tags)');
+
+// Отбор «скрыть плагиат» в выдаче: по этому указателю он и работает. Метка стоит
+// у считаных паков, а спрашивают её у всей библиотеки на каждое нажатие галочки —
+// то есть ответ должен собираться из указателя, не поднимая строк.
+db.exec('CREATE INDEX IF NOT EXISTS ix_packages_plagiarism ON packages (status, plagiarism_kind)');
 db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_vk_ts ON packages (status, vk_ts)');
 
 // Дополнительные типы паков — те, что целиком про один предмет (см. subjectPackShare).

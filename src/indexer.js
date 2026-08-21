@@ -9,12 +9,13 @@
 //   node src/indexer.js --summary-only  только составить краткие описания паков
 //   node src/indexer.js --logos         только докачать логотипы
 //   node src/indexer.js --specials      досчитать спецвопросы у старых паков
+//   node src/indexer.js --plagiarism    пересмотреть, кто у кого списал: без сети, по темам
 //   node src/indexer.js --reparse       разобрать заново уже разобранные паки
 //   node src/indexer.js --retopics      переспросить Gemini даже про уже размеченные паки
 //   node src/indexer.js --resummary     переписать уже готовые описания
 //   node src/indexer.js --upgrade       переспросить то, что размечено моделью слабее нынешней
 //   node src/indexer.js --recalc        пересчитать уровни и ярлыки по сохранённым данным, без сети
-//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, recalc
+//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, plagiarism, recalc
 //   node src/indexer.js --model=имя     разово взять другую модель Gemini
 //   node src/indexer.js --fallback      кончились суточные запросы — перейти на запасную модель
 //   node src/indexer.js --gemini-models показать доступные модели Gemini
@@ -86,6 +87,7 @@ import {
 	computeGenres, computeForms, computeDecades, computeOrigin,
 } from './topics.js';
 import { isCategoryName } from './franchise.js';
+import { reviewPlagiarism } from './plagiarism.js';
 import { ensureThumb } from './thumbs.js';
 import { thumbName } from './settings.js';
 
@@ -668,6 +670,7 @@ const TAGS = {
 	analyze: 'разметка',
 	logos: 'логотипы',
 	specials: 'спецвопросы',
+	plagiarism: 'плагиат',
 	recalc: 'пересчёт',
 	// Не шаг, а весь обход разом: строка про то, что отпущенное время вышло
 	// и очередь досрочно свёрнута (см. --minutes)
@@ -2385,6 +2388,181 @@ async function refreshAnalysis() {
 		+ `${usageLine(activeModel())}; ${tokensLine()}`);
 }
 
+const updatePlagiarism = db.prepare(`
+	UPDATE packages SET plagiarism_kind = ?, plagiarism_share = ?, plagiarism_sources = ?,
+		rounds = ?, plagiarism_at = ? WHERE id = ?
+`);
+
+/**
+ * Проставляет (или снимает) заимствованным темам номер донора прямо в rounds.
+ *
+ * Правится разобранный JSON как он лежит, а не то, что вернул normalizeRounds:
+ * тот приводит тему к трём полям и выбрасывает всё остальное — в частности
+ * `media`, по которому карточка рисует значок картинки или музыки. Переписать
+ * пак его выводом значило бы обменять значки на метку плагиата.
+ *
+ * @param {string} stored поле rounds как оно лежит в базе
+ * @param {Array<{round: number, theme: number, source: number}>} places что метить
+ * @returns {string|null} новое поле или null, если ничего не изменилось
+ */
+function markStolenThemes(stored, places) {
+	const rounds = jsonOrDefault(stored, []);
+	const wanted = new Map(places.map(place => [`${place.round}:${place.theme}`, place.source]));
+	let changed = false;
+
+	rounds.forEach((round, roundIndex) => {
+		(round?.themes ?? []).forEach((theme, themeIndex) => {
+			// Тема, записанная строкой (так хранили до появления образцов), метки
+			// не получает: превратить её в объект значило бы дописать паку поля,
+			// которых разбор ему не давал
+			if (typeof theme === 'string') {
+				return;
+			}
+
+			const source = wanted.get(`${roundIndex}:${themeIndex}`) ?? null;
+
+			if ((theme.src ?? null) === source) {
+				return;
+			}
+
+			if (source === null) {
+				delete theme.src;
+			} else {
+				theme.src = source;
+			}
+
+			changed = true;
+		});
+	});
+
+	return changed ? JSON.stringify(rounds) : null;
+}
+
+/**
+ * Кто у кого списал. Считается дома и целиком: ни одного похода в сеть и ни одной
+ * строки в D1 — наверх уезжает только вывод (см. src/plagiarism.js).
+ *
+ * ————— почему пересмотр всегда полный —————
+ *
+ * Очередь у шага есть — это паки, чей приговор старше их же разбора
+ * (plagiarism_at меньше indexed_at), — но заменить ею работу нельзя. Пак,
+ * найденный сегодня в старой теме обсуждения и выложенный в 2019 году, меняет
+ * старшинство сразу у всех, кого уже проверили: вчерашний первоисточник
+ * оказывается вором, а вчерашний вор — обворованным. Поэтому база всякий раз
+ * раскладывается заново, а очередь служит только тем, чтобы сказать вслух,
+ * сколько приговоров успело устареть.
+ *
+ * Стоит это секунд и нисколько не стоит в сети, так что платить за полноту
+ * тут нечем.
+ *
+ * ————— почему база читается потоком —————
+ *
+ * У пака в поле rounds лежит его разбор — килобайты на пак, полтораста
+ * мегабайт на библиотеку. Поднимать это в память все разом незачем: от пака
+ * нужны одни отпечатки тем, по восемь байт на тему, и складывает их сам
+ * plagiarism.js по мере чтения.
+ */
+function checkPlagiarism() {
+	const target = targetSql();
+
+	// Названные поимённо паки судятся одни, а вот раскладывается база всегда
+	// целиком: старшинство — это отношение пака ко всем остальным, и по одному
+	// паку его не выяснить. `--packs=N` сужает, кому выносится приговор,
+	// а не по чему он выносится.
+	//
+	// Сужение записано подзапросом, а не именем таблицы через точку, ровно
+	// по той же причине, что и в recalcLevels: targetSql пишет свои условия
+	// от псевдонима, а в UPDATE псевдонима нет
+	const scope = target.where
+		? ` AND id IN (SELECT p.id FROM packages p WHERE 1 = 1${target.where})`
+		: '';
+
+	/** Кому приговор записывается. null — всем; сузить может только `--packs`/`--authors`. */
+	const only = target.where
+		? new Set(db.prepare(`SELECT p.id FROM packages p WHERE p.status = 'ok'${target.where}`)
+			.all(...target.params).map(row => row.id))
+		: null;
+
+	const stale = db.prepare(`SELECT COUNT(*) AS c FROM packages p
+		WHERE p.status = 'ok' AND (p.plagiarism_at IS NULL OR p.plagiarism_at < COALESCE(p.indexed_at, 0))${target.where}`)
+		.get(...target.params).c;
+
+	say('plagiarism', `приговор устарел у ${stale} паков${queueNote(false)}; `
+		+ 'пересматриваю базу целиком — иначе найденный сегодня старый пак так и останется первоисточником');
+
+	const rows = db.prepare(`
+		SELECT p.id, p.name, p.vk_ts, p.vk_author, p.vk_author_url, p.authors_key, p.rounds
+		FROM packages p WHERE p.status = 'ok' ORDER BY p.id
+	`).iterate();
+
+	const { verdicts, stats } = reviewPlagiarism(
+		(function* () {
+			for (const row of rows) {
+				yield { ...row, rounds: normalizeRounds(row.rounds) };
+			}
+		})(),
+		config,
+	);
+
+	// Кто числился вором вчера. Нужны затем, чтобы снять метку с того, кто её
+	// потерял: пак, у которого сменился разбор или у которого нашёлся ещё более
+	// ранний первоисточник, обязан перестать числиться вором сам, а не ждать,
+	// пока это заметят руками
+	const marked = db.prepare(`SELECT id FROM packages WHERE plagiarism_kind IS NOT NULL${scope}`)
+		.all(...target.params).map(row => row.id);
+
+	const readRounds = db.prepare('SELECT rounds FROM packages WHERE id = ?');
+	const now = Date.now();
+
+	// Отметка «проверен» всем разом, одним запросом. Проверены-то все — приговор
+	// получают единицы, и заводить на каждый пак по запросу ради одного числа
+	// значило бы одиннадцать тысяч записей вместо одной
+	db.prepare(`UPDATE packages SET plagiarism_at = ? WHERE status = 'ok'${scope}`).run(now, ...target.params);
+
+	/** Приговор одному паку вместе с метками у его тем. */
+	const save = (id, verdict) => {
+		const stored = readRounds.get(id).rounds;
+
+		updatePlagiarism.run(
+			verdict?.kind ?? null,
+			verdict?.share ?? null,
+			JSON.stringify(verdict?.sources ?? []),
+			markStolenThemes(stored, verdict?.places ?? []) ?? stored,
+			now,
+			id,
+		);
+	};
+
+	let cleared = 0;
+	const kinds = { pack: 0, compiled: 0 };
+
+	for (const [id, verdict] of verdicts) {
+		// Приговор вынесен по всей базе, а записывается только названным:
+		// «обнови вот этот пак» не должно трогать соседей
+		if (only && !only.has(id)) {
+			continue;
+		}
+
+		save(id, verdict);
+		kinds[verdict.kind]++;
+	}
+
+	for (const id of marked) {
+		if (verdicts.has(id)) {
+			continue;
+		}
+
+		save(id, null);
+		cleared++;
+	}
+
+	say('plagiarism', `разных тем ${stats.fingerprints}, из них общих мест ${stats.common}`
+		+ ` (встречаются в ${config.plagiarismCommonPacks}+ паках и в счёт не идут);`
+		+ ` паков с отпечатками ${stats.withThemes} из ${stats.packs}`);
+	say('plagiarism', `отмечено ${kinds.pack + kinds.compiled}: копий ${kinds.pack}, солянок ${kinds.compiled}`
+		+ `${cleared > 0 ? `; метка снята у ${cleared}` : ''}`);
+}
+
 /** Пересчитывает уровни по уже сохранённым числам — нужен после правки порогов в настройках. */
 function recalcLevels() {
 	// Названные поимённо паки пересчитываются одни: точечное обновление не должно
@@ -2626,6 +2804,14 @@ const STEPS = [
 	{ key: 'analyze', name: 'Проценты и описания', flag: '--analyze', run: refreshAnalysis, byDefault: false, feeds: ['parse'] },
 	{ key: 'logos', name: 'Логотипы', flag: '--logos', run: fetchLogos, byDefault: false, feeds: ['parse'] },
 	{ key: 'specials', name: 'Спецвопросы', flag: '--specials', run: fetchSpecials, byDefault: false, feeds: ['parse'] },
+	// Ждёт разбора по-настоящему, а не «кормится» им, как соседи выше. Разница
+	// в том, что делает: остальные шаги разбирают очередь пак за паком и потому
+	// спокойно берут добавку на ходу, а этот раскладывает в память всю базу разом
+	// и выносит приговоры сразу всем. Приговор, вынесенный посреди разбора, — это
+	// приговор по половине библиотеки: пак, разобранный минутой позже, не попал бы
+	// в старшинство вовсе. Стоит ожидание недорого — сам пересмотр укладывается
+	// в секунды, и сети он не касается
+	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', run: checkPlagiarism, byDefault: true, after: ['parse'] },
 	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', run: recalcAll, byDefault: false, after: ['stats', 'statsnew', 'topics', 'analyze'] },
 ];
 

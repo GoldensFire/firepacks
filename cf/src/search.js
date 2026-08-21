@@ -5,11 +5,13 @@
 //
 // Сам счёт — в src/fuzzy.js, общий с домашним сайтом.
 
-import { normalizeText, buildEntry, matchEntry, rankEntry, RANK_REST, SEARCH_FIELDS } from '../../src/fuzzy.js';
+import {
+	normalizeText, buildEntry, entryFromLine, matchEntry, rankEntry, RANK_REST, SEARCH_FIELDS,
+} from '../../src/fuzzy.js';
 
 /**
  * Список слов всех паков. Живёт в изоляте: Cloudflare держит его между
- * запросами, пока тот кому-то нужен, и полтысячи паков перечитываются
+ * запросами, пока тот кому-то нужен, и одиннадцать тысяч паков перечитываются
  * не на каждый запрос, а раз в несколько минут.
  *
  * Срок нужен только на случай, когда базу залили, а Worker не перевыкладывали:
@@ -17,21 +19,56 @@ import { normalizeText, buildEntry, matchEntry, rankEntry, RANK_REST, SEARCH_FIE
  */
 const INDEX_TTL = 10 * 60 * 1000;
 
+/** Готовый список слов, собранный при сборке статики (см. scripts/build-web.js). */
+const INDEX_FILE = '/search-index.txt';
+
 let index = null;
 let indexAt = 0;
 
-async function getIndex(db) {
+/**
+ * Откуда берётся список.
+ *
+ * Обычно — из статики: там он лежит уже разобранным на слова, и Worker
+ * только раскладывает строки. Собирать его самому — из D1, разбирая каждый
+ * пак заново, — стоило 1.3 секунды процессора на первый поиск в изоляте,
+ * и Cloudflare такие изоляты убивает вместе со всеми запросами, которые
+ * в них в этот миг обслуживались (см. writeSearchIndex в scripts/build-web.js).
+ *
+ * Из базы — только если файла нет: так бывает ровно один раз, между выкладкой
+ * нового Worker и выкладкой новой статики. Лучше медленный поиск, чем никакой.
+ */
+async function getIndex(db, assets, base) {
 	if (index && Date.now() - indexAt < INDEX_TTL) {
 		return index;
 	}
 
+	index = (assets && base ? await fromAssets(assets, base) : null) ?? await fromDatabase(db);
+	indexAt = Date.now();
+	return index;
+}
+
+async function fromAssets(assets, base) {
+	try {
+		const response = await assets.fetch(new URL(INDEX_FILE, base));
+
+		if (!response.ok) {
+			return null;
+		}
+
+		const text = await response.text();
+
+		return text ? text.split('\n').map(entryFromLine) : null;
+	} catch {
+		return null;
+	}
+}
+
+async function fromDatabase(db) {
 	const { results } = await db.prepare(
 		`SELECT ${SEARCH_FIELDS} FROM packages WHERE status = 'ok'`,
 	).all();
 
-	index = results.map(buildEntry);
-	indexAt = Date.now();
-	return index;
+	return results.map(buildEntry);
 }
 
 /**
@@ -45,7 +82,7 @@ async function getIndex(db) {
  *
  * @returns {Promise<{exact: number[], fuzzy: number[], ranks: number[][]} | null>}
  */
-export async function findHits(db, text) {
+export async function findHits(db, text, assets = null, base = null) {
 	const tokens = normalizeText(text).split(' ').filter(Boolean);
 
 	if (tokens.length === 0) {
@@ -56,7 +93,7 @@ export async function findHits(db, text) {
 	const fuzzy = [];
 	const ranks = Array.from({ length: RANK_REST + 1 }, () => []);
 
-	for (const entry of await getIndex(db)) {
+	for (const entry of await getIndex(db, assets, base)) {
 		const tier = matchEntry(entry, tokens);
 
 		if (tier < 0) {

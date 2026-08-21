@@ -26,6 +26,7 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "wrangler": "^4.123.0"
   }
 }

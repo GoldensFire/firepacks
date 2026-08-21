@@ -19,8 +19,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import * as esbuild from 'esbuild';
 import { resizeInto } from '../src/thumbs.js';
 import { thumbName } from '../src/settings.js';
+import { entryLine, SEARCH_FIELDS } from '../src/fuzzy.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webPath = path.join(root, 'web');
@@ -132,6 +134,45 @@ const ICON_WEBP = 'icon.webp';
 /** Как этот файл называется в корне проекта. */
 const ICON_WEBP_SOURCE = 'icon_Сжатый.webp';
 
+/**
+ * Из чего наверх уезжает не буква в букву, а сжатым, — скрипты и стили.
+ *
+ * Вёрстка сюда не входит: её правит сама сборка (отпечатки в ссылках, счётчики
+ * перед `</body>`), и правит поиском по строкам — которых после сжатия
+ * на месте не окажется. Выигрыш там всё равно копеечный: страницы и так
+ * по два десятка килобайт, а тяжёлое лежит в скриптах.
+ */
+const squeezable = name => /\.(js|css)$/.test(name);
+
+/**
+ * Убрать из скрипта или стиля то, что читает человек, а не браузер:
+ * пояснения и отступы.
+ *
+ * Здесь этого не было вовсе, и цена была видна: в card.js шесть десятых файла —
+ * пояснения, и все они каждый раз ехали посетителю. Сорок килобайт на пустом
+ * месте, и приходят они ровно тогда, когда браузеру больше всего некогда:
+ * до первой отрисовки списка паков.
+ *
+ * Сжимается только «на вид»: имена не переписываются и код не переставляется
+ * (minifyWhitespace без minifyIdentifiers и minifySyntax). Причина простая —
+ * скрипты сайта не собраны в один и не модули: common.js заводит имена,
+ * card.js и app.js ими пользуются, и держатся они на том, что имена везде
+ * одни и те же. Переименовать их пофайлово — значит развалить сайт целиком.
+ * А выигрыш от этого копеечный: имена и перестановки дают ещё процент-полтора
+ * поверх сорока с лишним, снятых пояснениями.
+ */
+async function squeeze(source, name) {
+	const result = await esbuild.transform(source, {
+		loader: name.endsWith('.css') ? 'css' : 'js',
+		minifyWhitespace: true,
+		minifyIdentifiers: false,
+		minifySyntax: false,
+		charset: 'utf8',
+	});
+
+	return result.code;
+}
+
 /** Отпечаток содержимого: восьми знаков хватает, чтобы имена не совпали. */
 const fingerprint = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 8);
 
@@ -209,6 +250,43 @@ function usedLogos() {
 	return rows.map(row => row.logo_file);
 }
 
+/** Как называется заранее собранный список слов. То же имя спрашивает cf/src/search.js. */
+const SEARCH_INDEX = 'search-index.txt';
+
+/**
+ * Список слов всех паков — тот самый, по которому наверху ищут с опечатками.
+ *
+ * Собирается здесь, а не на сайте, по той же причине, что и обложки: на Workers
+ * это слишком дорого. Раньше Worker строил его сам — брал из D1 все паки
+ * и раскладывал каждый на слова, — и стоило это 1.3 секунды чужого процессора
+ * на первый поиск в новом изоляте. За такое Cloudflare изолят убивает
+ * («exceededCpu»), и вместе с поиском падали соседние запросы: 20 августа
+ * человек, ничего не искавший, видел вместо списка паков пустоту, потому что
+ * кто-то другой в эту секунду искал.
+ *
+ * Здесь та же работа считается один раз при сборке, и Worker только разбирает
+ * готовые строки — две миллисекунды вместо тысячи трёхсот. Разбирает лениво:
+ * слова считаются при первом обращении (см. entryFromLine в src/fuzzy.js).
+ *
+ * Ничего тайного тут нет: те же названия, авторы, теги и описания сайт отдаёт
+ * через /api/packages любому спросившему.
+ */
+function writeSearchIndex() {
+	const dbPath = path.join(root, 'data', 'sibase.db');
+
+	if (!fs.existsSync(dbPath)) {
+		return 0;
+	}
+
+	const db = new DatabaseSync(dbPath, { readOnly: true });
+	const rows = db.prepare(`SELECT ${SEARCH_FIELDS} FROM packages WHERE status = 'ok'`).all();
+	db.close();
+
+	fs.writeFileSync(path.join(publicPath, SEARCH_INDEX), rows.map(entryLine).join('\n'), 'utf8');
+
+	return rows.length;
+}
+
 /**
  * Опустошает папку, не удаляя её саму. Разница не косметическая: во время
  * проверки за cf/public смотрит `wrangler dev`, и Windows не даёт удалить папку,
@@ -228,15 +306,34 @@ async function main() {
 	fs.mkdirSync(thumbsPath, { recursive: true });
 
 	let pages = 0;
+	let sourceBytes = 0;
+	let squeezedBytes = 0;
 
 	for (const name of fs.readdirSync(webPath)) {
 		if (SKIP.has(name)) {
 			continue;
 		}
 
-		fs.copyFileSync(path.join(webPath, name), path.join(publicPath, name));
+		const from = path.join(webPath, name);
+		const to = path.join(publicPath, name);
+
+		if (squeezable(name)) {
+			const source = fs.readFileSync(from, 'utf8');
+			const squeezed = await squeeze(source, name);
+
+			sourceBytes += Buffer.byteLength(source);
+			squeezedBytes += Buffer.byteLength(squeezed);
+
+			fs.writeFileSync(to, squeezed, 'utf8');
+		} else {
+			fs.copyFileSync(from, to);
+		}
+
 		pages++;
 	}
+
+	console.log(`Скрипты и стили: ${Math.round(sourceBytes / 1024)} КБ → `
+		+ `${Math.round(squeezedBytes / 1024)} КБ`);
 
 	// Значок лежит в корне проекта рядом с ярлыками, а не в папке сайта:
 	// дома его отдаёт сервер как /favicon.ico, здесь он просто там и лежит.
@@ -335,7 +432,11 @@ async function main() {
 	const weigh = directory => fs.readdirSync(directory)
 		.reduce((sum, name) => sum + fs.statSync(path.join(directory, name)).size, 0);
 
+	const searchable = writeSearchIndex();
+
 	console.log(`  вёрстка: ${pages} файл(ов), со счётчиками посещений`);
+	console.log(`  поиск: ${searchable} пак(ов) в готовом списке слов`
+		+ ` (${(fs.statSync(path.join(publicPath, SEARCH_INDEX)).size / 1024 / 1024).toFixed(1)} МБ)`);
 	console.log(`  обложки: ${reused} готовых, ${resized} уменьшено, ${failed.length} не вышло, ${missing} не нашлось`
 		+ `${swept > 0 ? `, ${swept} лишних убрано со склада` : ''}`);
 	console.log(`Собрано в cf/public, обложки весят ${(weigh(thumbsPath) / 1024 / 1024).toFixed(1)} МБ.`);

@@ -747,12 +747,17 @@ function rememberCounts(key, value) {
 	countsCache.set(key, { at: Date.now(), value });
 }
 
-export async function listPackages(db, query, userId) {
+/**
+ * @param assets откуда брать готовый список слов для поиска (env.ASSETS)
+ * @param base адрес, от которого этот файл спрашивается: у статики свой адрес
+ *   не заведён, и спрашивают её от того же, по которому пришёл посетитель
+ */
+export async function listPackages(db, query, userId, assets = null, base = null) {
 	// Поиск считается в памяти: он прощает опечатки, а такое сравнение SQL не умеет.
 	// Сведённые типы паков нужны отбору, но спрашиваются заранее: сам разбор условий
 	// синхронный, а тут за списком надо в базу.
 	const [hits, groups, bans] = await Promise.all([
-		findHits(db, query.get('search') ?? ''),
+		findHits(db, query.get('search') ?? '', assets, base),
 		subjectGroups(db),
 		bannedKinds(db, userId),
 	]);

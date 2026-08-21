@@ -142,7 +142,114 @@ export function buildEntry(row) {
 	};
 }
 
-/** Нашлось ли слово запроса среди слов пака с допуском на опечатки. */
+/**
+ * Тот же пак, но одной строкой: так он ложится в заранее собранный список слов
+ * (см. searchIndex в scripts/build-web.js).
+ *
+ * Разделитель — табуляция, и подойти она может только потому, что в нормальном
+ * виде строки её нет: normalizeText оставляет буквы, цифры и одиночные пробелы.
+ * Пустое поле означает «то же самое, что и предыдущее»: у пака с латинским
+ * названием строка латиницей — та же самая строка, и второй раз её не пишем.
+ */
+export function entryLine(row) {
+	const entry = buildEntry(row);
+	const blob = entry.blob.trim();
+	const latin = entry.latin.trim();
+
+	return [
+		entry.id,
+		blob,
+		latin === blob ? '' : latin,
+		entry.name,
+		entry.nameLatin === entry.name ? '' : entry.nameLatin,
+	].join('\t');
+}
+
+/**
+ * Разбор такой строки обратно.
+ *
+ * Слова (words, nameWords) считаются не здесь, а при первом обращении. Разница
+ * заметная: разложить одиннадцать тысяч паков на слова — шестьдесят миллисекунд
+ * чужого процессора, и платить их запросу, который ответит одним вхождением
+ * подстроки, незачем. Нужны слова только там, где прощаются опечатки.
+ */
+export function entryFromLine(line) {
+	const [id, blob, latin, name, nameLatin] = line.split('\t');
+	const spaced = ` ${blob} `;
+
+	const entry = {
+		id: Number(id),
+		blob: spaced,
+		latin: latin ? ` ${latin} ` : spaced,
+		name,
+		nameLatin: nameLatin || name,
+	};
+
+	lazyWords(entry, 'words', blob);
+	lazyWords(entry, 'nameWords', name);
+
+	return entry;
+}
+
+/** Список слов, посчитанный при первом обращении и потом лежащий готовым. */
+function lazyWords(entry, key, source) {
+	let words = null;
+
+	Object.defineProperty(entry, key, {
+		get() {
+			if (words === null) {
+				words = [...new Set(source.split(' '))].filter(Boolean);
+			}
+
+			return words;
+		},
+	});
+}
+
+/**
+ * Набор букв слова, сложенный в тридцать два бита: буква кладётся в свой бит
+ * по остатку от деления кода на 32.
+ *
+ * Букв в двух алфавитах больше тридцати двух, и в один бит их попадает
+ * по нескольку — это нарочно. Отпечаток нужен не для сравнения слов, а для
+ * отказа от сравнения (см. fuzzyInWords), и совпадение разных букв в одном
+ * бите делает отказ реже, но никогда — ошибочным.
+ */
+function letterMask(word) {
+	let mask = 0;
+
+	for (let i = 0; i < word.length; i++) {
+		mask |= 1 << (word.charCodeAt(i) % 32);
+	}
+
+	return mask;
+}
+
+/** Сколько единиц в числе: столько букв запроса в слове не встретилось вовсе. */
+function bitCount(value) {
+	let count = 0;
+
+	for (let bits = value; bits !== 0; bits &= bits - 1) {
+		count++;
+	}
+
+	return count;
+}
+
+/**
+ * Нашлось ли слово запроса среди слов пака с допуском на опечатки.
+ *
+ * Перед честным сравнением стоят две дешёвые проверки, и обе отсекают только
+ * то, что заведомо не подойдёт. Считать расстояние — это n×m шагов на каждую
+ * пару, а слов у пака сотни: запрос из мусорных букв («КРутОйПААКЕТ)00»)
+ * обходился в 190 мс чужого процессора, потому что не совпадал ни с чем
+ * и оттого честно сравнивался со всем.
+ *
+ * Вторая проверка — про буквы. Каждой буквы запроса, которой в слове нет вовсе,
+ * стоит хотя бы одна правка: не хватает трёх букв при допуске в две — можно
+ * не сравнивать. Отпечаток слова считается тут же и стоит одного прохода
+ * по нему, то есть в разы меньше самого сравнения.
+ */
 function fuzzyInWords(words, token) {
 	const limit = allowedErrors(token.length);
 
@@ -151,10 +258,15 @@ function fuzzyInWords(words, token) {
 	}
 
 	const anywhere = token.length >= INFIX_LENGTH;
+	const tokenMask = letterMask(token);
 
 	for (const word of words) {
 		// Слово пака короче запроса больше, чем на допуск: столько букв не дописать
 		if (token.length - word.length > limit) {
+			continue;
+		}
+
+		if (bitCount(tokenMask & ~letterMask(word)) > limit) {
 			continue;
 		}
 

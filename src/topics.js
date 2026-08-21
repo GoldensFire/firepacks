@@ -450,8 +450,9 @@ export function computeFranchises(themes, marks) {
 	], {
 		kind: 'work',
 		limit: config.franchiseLimit,
-		// Порог считается от самого пака: две темы — это повтор, когда тем шесть,
-		// и случайность, когда их тридцать (см. franchiseThemeShare в settings.js)
+		// Обычно это ровно franchiseMinThemes — две темы, сколько бы тем ни было
+		// в паке. Счёт от размера пака остался ручкой на случай шумных списков
+		// и по умолчанию выключен (см. franchiseThemeShare в settings.js)
 		minThemes: Math.max(config.franchiseMinThemes, Math.ceil(themes.length * config.franchiseThemeShare)),
 		// Область произведением не является, и что бы модель ни написала
 		// в поле произведения, повтором это не станет

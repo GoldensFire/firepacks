@@ -23,7 +23,7 @@ import { settings } from '../../src/settings.js';
 import { packIdFromPath, topicKeyFromPath, subjectSlugFromPath } from '../../src/slug.js';
 
 import {
-	injectPackMeta, injectLandingMeta, buildSitemap, buildRobots,
+	injectPackMeta, injectLandingMeta, injectHomeBoot, buildSitemap, buildRobots,
 	TOPIC_PAGES, TOPIC_PAGE_KEYS, subjectPages, subjectBySlug,
 	topicLanding, subjectLanding, topLanding,
 } from '../../src/meta.js';
@@ -84,6 +84,21 @@ const LANDING_SIZE = 24;
  * его начнут играть. Час устаревания тут не стоит ничего.
  */
 const LANDING_TTL = 3600;
+
+/**
+ * Какую выдачу видит тот, кто открыл библиотеку и ничего не выбирал.
+ *
+ * Слово в слово то же, что складывает buildQuery в web/app.js для нетронутых
+ * фильтров: те же сортировка, страница и размер страницы, те же «показывать
+ * паки без оценки» и «прятать сыгранное». Расхождение здесь стоило бы дорого
+ * и молча — заготовка в странице показывала бы одно, а первая же смена фильтра
+ * подменяла бы список другим.
+ *
+ * «Прятать сыгранное» гостю ничего не прячет: отметки его лежат в самом
+ * браузере, и база о них не знает (см. renderPlayedFilters там же). Строка
+ * от этого не меняется — она обязана совпасть с той, что составит скрипт.
+ */
+const HOME_QUERY = 'sort=added&dir=desc&page=1&pageSize=24&unrated=1&hidePlayed=1';
 
 /**
  * Файлы, которыми Google и Яндекс проверяют, что сайт наш.
@@ -308,7 +323,7 @@ export default {
 			}
 
 			if (url.pathname === '/api/packages') {
-				return share(json(await listPackages(env.DB, url.searchParams, userId)));
+				return share(json(await listPackages(env.DB, url.searchParams, userId, env.ASSETS, url)));
 			}
 
 			// Один пак: этим живёт его отдельная страница
@@ -452,6 +467,69 @@ export default {
 						'Cache-Control': `public, max-age=${SITEMAP_TTL}`,
 					},
 				});
+			}
+
+			// ————— библиотека: / —————
+			//
+			// Страница лежит в статике и раздаётся оттуда всем, кроме одного
+			// случая: гость, открывший её без отбора. Такому первая страница
+			// выдачи и настройки уезжают прямо в вёрстке (см. injectHomeBoot
+			// в src/meta.js), и список паков рисуется без единого похода
+			// на сервер.
+			//
+			// Почему только гостю и только без отбора. Заготовка одна на всех
+			// и лежит в общем кэше: посчитанная с хозяином, она показала бы его
+			// отметки всякому следующему, а посчитанная без отбора — не тот
+			// список, о котором просили. Оба условия проверяются до базы:
+			// не подошло — Worker не делает ничего, и страницу отдаёт статика,
+			// как отдавала раньше.
+			//
+			// Пять минут кэша, а не час, как разделам: разделы меняются, когда
+			// пак начнут играть, а тут сверху лежит самое свежее, и появиться
+			// оно должно тогда же, когда появляется в /api/packages.
+			const homePage = request.method === 'GET' && url.pathname === '/'
+				&& url.search === '' && anonymous(request);
+
+			if (homePage) {
+				const cached = await cache.match(request);
+
+				if (cached) {
+					return cached;
+				}
+
+				const [page, packages, facets] = await Promise.all([
+					env.ASSETS.fetch(new URL('/index.html', url)),
+					listPackages(env.DB, new URLSearchParams(HOME_QUERY), null, env.ASSETS, url),
+					getFacets(env.DB),
+				]);
+
+				// Настройки — слово в слово те же, что отдаёт /api/facets гостю:
+				// сыграно и запланировано у него ноль, хозяина нет
+				const html = injectHomeBoot(await page.text(), {
+					packages,
+					facets: { ...facets, played: 0, planned: 0, hasDiscord: hasDiscord(env), user: null },
+				});
+
+				// «Vary: Cookie» здесь по той же причине, что и у общих ответов
+				// API (см. share выше): страница посчитана для гостя и лежит
+				// у него в браузере пять минут, а вход её не трогает — ключ
+				// кэша адреса печенья не включает. Без этой строки человек,
+				// вошедший через Discord, вернулся бы на «свою» библиотеку
+				// с чужим уголком входа и неотмеченными паками.
+				//
+				// Общему кэшу Cloudflare это не мешает: Vary он смотрит только
+				// на сжатие, и гости с разными счётчиками попадают в один
+				// и тот же ответ.
+				const response = new Response(html, {
+					headers: {
+						'Content-Type': 'text/html; charset=utf-8',
+						'Cache-Control': `public, max-age=${PUBLIC_TTL}`,
+						'Vary': 'Cookie',
+					},
+				});
+
+				ctx.waitUntil(cache.put(request, response.clone()));
+				return response;
 			}
 
 			// ————— страницы разделов: /topic/anime, /subjects/dota, /top —————

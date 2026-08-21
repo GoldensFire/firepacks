@@ -235,6 +235,14 @@ a.brand:hover .brand__text {
 	margin-inline: auto;
 }
 
+/* Поиск над списком профиля — то же поле, но не в шапке: делить свободное место
+   ему не с кем, а потолок в 33rem там означал бы дыру справа. Растёт по месту. */
+.search-box--inline {
+	max-width: none;
+	margin-inline: 0;
+	min-width: 14rem;
+}
+
 .search-box__button {
 	flex: none;
 }
@@ -2545,52 +2553,43 @@ a.hide__item--login:hover {
 
 /* Профиль */
 
-/* Две колонки, как в библиотеке, только зеркально: там панель фильтров справа
-   от выдачи, здесь — карточка человека справа от списков паков. Ширина колонки
-   та же, что у фильтров: страницы соседние, и колонки на них должны совпадать. */
-.profile {
+/* Профиль живёт на той же сетке, что и библиотека (.layout): выдача слева,
+   колонка фильтров справа. Своей раскладки у него больше нет нарочно — списки
+   паков там те же самые, и стоять они должны там же, где привычно.
+
+   Колонка фильтров при этом появляется вместе со списками: в самом профиле
+   и в чёрных списках отбирать нечего, и пустой прямоугольник сбоку выглядел бы
+   поломкой. Пока её нет, выдача занимает всю ширину. */
+.filters[hidden] {
+	display: none;
+}
+
+.layout--tabs:not(.layout--filters) {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+/* Сам профиль — плитка карточек, которая сама решает, во сколько столбцов лечь:
+   на широком экране это три-четыре, на телефоне один. Числа и полоса времени
+   идут через всю ширину — они про всё сразу, а не про одну колонку. */
+.profile__grid {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) 16.25rem;
-	gap: 1.25rem;
-	max-width: 100rem;
-	margin: 0 auto;
-	padding: 1.25rem;
+	grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+	gap: 1rem;
 	align-items: start;
 }
 
-.profile__main {
+.profile__wide {
+	grid-column: 1 / -1;
+}
+
+.profile__card {
 	display: flex;
 	flex-direction: column;
-	gap: 1.25rem;
-	min-width: 0;
-}
-
-/* Колонка едет за страницей, как и фильтры библиотеки: списки паков длинные,
-   и без этого имя с разбивкой уезжали за верхний край на первом же экране */
-.profile__side {
-	position: sticky;
-	top: 4.75rem;
-	max-height: calc(100vh - 6rem);
-	overflow-y: auto;
-	overscroll-behavior: contain;
-	display: flex;
-	flex-direction: column;
-	gap: 1rem;
-	scrollbar-width: thin;
-	scrollbar-color: var(--border) transparent;
-}
-
-.profile__side::-webkit-scrollbar {
-	width: 0.5rem;
-}
-
-.profile__side::-webkit-scrollbar-thumb {
-	background: var(--border);
-	border-radius: 999px;
-}
-
-.profile__side::-webkit-scrollbar-track {
-	background: transparent;
+	gap: 0.625rem;
+	padding: 1.125rem 1.25rem;
+	background: var(--bg-panel);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
 }
 
 .profile__head {
@@ -2668,12 +2667,11 @@ a.hide__item--login:hover {
 	color: var(--accent);
 }
 
-/* Числа стоят в узкой колонке и переносятся по двое в строку: врозь они
-   растягивают карточку человека на пол-экрана в высоту */
+/* Числа стоят в ряд через всю ширину карточки и переносятся, когда не влезают */
 .profile__numbers {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 0.875rem 1.25rem;
+	gap: 0.875rem 2rem;
 }
 
 .profile__number {
@@ -2693,6 +2691,26 @@ a.hide__item--login:hover {
 	color: var(--text-muted);
 }
 
+/* Два числа из четырёх — кнопки: за «205 паков сыграно» стоит список, и ходить
+   за ним к вкладкам, когда число под рукой, незачем. Выглядят они при этом как
+   остальные числа, а не как кнопки: подчёркивание и рамка превратили бы строку
+   чисел в панель управления. Про нажатие говорит подсветка под курсором. */
+.profile__number--link {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.profile__number--link:hover .profile__number-value {
+	color: var(--accent);
+}
+
+/* Столбец с промежутком. Остался ради топа авторов — в самом профиле блоки
+   теперь свои, с рамкой и заливкой (см. .profile__card выше) */
 .profile__block {
 	display: flex;
 	flex-direction: column;
@@ -3546,19 +3564,6 @@ a.authors__row:hover {
 		gap: 0.875rem;
 	}
 
-	/* Карточка человека уходит под списки: в одну колонку она стояла бы поперёк
-	   дороги к тому, за чем страницу открывают, — к самим пакам */
-	.profile {
-		grid-template-columns: minmax(0, 1fr);
-		gap: 0.875rem;
-	}
-
-	.profile__side {
-		position: static;
-		max-height: none;
-		overflow: visible;
-	}
-
 	/* В одну колонку фильтры встают над выдачей — под ней их бы никто не нашёл, —
 	   но свёрнутыми: развёрнутые, они занимают собой пару экранов, и до первого
 	   пака пришлось бы долго листать. Разворачивает их кнопка над списком. */
@@ -3596,7 +3601,6 @@ a.authors__row:hover {
 
 @media (max-width: 640px) {
 	.layout,
-	.profile,
 	.top,
 	.update {
 		padding: 0.75rem;

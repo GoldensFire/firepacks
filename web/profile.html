@@ -81,135 +81,376 @@
 		</div>
 	</header>
 
-	<!-- Списки паков заняли страницу целиком, а сам профиль уехал в колонку справа.
-	     Причина та же, по которой запланированное раньше стояло выше сыгранного:
-	     страницу открывают затем, чтобы во что-то сыграть, а не затем, чтобы
-	     посмотреть на своё имя и разбивку по тематикам. Списки должны быть под
-	     рукой сразу, всё остальное — рядом, но не поперёк дороги. -->
-	<main class="profile">
-		<div class="profile__main">
-			<!-- Запланированное и сыгранное — две вкладки, а не два списка подряд:
-			     вместе они на пару тысяч карточек, и вторая половина всё равно
-			     жила за пределами экрана. Запланированное открыто по умолчанию —
-			     сыгранное это архив, а планы это сегодняшний вечер. -->
+	<!-- Страница открывается собой: сперва сам профиль — кто ты, сколько сыграно,
+	     на сколько это часов и что из этого видно про вкусы. Списки паков лежат
+	     за вкладками рядом, и открывают их по нажатию.
+
+	     Раньше было наоборот: списки занимали страницу целиком, а профиль ютился
+	     в колонке справа. Смысла в этом не было никакого — за списком «во что
+	     я играл» ходят в библиотеку с галочкой «только сыгранные», а сюда
+	     приходят посмотреть на себя.
+
+	     Сами списки — не свой урезанный список, а та же выдача библиотеки: те же
+	     карточки со всем, что на них есть, тот же поиск, та же колонка фильтров
+	     справа (см. web/profile.js и mountLibrary в web/app.js). -->
+	<main class="layout layout--tabs" id="page">
+		<h1 class="visually-hidden">Профиль игрока</h1>
+
+		<section class="content">
+			<!-- Вкладки. Первая — сам профиль, за ней два списка паков, за ними
+			     два чёрных списка: паки и авторы порознь. Порознь потому, что
+			     это разные списки — спрятанный пак и спрятанный автор попадают
+			     в выдачу по-разному, — и вместе они читались одной кучей
+			     значков, где не видно, чего в ней больше. -->
 			<div class="tabs" role="tablist" aria-label="Что показывать">
-				<button class="tab" id="tabPlanned" type="button" role="tab" aria-controls="plannedBlock">
+				<button class="tab" id="tabProfile" type="button" role="tab" aria-controls="profilePanel">
+					<span>Профиль</span>
+				</button>
+				<button class="tab" id="tabPlanned" type="button" role="tab" aria-controls="listPanel">
 					<span>Запланировано</span>
 					<span class="tab__count" id="tabPlannedCount">0</span>
 				</button>
-				<button class="tab" id="tabPlayed" type="button" role="tab" aria-controls="playedBlock">
+				<button class="tab" id="tabPlayed" type="button" role="tab" aria-controls="listPanel">
 					<span>Сыграно</span>
 					<span class="tab__count" id="tabPlayedCount">0</span>
 				</button>
+				<button class="tab" id="tabBanPacks" type="button" role="tab" aria-controls="banPacksPanel" hidden>
+					<span>Чёрный список</span>
+					<span class="tab__count" id="tabBanPacksCount">0</span>
+				</button>
+				<button class="tab" id="tabBanAuthors" type="button" role="tab" aria-controls="banAuthorsPanel" hidden>
+					<span>Чёрный список авторов</span>
+					<span class="tab__count" id="tabBanAuthorsCount">0</span>
+				</button>
 			</div>
 
-			<!-- Полоса времени: сколько часов стоит за сыгранным. Считается грубо —
-			     по 15 секунд на вопрос, — и об этом сказано в подсказке у подписи:
-			     число здесь не мерка, а порядок величины. -->
-			<section class="timeline" id="timeline">
-				<div class="timeline__head">
-					<span class="timeline__title" id="timeTitle">Время за паками</span>
-					<span class="timeline__value" id="timeValue"></span>
-				</div>
+			<!-- ————— сам профиль ————— -->
+			<section id="profilePanel" role="tabpanel" aria-labelledby="tabProfile">
+				<div class="profile__grid">
+					<section class="profile__head profile__wide">
+						<div class="profile__who">
+							<div class="profile__avatar" id="avatar">?</div>
+							<div class="profile__who-text">
+								<h2 class="profile__name" id="userName">Гость</h2>
+							</div>
+						</div>
 
-				<div class="timeline__bar" id="timeBar"></div>
-				<div class="timeline__marks" id="timeMarks"></div>
+						<p class="hint" id="userHint"></p>
+						<!-- Не «account»: этот номер занят уголком входа в шапке,
+						     а она есть и здесь — одна и та же на всех страницах -->
+						<div class="profile__account" id="profileAccount"></div>
+						<!-- Числа тут не просто числа, а кнопки: «205 паков сыграно»
+						     открывает сыгранное, «12 в планах» — планы. Ходить
+						     за списком к вкладкам, когда число под рукой, незачем -->
+						<div class="profile__numbers" id="numbers"></div>
+					</section>
+
+					<!-- Полоса времени: сколько часов стоит за сыгранным. Считается
+					     грубо — по столько-то секунд на вопрос, — и об этом сказано
+					     в подсказке у подписи: число здесь не мерка, а порядок
+					     величины. -->
+					<section class="timeline profile__wide" id="timeline">
+						<div class="timeline__head">
+							<span class="timeline__title" id="timeTitle">Время за паками</span>
+							<span class="timeline__value" id="timeValue"></span>
+						</div>
+
+						<div class="timeline__bar" id="timeBar"></div>
+						<div class="timeline__marks" id="timeMarks"></div>
+					</section>
+
+					<section class="profile__card">
+						<h2 class="filters__title">Сыграно по сложности</h2>
+						<div class="profile__chips" id="playedLevels"></div>
+					</section>
+
+					<section class="profile__card">
+						<h2 class="filters__title">Сыграно по типу пака</h2>
+						<div class="profile__chips" id="playedTopics"></div>
+					</section>
+
+					<section class="profile__card" id="authorsBlock" hidden>
+						<h2 class="filters__title">Авторы, к которым возвращаешься</h2>
+						<div class="profile__chips" id="favouriteAuthors"></div>
+					</section>
+
+					<!-- Списки файлом. Нужно это не «на всякий случай»: сыгранное
+					     человек ведёт не в одном месте, и до сих пор перенести одно
+					     в другое было нечем. Файл называет паки так же, как их
+					     называет человек: названием и авторами, — поэтому он
+					     и читается глазами, и переживает пересборку базы. -->
+					<section class="profile__card">
+						<h2 class="filters__title">Список файлом</h2>
+						<div class="profile__file">
+							<button class="button" id="listExport" type="button"
+								title="Скачать сыгранное и запланированное одним файлом JSON">Экспорт</button>
+							<button class="button" id="listImport" type="button"
+								title="Прочитать такой файл и отметить найденные паки">Импорт</button>
+							<input id="listFile" type="file" accept=".json,.txt,application/json,text/plain" hidden>
+						</div>
+						<!-- Пустая нарочно: строка говорит, чем кончился вывоз или ввоз
+						     («в файле 205 паков», «отмечено 12 из 14»), — а до нажатия
+						     кнопок говорить ей нечего -->
+						<p class="hint" id="listHint"></p>
+					</section>
+				</div>
 			</section>
 
-			<!-- Оба списка ходят страницами, как и выдача библиотеки: две сотни
-			     отметок — это две сотни полных паков в одном ответе, и страница
-			     «во что я играл» открывалась дольше, чем страница со всей
-			     библиотекой сразу. Кнопки страниц те же самые (см. renderPages
-			     в web/common.js). -->
-			<section class="profile__block" id="plannedBlock" role="tabpanel" aria-labelledby="tabPlanned">
-				<div class="content__head">
-					<div id="plannedInfo" class="result-info"></div>
+			<!-- ————— списки паков ————— -->
+			<!-- Одна панель на обе вкладки: устроены они одинаково, а различаются
+			     только тем, что в них лежит, — это выдача с выставленным отбором,
+			     а не два разных списка (см. pinMarks в web/app.js). -->
+			<section id="listPanel" role="tabpanel" hidden>
+				<div class="toolbar">
+					<!-- На узком экране колонка фильтров встаёт над выдачей и занимает
+					     собой пару экранов: до первого пака при этом надо долго
+					     листать. Поэтому там она свёрнута, а разворачивает её эта
+					     кнопка; на широком экране колонка видна всегда, и кнопки нет. -->
+					<button id="filtersToggle" class="button filters-toggle" type="button" aria-expanded="false" aria-controls="filters">
+						<span>Фильтры</span>
+						<span class="filters-toggle__count" id="filtersCount" hidden></span>
+					</button>
+
+					<!-- Свой поиск, второй на странице. Тот, что в шапке, ищет по всей
+					     библиотеке и уводит туда же — он одинаковый на всех страницах
+					     сайта, и делать его тут особенным значило бы обмануть того,
+					     кто к нему привык. А этот ищет по открытому списку: по своему
+					     сыгранному, по своим планам. Ищет он теми же полями, что
+					     и большой, — названием, авторами, темами, описанием. -->
+					<form id="listSearchBox" class="search-box search-box--inline" role="search">
+						<input id="listSearch" class="search" type="search" placeholder="Поиск по этому списку" autocomplete="off">
+						<button class="button search-box__button" type="submit" title="Найти в списке" aria-label="Найти в списке">
+							<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<circle cx="10.6" cy="10.6" r="6.6"/>
+								<path d="m15.4 15.4 4.6 4.6"/>
+							</svg>
+						</button>
+					</form>
+
+				<label class="toolbar__field">
+					<select id="sort" class="select" aria-label="Сортировка">
+						<!-- Стоит первой и включается сама, когда что-нибудь ищут:
+						     набрав «Большая солянка», человек ждёт сверху пак
+						     с таким названием. Выбрать другую сортировку он
+						     по-прежнему может — эта тогда и остаётся выбранной
+						     до конца поиска (см. web/app.js). -->
+						<option value="relevance">По совпадению с запросом</option>
+						<option value="added">Сначала новые</option>
+						<option value="popular_week">Популярные за неделю</option>
+						<option value="popular_month">Популярные за месяц</option>
+						<option value="popular_quarter">Популярные за 3 месяца</option>
+						<option value="popular_half">Популярные за полгода</option>
+						<option value="popular_year">Популярные за год</option>
+						<option value="games">Популярные за всё время</option>
+						<option value="rating">По оценке игроков</option>
+						<option value="difficulty">По сложности (от сложных)</option>
+						<!-- Те же два процента, что стоят на карточке рядом со сложностью.
+						     Сложность считается из первого из них, но отвечают они
+						     на разные вопросы: «на сколько вопросов вообще решились»
+						     и «сколько из отвеченного угадали», — и паки, у которых
+						     эти числа расходятся сильнее всего, ищутся именно так. -->
+						<option value="take">По доле отвечавших</option>
+						<option value="right">По доле правильных ответов</option>
+						<option value="questions">По числу вопросов</option>
+						<option value="size">По размеру</option>
+						<!-- Сортировок по долям тематик здесь больше нет: «по доле аниме»
+						     отвечало на тот же вопрос, что и галочка «Аниме» в колонке
+						     фильтров, только хуже — списком, где сверху стоят паки
+						     со стопроцентной долей, то есть ровно те, что и так первыми
+						     попадаются в отборе по типу. Туда же ушли «по названию»
+						     и «по повторам одной франшизы». -->
+					</select>
+				</label>
+
+				<label class="toolbar__field">
+					<select id="dir" class="select" aria-label="Порядок">
+						<option value="desc">По убыванию</option>
+						<option value="asc">По возрастанию</option>
+					</select>
+				</label>
+
+					<div id="resultInfo" class="result-info">Загрузка…</div>
 				</div>
 
-				<div id="plannedGrid" class="grid"></div>
+				<p class="hint" id="sortHint"></p>
 
-				<div id="plannedPager" class="pager"></div>
-			</section>
-
-			<section class="profile__block" id="playedBlock" role="tabpanel" aria-labelledby="tabPlayed" hidden>
 				<div class="content__head">
-					<div id="resultInfo" class="result-info"></div>
+					<div id="activeFilters" class="active-filters"></div>
 				</div>
 
 				<div id="grid" class="grid"></div>
 
 				<div id="pager" class="pager"></div>
 			</section>
-		</div>
 
-		<aside class="profile__side">
-			<section class="profile__head">
-				<div class="profile__who">
-					<div class="profile__avatar" id="avatar">?</div>
-					<div class="profile__who-text">
-						<h1 class="profile__name" id="userName">Гость</h1>
-					</div>
-				</div>
-
-				<p class="hint" id="userHint"></p>
-				<!-- Не «account»: этот номер занят уголком входа в шапке, а она
-				     теперь есть и здесь — одна и та же на всех страницах -->
-				<div class="profile__account" id="profileAccount"></div>
-				<div class="profile__numbers" id="numbers"></div>
-			</section>
-
-			<!-- Списки файлом. Нужно это не «на всякий случай»: сыгранное человек
-			     ведёт не в одном месте, и до сих пор перенести одно в другое было
-			     нечем. Файл называет паки так же, как их называет человек:
-			     названием и авторами, — поэтому он и читается глазами,
-			     и переживает пересборку базы. -->
-			<section class="profile__block">
-				<h2 class="filters__title">Список файлом</h2>
-				<div class="profile__file">
-					<button class="button" id="listExport" type="button"
-						title="Скачать сыгранное и запланированное одним файлом JSON">Экспорт</button>
-					<button class="button" id="listImport" type="button"
-						title="Прочитать такой файл и отметить найденные паки">Импорт</button>
-					<input id="listFile" type="file" accept=".json,.txt,application/json,text/plain" hidden>
-				</div>
-				<!-- Пустая нарочно: строка говорит, чем кончился вывоз или ввоз
-				     («в файле 205 паков», «отмечено 12 из 14»), — а до нажатия
-				     кнопок говорить ей нечего. Про устройство файла тут стояло
-				     объяснение, которое читают один раз, а место оно занимало
-				     при каждом открытии страницы -->
-				<p class="hint" id="listHint"></p>
-			</section>
-
-			<!-- Чёрный список живёт только здесь: в колонке фильтров библиотеки он
+			<!-- ————— чёрные списки ————— -->
+			<!-- Живут они только здесь: в колонке фильтров библиотеки чёрный список
 			     занимал место рядом с тем, чем пользуются каждый раз, а сам нужен
-			     редко — ровно тогда, когда спрятанное надо вернуть. -->
-			<section class="profile__block" id="blacklistBlock" hidden>
-				<h2 class="filters__title">Чёрный список</h2>
+			     редко — ровно тогда, когда спрятанное надо вернуть. Из колонки
+			     профиля они уехали сюда же: там их видно было всё время, вместе
+			     с именем и разбивкой, а смотрят на них раз в месяц. -->
+			<section id="banPacksPanel" role="tabpanel" aria-labelledby="tabBanPacks" hidden>
 				<!-- Без пояснения под списком: тот, кто пак сюда положил, знает,
 				     что это, а крестик рядом с каждой строкой говорит про возврат
 				     больше, чем абзац о нём -->
 				<div class="profile__chips" id="blacklist"></div>
 			</section>
 
-			<section class="profile__block">
-				<h2 class="filters__title">Сыграно по сложности</h2>
-				<div class="profile__chips" id="levels"></div>
+			<section id="banAuthorsPanel" role="tabpanel" aria-labelledby="tabBanAuthors" hidden>
+				<div class="profile__chips" id="blacklistAuthors"></div>
+			</section>
+		</section>
+
+		<!-- Колонка фильтров — та же самая, что в библиотеке, и это не «похожая»,
+		     а буквально она: те же поля, те же имена, тот же код позади (см.
+		     web/app.js). Правка сюда идёт вместе с web/index.html.
+
+		     Спрятана, пока открыт сам профиль или чёрные списки: фильтровать
+		     там нечего, а пустая колонка сбоку выглядит поломкой. -->
+		<aside class="filters" id="filters" hidden>
+			<section class="filters__block">
+				<h2 class="filters__title">Сложность</h2>
+				<div id="levels" class="levels"></div>
+
+				<label class="check" id="unratedRow">
+					<input type="checkbox" id="unrated" checked>
+					<span>Показывать паки без сложности</span>
+				</label>
 			</section>
 
-			<section class="profile__block">
-				<h2 class="filters__title">Сыграно по типу пака</h2>
-				<div class="profile__chips" id="topics"></div>
+			<!-- Отметки стоят сразу за сложностью, а не в середине колонки: «скрыть
+			     сыгранные» — это первое, что делают с библиотекой, и стоит оно ровно
+			     там же, где «показывать паки без оценки», — обе галочки отвечают
+			     на один вопрос, «что вообще показывать», и разлучать их не за чем.
+			     Ниже начинается отбор по самим пакам: тип, предмет, язык, темы. -->
+			<!-- Отметки в профиле не показываются: «сыграно» или «запланировано»
+			     здесь говорит вкладка, и вторая пара галочек про то же самое рано
+			     или поздно сказала бы другое. Разметка при этом на месте — ею
+			     вкладка и переключает отбор (см. pinMarks в web/app.js). -->
+			<section class="filters__block" hidden>
+				<h2 class="filters__title">Отметки</h2>
+
+				<!-- Стоит отмеченной с самого начала: библиотеку открывают, чтобы выбрать
+				     пак на вечер, а сыгранный на этот вопрос уже ответил. Без входа
+				     галочка гаснет и снимается — отбирает по отметкам база, а до входа
+				     они лежат в самом браузере (см. renderPlayedFilters в web/app.js). -->
+				<label class="check">
+					<input type="checkbox" id="hidePlayed" checked>
+					<span>Скрыть сыгранные</span>
+				</label>
+
+				<label class="check">
+					<input type="checkbox" id="onlyPlayed">
+					<span>Только сыгранные</span>
+				</label>
+
+				<!-- Запланированное стоит здесь же: это такая же своя отметка,
+				     только про будущее. Полный список отложенного собран в профиле,
+				     а тут он нужен, чтобы искать внутри него — по сложности,
+				     по типу пака, по числу вопросов. -->
+				<label class="check">
+					<input type="checkbox" id="onlyPlanned">
+					<span>Только запланированные</span>
+				</label>
+
+				<!-- Спрятанное в чёрный список — тоже своя отметка, и смотрят на неё
+				     оттуда же, откуда на сыгранное. Управляют списком по-прежнему
+				     в профиле; здесь только «покажи, что я спрятал», чтобы снять
+				     запрет можно было прямо на карточке, не уходя со страницы.
+				     Прятать нечем — галочка гаснет (см. renderBlacklistFilter). -->
+				<label class="check" id="blacklistRow">
+					<input type="checkbox" id="showBlacklisted">
+					<span>Показать паки и авторов в чёрном списке</span>
+				</label>
 			</section>
 
-			<section class="profile__block" id="authorsBlock" hidden>
-				<h2 class="filters__title">Авторы, к которым возвращаешься</h2>
-				<div class="profile__chips" id="authors"></div>
+			<!-- Три галочки про то, каким пак окажется за столом, а не про то, о чём
+			     он. Стоят выше типов пака нарочно: «дайте ровный пак на вечер» —
+			     вопрос более общий, чем «дайте аниме», и решают его раньше.
+			     Работают все три вместе, ни одна не снимает соседнюю.
+
+			     «Мало» у первых двух значит ровно то же, что молчание карточки:
+			     пороги общие с цветом чисел на ней (см. repeatWarnShare
+			     и specialWarnShare в src/settings.js). -->
+			<section class="filters__block">
+				<h2 class="filters__title">Без перекосов</h2>
+
+				<label class="check" id="lowRepeatsRow">
+					<input type="checkbox" id="lowRepeats">
+					<span>Мало повторов</span>
+				</label>
+
+				<label class="check" id="lowSpecialsRow">
+					<input type="checkbox" id="lowSpecials">
+					<span>Мало спецвопросов</span>
+				</label>
+
+				<label class="check" id="noFranchiseRow">
+					<input type="checkbox" id="noFranchise">
+					<span>Без паков про одну франшизу</span>
+				</label>
 			</section>
+
+			<section class="filters__block">
+				<h2 class="filters__title">Тип пака</h2>
+				<div id="topics" class="levels"></div>
+			</section>
+
+			<!-- Пять основных тематик отвечают на вопрос «о чём вопросы», и на пак
+			     про футбол ответа у них нет: спорт живёт в «прочем», ни одна доля
+			     порога не берёт, и пак числится солянкой. А пак по Вархаммеру
+			     по ним — просто «игропак», каких сотни. Здесь стоят типы, которых
+			     в том списке быть не может: их называет разметка тем — тот самый
+			     предмет, по которому считаются повторы. -->
+			<section class="filters__block">
+				<h2 class="filters__title">Пак целиком про одно</h2>
+				<input id="subjectSearch" class="select" type="search" placeholder="Найти тип пака" autocomplete="off">
+				<div id="subjects" class="levels"></div>
+				<!-- Список здесь обрезан сороковкой самых частых: колонка фильтров
+				     не список всего на свете. А всего таких тем сотни, и всё
+				     любопытное как раз в хвосте — «Цивилизация», «Твин Пикс»,
+				     «Фоллаут», — так что раньше они пропадали молча. Ссылка ведёт
+				     туда, где список целиком (см. web/subjects.js). -->
+				<a class="filters__more" href="/subjects">Показать все темы →</a>
+			</section>
+
+			<!-- Язык записан внутри самого файла пака. Указывают его далеко не все,
+			     поэтому «Без указания» — такой же полноправный пункт, как русский
+			     и английский: спрятать его значило бы спрятать половину базы. -->
+			<section class="filters__block">
+				<h2 class="filters__title">Язык пака</h2>
+				<div id="languages" class="levels"></div>
+			</section>
+
+			<section class="filters__block">
+				<h2 class="filters__title">Темы</h2>
+				<input id="tagSearch" class="select" type="search" placeholder="Найти тему" autocomplete="off">
+				<div id="tags" class="checklist"></div>
+			</section>
+
+			<!-- Отдельного фильтра по повторам франшиз здесь нет: он повторял то,
+			     что и так стоит на карточках. Нажатие на повтор в самой карточке
+			     по-прежнему показывает все паки с этой франшизой, а снять отбор
+			     можно ярлыком над выдачей. -->
+
+			<!-- Чёрный список отсюда убран: он живёт в профиле, вместе с остальным
+			     личным. В колонке фильтров ему было не место — снимать оттуда лишнее
+			     приходится редко, а места он занимал столько же, сколько настоящие
+			     фильтры, которыми пользуются каждый раз. -->
+
+			<button id="reset" class="button button--ghost">Сбросить фильтры</button>
 		</aside>
 	</main>
 
+	<!-- Порядок важен: карточки и библиотека объявляют то, чем пользуется профиль
+	     (facets, user, createCard, mountLibrary), — и объявляют один раз на всех.
+	     Сама библиотека здесь себя не заводит: списки открывает профиль, по нажатию
+	     вкладки (см. конец web/app.js). -->
+	<script>window.libraryEmbedded = true;</script>
 	<script src="/common.js"></script>
 	<script src="/icons.js"></script>
+	<script src="/card.js"></script>
+	<script src="/app.js"></script>
 	<script src="/profile.js"></script>
 </body>
 </html>

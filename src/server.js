@@ -1402,10 +1402,15 @@ function matchList(data) {
  * Обратный ход: по ключам паков — их названия и авторы. Нужен вывозу списка
  * оттуда, где отметки лежат в самом браузере: там от пака известен один ключ,
  * а в файл идёт то, что человек прочитает.
+ *
+ * Указатель назван прямо (INDEXED BY): ключ пака — выражение, а не колонка,
+ * и без указателя такой поиск означает обход всей таблицы с подъёмом каждой
+ * строки целиком. Тот же приём и по той же причине стоит наверху
+ * (см. packsByKeys в cf/src/library.js), а сам указатель заводит src/db.js.
  */
 const packsByKeys = keys => db.prepare(`
 	SELECT p.name, p.authors, MIN(p.id) AS id, ${PACK_KEY_SQL} AS pack_key
-	FROM packages p
+	FROM packages p INDEXED BY ix_packages_pack_key
 	WHERE p.status = 'ok' AND ${PACK_KEY_SQL} IN (${keys.map(() => '?').join(',')})
 	GROUP BY pack_key
 `).all(...keys);
@@ -1423,66 +1428,27 @@ function namePacks(keys) {
 
 // ————— профиль —————
 //
-// Списки профиля ходят страницами, как и выдача библиотеки, и по той же самой
-// причине. Пара сотен отметок — это пара сотен полных паков в одном ответе:
-// описания, раунды, темы, обложки, — и страница «во что я играл» открывалась
-// заметно дольше, чем страница со всей библиотекой сразу. Считается при этом
-// по-прежнему всё: разбивка по сложностям, тематикам и авторам смотрит на весь
-// список целиком, просто смотрит она на четыре поля строки, а не на строку.
-
-/** Сколько паков на странице профиля. Столько же, сколько в библиотеке. */
-const PROFILE_PAGE_SIZE = 24;
+// Списков паков профиль больше не спрашивает вовсе. Сыгранное и запланированное
+// показывает та же выдача, что и библиотеку, — теми же карточками, тем же
+// поиском и той же колонкой фильтров (см. onlyPlayed и onlyPlanned в /api/packages
+// и web/profile.js). Здесь остались только числа: сколько сыграно, на сколько
+// это часов и что из этого видно про вкусы. Считаются они по четырём полям
+// строки, а не по строке целиком: в строке пака лежат разобранные раунды,
+// и весит она в сотню раз больше.
 
 /**
- * Откуда берётся список. Сыгранное и запланированное отличаются только этим:
- * таблицей отметок и тем, что у запланированного пак бывает заодно и сыгранным
- * (сыграли, хотим ещё раз), — а у сыгранного признак «сыграно» стоит по самому
- * его происхождению.
+ * Откуда берётся список. Сыгранное и запланированное отличаются только этим —
+ * таблицей отметок; дома обе лежат по номеру строки, а не по общему ключу пака
+ * (см. cf/schema.sql про то, почему наверху иначе).
  */
 const PROFILE_LISTS = {
-	played: {
-		mark: 'pl',
-		from: 'FROM played pl JOIN packages p ON p.id = pl.package_id',
-		flags: '1 AS played',
-	},
-	planned: {
-		mark: 'pn',
-		from: 'FROM planned pn JOIN packages p ON p.id = pn.package_id LEFT JOIN played pl ON pl.package_id = p.id',
-		flags: '1 AS planned, CASE WHEN pl.package_id IS NULL THEN 0 ELSE 1 END AS played',
-	},
+	played: { mark: 'pl', from: 'FROM played pl JOIN packages p ON p.id = pl.package_id' },
+	planned: { mark: 'pn', from: 'FROM planned pn JOIN packages p ON p.id = pn.package_id' },
 };
 
 /**
- * Страница списка. MIN(marked_at) здесь не только выбирает время, но и решает,
- * какую из копий пака показать: SQLite берёт остальные поля из той же строки,
- * на которой сошёлся минимум. Копии сливаются по идентификатору из самого файла —
- * так же, как их сливает отметка «сыграно» (см. twinPackages).
- */
-function profilePage(list, userId, page) {
-	const { mark, from, flags } = PROFILE_LISTS[list];
-	const offset = (page - 1) * PROFILE_PAGE_SIZE;
-
-	return db.prepare(`
-		SELECT p.*, s.started_games, s.completed_games, s.shown, s.right_percent, s.take_percent, s.level,
-			s.found AS stats_found, ${flags}, MIN(${mark}.marked_at) AS marked_at,
-			r.rating_count, r.rating_average, ${MY_SCORE}
-		${from}
-		LEFT JOIN stats s ON s.package_id = p.id
-		LEFT JOIN (
-			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
-			FROM ratings GROUP BY pack_key
-		) r ON r.pack_key = ${PACK_KEY_SQL}
-		WHERE p.status = 'ok'
-		GROUP BY ${PACK_KEY_SQL}
-		ORDER BY marked_at DESC
-		LIMIT ? OFFSET ?
-	`).all(userId ?? null, PROFILE_PAGE_SIZE, offset)
-		.map(row => ({ ...toPackage(row), markedAt: row.marked_at }));
-}
-
-/**
- * Четыре поля с каждого сыгранного пака — всё, из чего складываются числа
- * профиля. Строка целиком для этого не нужна, а весит она в сотню раз больше.
+ * Четыре поля с каждого отмеченного пака — всё, из чего складываются числа
+ * профиля. Копии одного пака сведены в одну строку: отметка у них общая.
  */
 function profileFacts(list) {
 	const { mark, from } = PROFILE_LISTS[list];
@@ -1498,8 +1464,7 @@ function profileFacts(list) {
 
 /**
  * Списки под вывоз файлом: название, авторы и дата отметки — ровно то, что
- * попадает в файл (см. web/profile.js). Полные паки для этого не нужны, а страниц
- * у вывоза нет: файл собирают целиком, иначе он врёт про то, во что играли.
+ * попадает в файл (см. web/profile.js). Полных паков для этого не нужно.
  */
 function profileNames(list) {
 	const { mark, from } = PROFILE_LISTS[list];
@@ -1518,9 +1483,6 @@ function profileNames(list) {
 	}));
 }
 
-/** Номер страницы из адреса: меньше первой не бывает, буквы считаются за первую. */
-const profilePageNumber = value => Math.max(1, parseInt(value ?? '1', 10) || 1);
-
 /**
  * Профиль: всё, что известно про сыгранное. Копии одного пака считаются за один —
  * отметка ставится сразу на все, и в библиотеке они иначе двоились бы.
@@ -1530,8 +1492,7 @@ const profilePageNumber = value => Math.max(1, parseInt(value ?? '1', 10) || 1);
  * видят все, — и следующим шагом стоит привязать их к тому же user_id.
  */
 function getProfile(userId, query = new URLSearchParams()) {
-	// Вывоз файлом спрашивает то же самое, но целиком и в двух полях: страницами
-	// список сыгранного не вывезешь
+	// Вывоз файлом спрашивает то же самое, но в двух полях и целиком
 	if (query.get('export') === '1') {
 		return { packages: profileNames('played'), planned: profileNames('planned') };
 	}
@@ -1558,9 +1519,6 @@ function getProfile(userId, query = new URLSearchParams()) {
 		}
 	}
 
-	const playedPage = profilePageNumber(query.get('playedPage'));
-	const plannedPage = profilePageNumber(query.get('plannedPage'));
-
 	return {
 		total: facts.length,
 		// Запланированное считается отдельно: числа профиля — про сыгранное,
@@ -1569,10 +1527,6 @@ function getProfile(userId, query = new URLSearchParams()) {
 		questions,
 		levels,
 		topics,
-		pageSize: PROFILE_PAGE_SIZE,
-		playedPage,
-		plannedPage,
-		planned: profilePage('planned', userId, plannedPage),
 		// Личный чёрный список: показать его больше негде, а снимать оттуда
 		// как-то надо — на карточках спрятанного по определению не видно
 		blacklist: userId ? listBlacklist(userId) : [],
@@ -1582,7 +1536,6 @@ function getProfile(userId, query = new URLSearchParams()) {
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, 12)
 			.map(([name, count]) => ({ name, count })),
-		packages: profilePage('played', userId, playedPage),
 	};
 }
 

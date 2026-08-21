@@ -99,6 +99,50 @@ const countWord = count => (facetCounts ? `среди отобранных ${cou
 // (/pack/…), и второго описания у неё быть не должно. Оттуда же приезжают facets,
 // user, отметки «сыграно» и чёрный список — всё, что нужно и выдаче, и той странице.
 
+/**
+ * Библиотекой пользуется не одна страница. Те же карточки, та же колонка
+ * фильтров и тот же поиск стоят в списках профиля — «Сыграно» и «Запланировано»
+ * там не свой урезанный список, а эта самая выдача с выставленным отбором
+ * (см. web/profile.js). Второго описания у карточек и фильтров быть не должно:
+ * разойдись они, и один и тот же пак выглядел бы на двух страницах по-разному.
+ *
+ * Отсюда две вещи, которые страница о себе сообщает.
+ */
+
+/**
+ * Где стоит поле поиска. В библиотеке ищет то самое поле, что в шапке;
+ * в профиле шапка по-прежнему уводит в библиотеку, а по своим спискам ищет
+ * отдельное поле над ними — их там два, и это нарочно.
+ */
+const SEARCH = window.libraryEmbedded
+	? { form: 'listSearchBox', input: 'listSearch' }
+	: { form: 'searchBox', input: 'search' };
+
+/**
+ * Отбор, который на этой странице снять нельзя: 'played', 'planned' или null.
+ * В библиотеке его нет, а в профиле им заведует вкладка — список «Сыграно»
+ * это выдача с onlyPlayed, и «Сбросить фильтры» посреди него должно возвращать
+ * к этому списку, а не ко всей библиотеке.
+ */
+let pinned = null;
+
+/**
+ * Закрепить отбор за страницей и выставить его. Галочки «Отметки» при этом
+ * остаются на месте, но в профиле их не видно: то же самое сказано вкладкой,
+ * а два места, говорящие одно и то же, рано или поздно скажут разное.
+ */
+function pinMarks(mark) {
+	pinned = mark;
+
+	state.hidePlayed = false;
+	state.onlyPlayed = mark === 'played';
+	state.onlyPlanned = mark === 'planned';
+
+	$('hidePlayed').checked = false;
+	$('onlyPlayed').checked = state.onlyPlayed;
+	$('onlyPlanned').checked = state.onlyPlanned;
+}
+
 const LEVEL_ORDER = [4, 3, 2, 1];
 
 /**
@@ -825,9 +869,9 @@ function countActiveFilters() {
 		+ (state.franchise ? 1 : 0)
 		+ (state.subject ? 1 : 0)
 		+ (state.author ? 1 : 0)
-		+ (state.hidePlayed || state.onlyPlayed || !serverMarks() ? 0 : 1)
-		+ (state.onlyPlayed ? 1 : 0)
-		+ (state.onlyPlanned ? 1 : 0)
+		+ (pinned || state.hidePlayed || state.onlyPlayed || !serverMarks() ? 0 : 1)
+		+ (state.onlyPlayed && pinned !== 'played' ? 1 : 0)
+		+ (state.onlyPlanned && pinned !== 'planned' ? 1 : 0)
 		+ (state.lowRepeats ? 1 : 0)
 		+ (state.lowSpecials ? 1 : 0)
 		+ (state.noFranchise ? 1 : 0)
@@ -906,7 +950,7 @@ async function load(started = null) {
 	renderTags();
 
 	if (data.packages.length === 0) {
-		grid.append(element('div', 'empty', 'Ничего не нашлось. Попробуйте ослабить фильтры.'));
+		grid.append(element('div', 'empty', emptyText()));
 		$('resultInfo').textContent = 'Найдено: 0';
 		renderPager(0);
 		return;
@@ -928,6 +972,23 @@ async function load(started = null) {
 }
 
 /**
+ * Что написать вместо пустой выдачи. В библиотеке ответ один — отбор оказался
+ * слишком узким. В профиле пустым бывает и сам список, и тогда «ослабьте
+ * фильтры» отвечает не на тот вопрос: фильтров человек не ставил, а паков нет
+ * потому, что он ещё ничего не отметил, — и сказать надо, чем отмечают.
+ */
+function emptyText() {
+	if (!pinned || state.search || countActiveFilters() > 0) {
+		return 'Ничего не нашлось. Попробуйте ослабить фильтры.';
+	}
+
+	return pinned === 'planned'
+		? 'Здесь собираются паки, отложенные на будущее. Отложить можно в библиотеке — '
+			+ 'кнопкой «Запланировать» на карточке.'
+		: 'Здесь появятся паки, отмеченные сыгранными. Отметить можно в библиотеке — кнопкой на карточке.';
+}
+
+/**
  * Начать поиск тем, что набрано в поле. Зовётся по нажатию «Найти» и по Enter,
  * а не на каждую букву: см. форму поиска в index.html.
  *
@@ -939,7 +1000,7 @@ async function load(started = null) {
  * не по чему.
  */
 function submitSearch() {
-	const text = $('search').value.trim();
+	const text = $(SEARCH.input).value.trim();
 
 	if (text === state.search) {
 		return;
@@ -972,7 +1033,7 @@ function renderSortDirection() {
 }
 
 function bind() {
-	$('searchBox').addEventListener('submit', event => {
+	$(SEARCH.form).addEventListener('submit', event => {
 		event.preventDefault();
 		submitSearch();
 	});
@@ -980,8 +1041,8 @@ function bind() {
 	// Крестик внутри поля (type="search") очищает его молча, без Enter, — и поиск
 	// после этого сбрасывается сам: оставлять выдачу отобранной по запросу,
 	// которого в поле уже нет, значит врать про неё
-	$('search').addEventListener('search', () => {
-		if ($('search').value.trim() === '') {
+	$(SEARCH.input).addEventListener('search', () => {
+		if ($(SEARCH.input).value.trim() === '') {
 			submitSearch();
 		}
 	});
@@ -1111,7 +1172,7 @@ function resetFilters() {
 	state.dir = 'desc';
 	state.page = 1;
 
-	$('search').value = '';
+	$(SEARCH.input).value = '';
 	$('hidePlayed').checked = true;
 	$('onlyPlayed').checked = false;
 	$('onlyPlanned').checked = false;
@@ -1119,6 +1180,12 @@ function resetFilters() {
 	$('subjectSearch').value = '';
 	$('sort').value = 'added';
 	$('dir').value = 'desc';
+
+	// «Сбросить» возвращает страницу к тому, как она открывается, — а в профиле
+	// она открывается списком той вкладки, на которой стоят
+	if (pinned) {
+		pinMarks(pinned);
+	}
 
 	renderChecks();
 	renderLevels();
@@ -1190,7 +1257,7 @@ function readUrlState() {
 		state.sort = 'relevance';
 	}
 
-	$('search').value = state.search;
+	$(SEARCH.input).value = state.search;
 	$('sort').value = state.sort;
 	renderSortDirection();
 	$('onlyPlanned').checked = state.onlyPlanned;
@@ -1305,11 +1372,30 @@ async function start() {
 		facets = await (await fetch('/api/facets')).json();
 	}
 
+	await mountLibrary(packages);
+}
+
+/**
+ * Завести библиотеку на уже готовых настройках: колонка фильтров, сортировка,
+ * поиск и первая выдача. Отдельно от start() потому, что добывают настройки
+ * страницы по-разному — библиотека начинает ходки ещё в вёрстке, а профиль
+ * открывает списки по нажатию вкладки, — а вот собирается из них всё одинаково.
+ *
+ * @param {Promise<Response>|object|null} packages уже начатый запрос выдачи
+ *   или готовый ответ; null — спросить самим
+ */
+async function mountLibrary(packages = null) {
 	// Шапка тут та же, что и на всех остальных страницах, и наполняется она общим
 	// кодом (см. renderTopbar в common.js). Своё в ней ровно одно: «Обновить базу»
 	// целится в выбранного автора, когда выдача отобрана по нему
 	renderTopbar(facets);
 	aimUpdateLink();
+
+	// Сортировка в списке и сортировка в state должны совпадать с первого мига:
+	// в библиотеке их сводит разбор адреса, а профиль открывает списки без него
+	$('sort').value = state.sort;
+	$('dir').value = state.dir;
+	renderSortDirection();
 
 	renderChecks();
 	renderLevels();
@@ -1324,4 +1410,9 @@ async function start() {
 	await load(packages);
 }
 
-start();
+// Библиотека заводится сама только на своей странице. В профиле её списки
+// открываются по нажатию вкладки, и заводит их профиль — со своими настройками
+// и своим закреплённым отбором (см. mountLibrary выше и web/profile.js).
+if (!window.libraryEmbedded) {
+	start();
+}

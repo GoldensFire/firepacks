@@ -255,10 +255,22 @@ export function packKey(row) {
 	return id ? `${id}\n${(row.name ?? '').trim()}` : String(row.id);
 }
 
-export const PACK_KEY_SQL = `CASE
-	WHEN COALESCE(TRIM(p.pack_id), '') = '' THEN CAST(p.id AS TEXT)
-	ELSE TRIM(p.pack_id) || CHAR(10) || TRIM(COALESCE(p.name, ''))
+const packKeySql = prefix => `CASE
+	WHEN COALESCE(TRIM(${prefix}pack_id), '') = '' THEN CAST(${prefix}id AS TEXT)
+	ELSE TRIM(${prefix}pack_id) || CHAR(10) || TRIM(COALESCE(${prefix}name, ''))
 END`;
+
+export const PACK_KEY_SQL = packKeySql('p.');
+
+/**
+ * Тот же ключ без имени таблицы — таким его записывают в указатель.
+ *
+ * Указатель по выражению SQLite заводит только на колонках самой таблицы,
+ * без всяких «p.», а вот в запросе то же выражение стоит уже с именем: разбор
+ * запроса сводит одно к другому, и указатель находится. Записаны они всё-таки
+ * порознь, потому что порознь и читаются: одно — база, другое — запрос.
+ */
+export const PACK_KEY_INDEX_SQL = packKeySql('');
 
 /**
  * Какая часть вопросов пака приходится на повторы франшиз — тем же счётом,

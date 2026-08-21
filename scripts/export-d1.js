@@ -33,7 +33,7 @@
 //
 // Когда всё равно выкладывается всё целиком:
 //   • первый раз — отпечатков ещё нет;
-//   • после правки схемы — в D1 не хватает новой колонки, и одними INSERT
+//   • после правки таблиц — в D1 не хватает новой колонки, и одними INSERT
 //     туда не попасть;
 //   • по ключу --full — например, если базу в Cloudflare завели заново.
 
@@ -207,12 +207,23 @@ function schemaOf(db, table) {
 	const { sql } = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table);
 
 	const indexes = db.prepare(`
-		SELECT sql FROM sqlite_master
+		SELECT name, sql FROM sqlite_master
 		WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL
 		ORDER BY name
-	`).all(table).map(index => index.sql);
+	`).all(table);
 
 	return { table: sql, indexes };
+}
+
+/** Имена указателей, записанные прошлой выкладкой. Испорченное читается как пустое. */
+function nameList(value) {
+	try {
+		const parsed = JSON.parse(value ?? '[]');
+
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
 }
 
 /** То же, но с «если ещё нет»: повторная заливка не должна спотыкаться. */
@@ -266,7 +277,7 @@ function main() {
 		db.exec('INSERT INTO d1_sync (tbl, row_id, hash) SELECT tbl, row_id, hash FROM d1_pending');
 		db.exec('DELETE FROM d1_pending');
 
-		// Отпечаток схемы — туда же и по той же причине. Пока он ставился прямо
+		// Отпечатки схемы и указателей — туда же и по той же причине. Пока он ставился прямо
 		// при выгрузке, одна сорвавшаяся выкладка калечила все следующие: схема
 		// наверху оставалась старой, а база уже считала, что сообщила о новой,
 		// и вместо «выложить целиком» собирала CREATE TABLE IF NOT EXISTS —
@@ -274,12 +285,19 @@ function main() {
 		// этого падала на первом же паке («table packages has no column named …»),
 		// и сама выправиться не могла: каждая следующая выгрузка приходила
 		// к тому же выводу.
-		db.exec(`
-			INSERT OR REPLACE INTO d1_meta (key, value)
-			SELECT 'schema', value FROM d1_meta WHERE key = 'schema_pending'
-		`);
+		for (const key of ['tables', 'indexes', 'index_names']) {
+			db.prepare(`
+				INSERT OR REPLACE INTO d1_meta (key, value)
+				SELECT ?, value FROM d1_meta WHERE key = ?
+			`).run(key, `${key}_pending`);
 
-		db.exec(`DELETE FROM d1_meta WHERE key = 'schema_pending'`);
+			db.prepare(`DELETE FROM d1_meta WHERE key = ?`).run(`${key}_pending`);
+		}
+
+		// Отпечаток по старым правилам — таблицы вместе с указателями. Сравнивать
+		// его больше не с чем, и лежать ему незачем.
+		db.exec(`DELETE FROM d1_meta WHERE key IN ('schema', 'schema_pending')`);
+
 		console.log('Отмечено: выгруженное доехало.');
 		db.close();
 		return;
@@ -289,8 +307,22 @@ function main() {
 	fs.mkdirSync(outPath, { recursive: true });
 
 	const schemas = Object.fromEntries(TABLES.map(table => [table, schemaOf(db, table)]));
-	const schemaHash = digest(TABLES.map(table => [schemas[table].table, ...schemas[table].indexes].join('\n')).join('\n'));
-	const knownSchema = db.prepare(`SELECT value FROM d1_meta WHERE key = 'schema'`).get()?.value ?? null;
+
+	// Отпечатка два, и это не мелочь. Новая колонка в таблице значит «выкладывай
+	// всё заново»: наверху её нет, и одними INSERT туда не попасть. Новый указатель
+	// не значит ничего подобного — CREATE INDEX IF NOT EXISTS уходит наверх в конце
+	// каждой выгрузки, любой. А считался он до сих пор той же «правкой схемы»
+	// и тянул за собой всю базу вставками ради одной строчки DDL.
+	const tableHash = digest(TABLES.map(table => schemas[table].table).join('\n'));
+	const indexes = TABLES.flatMap(table => schemas[table].indexes);
+	const indexHash = digest(indexes.map(index => index.sql).join('\n'));
+	// Ключ 'tables' новый: под старыми правилами тот же отпечаток лежал в 'schema'
+	// и считался вместе с указателями, то есть с нынешним не сравним никак.
+	// Пустое значение здесь читается как «неизвестно» и полной выкладки не требует —
+	// таблицы от разделения отпечатка не изменились, а изменись они по-настоящему,
+	// это была бы уже другая правка, со своим новым отпечатком таблиц.
+	const knownTables = db.prepare(`SELECT value FROM d1_meta WHERE key = 'tables'`).get()?.value ?? null;
+	const knownIndexes = db.prepare(`SELECT value FROM d1_meta WHERE key = 'indexes'`).get()?.value ?? null;
 	const synced = db.prepare('SELECT COUNT(*) AS c FROM d1_sync').get().c;
 
 	const reasons = [];
@@ -303,7 +335,7 @@ function main() {
 		reasons.push('наверху ещё ничего нашего нет');
 	}
 
-	if (knownSchema !== null && knownSchema !== schemaHash) {
+	if (knownTables !== null && knownTables !== tableHash) {
 		reasons.push('поменялась схема таблиц');
 	}
 
@@ -453,17 +485,36 @@ function main() {
 	// вставка перестраивала бы их по ходу дела. Наверху они дороже, чем дома, —
 	// там прочитанные строки идут по тарифу (см. db.js).
 
-	for (const table of TABLES) {
-		for (const sql of schemas[table].indexes) {
-			writer.write(`${ifMissing(sql)};\n`);
+	// Указатель, у которого поменялось само описание, «если ещё нет» не заменит:
+	// наверху уже лежит указатель с этим именем, и CREATE молча ничего не сделает.
+	// Поэтому при любой правке набора он сносится и ставится заново — и сносятся
+	// заодно те, которых у нас больше нет. Строк это не читает и не пишет:
+	// указатель считается из таблицы, а таблица наверху и так уже лежит.
+	// Пока набор тот же — не трогаем ничего.
+	if (knownIndexes !== null && knownIndexes !== indexHash && !whole) {
+		const known = nameList(db.prepare(`SELECT value FROM d1_meta WHERE key = 'index_names'`).get()?.value);
+		const gone = known.filter(name => !indexes.some(index => index.name === name));
+
+		for (const name of [...gone, ...indexes.map(index => index.name)]) {
+			writer.write(`DROP INDEX IF EXISTS ${name};\n`);
 		}
+
+		report.push(`  указатели: перекладываются заново (${indexes.length}), сносится лишних ${gone.length}`);
+	}
+
+	for (const index of indexes) {
+		writer.write(`${ifMissing(index.sql)};\n`);
 	}
 
 	writer.flush();
 
 	// Заявка, а не отметка: настоящей она станет в --commit, когда выгруженное
 	// действительно доедет. До тех пор наверху, по нашим сведениям, прежняя схема.
-	db.prepare(`INSERT OR REPLACE INTO d1_meta (key, value) VALUES ('schema_pending', ?)`).run(schemaHash);
+	const claim = db.prepare(`INSERT OR REPLACE INTO d1_meta (key, value) VALUES (?, ?)`);
+
+	claim.run('tables_pending', tableHash);
+	claim.run('indexes_pending', indexHash);
+	claim.run('index_names_pending', JSON.stringify(indexes.map(index => index.name)));
 	const pending = db.prepare('SELECT COUNT(*) AS c FROM d1_pending').get().c;
 	db.close();
 

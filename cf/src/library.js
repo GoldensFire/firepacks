@@ -1302,9 +1302,11 @@ export async function namePacks(db, keys) {
 		return [];
 	}
 
+	// INDEXED BY — по той же причине, что и в packsByKeys: без него D1 обходит
+	// всю таблицу паков, считая ключ у каждой строки
 	const results = await db.batch(chunk(wanted).map(part => db.prepare(`
 		SELECT p.name, p.authors, ${PACK_KEY_SQL} AS pack_key
-		FROM packages p
+		FROM packages p INDEXED BY ix_packages_pack_key
 		WHERE p.status = 'ok' AND ${PACK_KEY_SQL} IN (${part.map(() => '?').join(',')})
 		GROUP BY pack_key
 	`).bind(...part)));
@@ -1454,122 +1456,120 @@ export async function setPlannedKeys(db, userId, keys, planned, times = {}) {
 
 // ————— профиль —————
 //
-// Списки профиля ходят страницами, как и выдача библиотеки, и по той же самой
-// причине. Пара сотен отметок — это пара сотен полных паков в одном ответе:
-// описания, раунды, темы, — и страница «во что я играл» открывалась заметно
-// дольше, чем страница со всей библиотекой сразу. Здесь у этого есть и вторая
-// цена: у D1 прочитанные строки считаны по тарифу, а разбивке по сложностям
-// и тематикам от строки нужно четыре поля, а не вся она.
+// Списков паков профиль больше не спрашивает вовсе. Сыгранное и запланированное
+// показывает та же выдача, что и библиотеку, — теми же карточками, тем же
+// поиском и той же колонкой фильтров (см. onlyPlayed и onlyPlanned в /api/packages
+// и web/profile.js). Здесь остались только числа: сколько сыграно, на сколько
+// это часов и что из этого видно про вкусы.
+//
+// ————— почему это спрашивается в два хода —————
+//
+// Ключ пака — не колонка, а выражение (см. PACK_KEY_SQL): один и тот же файл
+// нередко выложен в обсуждение не по разу и лежит в базе несколькими строками
+// с разными номерами, а отметка у него одна на все копии.
+//
+// Соединять по выражению SQLite умеет, но только обходом: на «FROM played
+// JOIN packages ON <ключ> = pack_key» он обходит всю таблицу паков, считая
+// ключ у каждой из пятнадцати тысяч строк, — и делает это ради двух сотен
+// отметок. Строка при этом поднимается целиком, вместе с разобранными раундами:
+// ключ считается из pack_id и name, указателем этого не покрыть. Профиль
+// спрашивал так четырежды за одно открытие, и страница «во что я играл»
+// открывалась секундами — а у D1 прочитанные строки ещё и считаны по тарифу.
+//
+// Указатель по этому выражению теперь есть (ix_packages_pack_key, см. src/db.js),
+// но годится он только там, где ключ сравнивается с подставленным значением:
+// «<ключ> IN (?, ?, …)». В соединении SQLite его не берёт вовсе — ни прямом,
+// ни через подзапрос: проверено на настоящей базе, план остаётся обходом.
+//
+// Отсюда два хода: сперва ключи из самих отметок (там свой указатель, и читаются
+// только строки этого человека), потом паки по этим ключам — пачками по столько,
+// сколько подстановок разрешает D1 (см. chunk в src/packlist.js).
+//
+// ————— почему указатель назван прямо —————
+//
+// INDEXED BY в packsByKeys стоит не для красоты. Дома, где по базе прошёлся
+// ANALYZE, SQLite выбирает этот указатель сам. В D1 таблицу никто не мерил —
+// sqlite_stat1 там пуст, — и планировщик гадает по своим умолчаниям: сравнение
+// «status = 'ok'» кажется ему отбором не хуже, чем поиск по ключу, и он берёт
+// ix_packages_status, то есть обходит всю базу.
+//
+// Разница на живом сайте: 11 583 прочитанных строки и 33 мс против 366 строк
+// и 5 мс на тех же девяноста ключах. Прочитанные строки у D1 идут по тарифу,
+// поэтому здесь не «примерно одинаково», а в тридцать раз дешевле.
 
-/** Сколько паков на странице профиля. Столько же, сколько в библиотеке. */
-const PROFILE_PAGE_SIZE = 24;
+/** Откуда берутся отметки. Имя таблицы подставляется в запрос, и списком оно не случайно. */
+const MARK_TABLES = { played: 'played', planned: 'planned' };
 
 /**
- * Откуда берётся список. Сыгранное и запланированное отличаются только этим:
- * таблицей отметок и тем, что у запланированного пак бывает заодно и сыгранным
- * (сыграли, хотим ещё раз), — а у сыгранного признак «сыграно» стоит по самому
- * его происхождению.
+ * Ключи отметок этого человека, свежие впереди. Читается по первичному ключу
+ * (user_id, pack_key) — чужих строк отсюда не поднимается ни одной.
  */
-const PROFILE_LISTS = {
-	played: {
-		mark: 'pl',
-		from: 'FROM played pl JOIN packages p ON ${KEY} = pl.pack_key',
-		flags: '1 AS played',
-	},
-	planned: {
-		mark: 'pn',
-		from: 'FROM planned pn JOIN packages p ON ${KEY} = pn.pack_key'
-			+ ' LEFT JOIN played pl ON pl.pack_key = pn.pack_key AND pl.user_id = pn.user_id',
-		flags: '1 AS planned, CASE WHEN pl.pack_key IS NULL THEN 0 ELSE 1 END AS played',
-	},
-};
-
-const profileFrom = list => PROFILE_LISTS[list].from.replace('${KEY}', PACK_KEY_SQL);
-
-/** Номер страницы из адреса: меньше первой не бывает, буквы считаются за первую. */
-const profilePageNumber = value => Math.max(1, parseInt(value ?? '1', 10) || 1);
-
-/**
- * Страница списка. Пак, выложенный в обсуждение дважды, лежит в базе двумя
- * строками, а отметка у него одна на обе: показать надо одну карточку, а не две
- * одинаковых. Этим и занят MIN(p.id) — он не просто выбирает номер, а решает,
- * из какой строки взять остальные поля: SQLite берёт их с той строки, на которой
- * сошёлся минимум.
- */
-async function profilePage(db, list, userId, page, counts) {
-	const { mark, flags } = PROFILE_LISTS[list];
-
+async function markKeys(db, list, userId) {
 	const { results } = await db.prepare(`
-		SELECT p.*, ${STATS_FIELDS}, ${flags}, ${mark}.marked_at AS marked_at, MIN(p.id) AS chosen_id,
-			r.rating_count, r.rating_average, ${MY_SCORE}
-		${profileFrom(list)}
-		LEFT JOIN stats s ON s.package_id = p.id
-		LEFT JOIN (
-			SELECT pack_key, COUNT(*) AS rating_count, AVG(score) AS rating_average
-			FROM ratings GROUP BY pack_key
-		) r ON r.pack_key = ${mark}.pack_key
-		WHERE p.status = 'ok' AND ${mark}.user_id = ?
-		GROUP BY ${mark}.pack_key
-		ORDER BY ${mark}.marked_at DESC
-		LIMIT ? OFFSET ?
-	`).bind(userId, userId, PROFILE_PAGE_SIZE, (page - 1) * PROFILE_PAGE_SIZE).all();
+		SELECT pack_key, marked_at FROM ${MARK_TABLES[list]} WHERE user_id = ? ORDER BY marked_at DESC
+	`).bind(userId).all();
 
-	return results.map(row => ({ ...toPackage(row, counts), markedAt: row.marked_at }));
+	return results ?? [];
 }
 
 /**
- * Четыре поля с каждого сыгранного пака — всё, из чего складываются числа
+ * Паки по ключам, пачками. Копии одного пака сводятся в одну строку: MIN(p.id)
+ * не просто выбирает номер, а решает, с какой строки взять остальные поля —
+ * SQLite берёт их с той, на которой сошёлся минимум.
+ *
+ * @param {string} fields что выбрать у пака, кроме самого ключа
+ */
+async function packsByKeys(db, keys, fields, join = '') {
+	const wanted = [...new Set(keys)];
+
+	if (wanted.length === 0) {
+		return [];
+	}
+
+	const results = await db.batch(chunk(wanted).map(part => db.prepare(`
+		SELECT ${PACK_KEY_SQL} AS pack_key, ${fields}, MIN(p.id) AS chosen_id
+		FROM packages p INDEXED BY ix_packages_pack_key
+		${join}
+		WHERE p.status = 'ok' AND ${PACK_KEY_SQL} IN (${part.map(() => '?').join(',')})
+		GROUP BY pack_key
+	`).bind(...part)));
+
+	return results.flatMap(result => result.results ?? []);
+}
+
+/**
+ * Четыре поля с каждого отмеченного пака — всё, из чего складываются числа
  * профиля. Строка целиком для этого не нужна, а весит она в сотню раз больше.
  */
-async function profileFacts(db, list, userId) {
-	const { mark } = PROFILE_LISTS[list];
-
-	const { results } = await db.prepare(`
-		SELECT p.question_count, p.authors, p.primary_topic, s.level, MIN(p.id) AS chosen_id
-		${profileFrom(list)}
-		LEFT JOIN stats s ON s.package_id = p.id
-		WHERE p.status = 'ok' AND ${mark}.user_id = ?
-		GROUP BY ${mark}.pack_key
-	`).bind(userId).all();
-
-	return results;
-}
-
-/** Сколько паков в списке. Нужно вкладке — число на ней стоит до того, как её открыли. */
-async function profileCount(db, list, userId) {
-	const { mark } = PROFILE_LISTS[list];
-
-	const row = await db.prepare(`
-		SELECT COUNT(DISTINCT ${mark}.pack_key) AS total
-		${profileFrom(list)}
-		WHERE p.status = 'ok' AND ${mark}.user_id = ?
-	`).bind(userId).first();
-
-	return row?.total ?? 0;
-}
+const packFacts = (db, keys) => packsByKeys(
+	db,
+	keys,
+	'p.question_count, p.authors, p.primary_topic, s.level',
+	'LEFT JOIN stats s ON s.package_id = p.id',
+);
 
 /**
- * Списки под вывоз файлом: название, авторы и дата отметки — ровно то, что
- * попадает в файл (см. web/profile.js). Полные паки для этого не нужны, а страниц
- * у вывоза нет: файл собирают целиком, иначе он врёт про то, во что играли.
+ * Названия и авторы отмеченных паков — ровно то, что попадает в файл списка
+ * (см. web/profile.js). Порядок тот же, что у отметок: файл читают глазами,
+ * и сверху должно стоять недавнее.
+ *
+ * Отметки, которым в библиотеке уже ничего не соответствует, выпадают: назвать
+ * такой пак в файле нечем.
  */
-async function profileNames(db, list, userId) {
-	const { mark } = PROFILE_LISTS[list];
+async function namedMarks(db, marks) {
+	const rows = await packsByKeys(db, marks.map(mark => mark.pack_key), 'p.name, p.file_name, p.authors');
+	const byKey = new Map(rows.map(row => [row.pack_key, row]));
 
-	const { results } = await db.prepare(`
-		SELECT p.name, p.file_name, p.authors, ${mark}.marked_at AS marked_at, MIN(p.id) AS chosen_id
-		${profileFrom(list)}
-		WHERE p.status = 'ok' AND ${mark}.user_id = ?
-		GROUP BY ${mark}.pack_key
-		ORDER BY ${mark}.marked_at DESC
-	`).bind(userId).all();
+	return marks.flatMap(mark => {
+		const row = byKey.get(mark.pack_key);
 
-	return results.map(row => ({
-		name: row.name,
-		fileName: row.file_name,
-		authors: splitAuthors(jsonOrDefault(row.authors, [])),
-		markedAt: row.marked_at,
-	}));
+		return row ? [{
+			name: row.name,
+			fileName: row.file_name,
+			authors: splitAuthors(jsonOrDefault(row.authors, [])),
+			markedAt: mark.marked_at,
+		}] : [];
+	});
 }
 
 /**
@@ -1577,39 +1577,32 @@ async function profileNames(db, list, userId) {
  * отметка ставится сразу на все, и в библиотеке они иначе двоились бы.
  */
 export async function getProfile(db, userId, blacklist, query = new URLSearchParams()) {
-	const empty = query.get('export') === '1'
-		? { packages: [], planned: [] }
-		: {
-			total: 0, plannedTotal: 0, questions: 0, levels: {}, topics: {},
-			pageSize: PROFILE_PAGE_SIZE, playedPage: 1, plannedPage: 1,
-			planned: [], blacklist: [], favouriteAuthors: [], packages: [],
-		};
+	const exporting = query.get('export') === '1';
 
 	if (!userId) {
-		return empty;
+		return exporting
+			? { packages: [], planned: [] }
+			: { total: 0, plannedTotal: 0, questions: 0, levels: {}, topics: {}, blacklist: [], favouriteAuthors: [] };
 	}
 
-	// Вывоз файлом спрашивает то же самое, но целиком и в двух полях: страницами
-	// список сыгранного не вывезешь
-	if (query.get('export') === '1') {
-		const [packages, planned] = await Promise.all([
-			profileNames(db, 'played', userId),
-			profileNames(db, 'planned', userId),
-		]);
+	const [played, planned] = await Promise.all([
+		markKeys(db, 'played', userId),
+		markKeys(db, 'planned', userId),
+	]);
 
-		return { packages, planned };
+	// Вывоз файлом спрашивает то же самое, но в двух полях и целиком: список
+	// сыгранного страницами не вывезешь
+	if (exporting) {
+		const [packages, plannedNames] = await Promise.all([namedMarks(db, played), namedMarks(db, planned)]);
+
+		return { packages, planned: plannedNames };
 	}
 
-	const playedPage = profilePageNumber(query.get('playedPage'));
-	const plannedPage = profilePageNumber(query.get('plannedPage'));
-
-	const counts = await authorPackCounts(db);
-
-	const [facts, plannedTotal, packages, planned] = await Promise.all([
-		profileFacts(db, 'played', userId),
-		profileCount(db, 'planned', userId),
-		profilePage(db, 'played', userId, playedPage, counts),
-		profilePage(db, 'planned', userId, plannedPage, counts),
+	const [facts, plannedFacts] = await Promise.all([
+		packFacts(db, played.map(mark => mark.pack_key)),
+		// Число на вкладке — про паки, а не про отметки: пак мог уйти из библиотеки,
+		// а отметка на него остаться, и обещать список длиннее, чем он есть, незачем
+		packsByKeys(db, planned.map(mark => mark.pack_key), 'p.id'),
 	]);
 
 	const levels = {};
@@ -1634,14 +1627,10 @@ export async function getProfile(db, userId, blacklist, query = new URLSearchPar
 
 	return {
 		total: facts.length,
-		plannedTotal,
+		plannedTotal: plannedFacts.length,
 		questions,
 		levels,
 		topics,
-		pageSize: PROFILE_PAGE_SIZE,
-		playedPage,
-		plannedPage,
-		planned,
 		// Личный чёрный список: показать его больше негде, а снимать оттуда
 		// как-то надо — на карточках спрятанного по определению не видно
 		blacklist,
@@ -1651,6 +1640,5 @@ export async function getProfile(db, userId, blacklist, query = new URLSearchPar
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, 12)
 			.map(([name, count]) => ({ name, count })),
-		packages,
 	};
 }

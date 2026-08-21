@@ -1,34 +1,44 @@
-// Профиль: библиотека сыгранного и что из неё видно про вкусы владельца.
+// Профиль: кто ты, во что играл и что из этого видно про вкусы.
+//
+// Страница открывается собой — именем, числами, полосой времени и разбивкой
+// по сложностям и типам паков. Списки паков лежат за вкладками рядом и грузятся
+// по нажатию: раньше они занимали страницу целиком, а сам профиль ютился
+// в колонке справа, и открытие «моего профиля» начиналось с двух сотен карточек,
+// которые никто не просил.
+//
+// ————— списки —————
+//
+// «Сыграно» и «Запланировано» здесь не свой урезанный список, а та же выдача,
+// которой живёт библиотека: те же карточки со всем, что на них есть, тот же
+// поиск, та же колонка фильтров справа. Заводится она отсюда, с закреплённым
+// отбором — onlyPlayed или onlyPlanned (см. pinMarks и mountLibrary в web/app.js).
+//
+// До этого профиль рисовал карточки сам, и они были короче библиотечных: без
+// оценки, без долей тематик, без повторов, без кнопки «спрятать». Второе описание
+// одного и того же всегда расходится с первым, и разошлось оно ровно так.
 //
 // Имя берётся из Discord, если человек вошёл. Без входа остаётся прежняя подпись
 // из localStorage: сайт задумывался как локальный, и требовать учётную запись
 // ради страницы «во что я играл» не за что.
-//
-// Отметки «сыграно» при этом по-прежнему принадлежат всей установке целиком,
-// а не конкретному человеку, — в отличие от оценок и чёрного списка, у которых
-// хозяин есть. На хостинге это заметно, и привязать их к user_id стоит следующим шагом.
 
 'use strict';
 
-const LEVEL_ORDER = [4, 3, 2, 1];
-/** Порядок тот же, что в колонке фильтров библиотеки (см. web/app.js). */
-const TOPIC_ORDER = ['mixed', 'anime', 'manga', 'games', 'movies', 'cartoons', 'books', 'comics', 'music', 'sport', 'unknown'];
-
-const EXTRA_TOPICS = {
-	mixed: { name: 'Солянка', packName: 'Солянка' },
-	unknown: { name: 'Без разметки', packName: 'Без разметки' },
-};
+// LEVEL_ORDER и TOPIC_ORDER объявляет библиотека, topicInfo и EXTRA_TOPICS —
+// карточка, а facets с user общие на весь сайт (см. web/card.js и web/common.js).
+// Своих копий здесь нет нарочно: разойдись они, и один и тот же тип пака
+// назывался бы на двух страницах по-разному.
 
 /** Как человек себя назвал. Ничего, кроме подписи, за этим именем не стоит. */
 const NAME_KEY = 'firepacks.profile.name';
 
 /**
  * По столько секунд считается каждый вопрос сыгранного пака. Число взято не
- * из статистики, а из здравого смысла: вопрос читают, думают над ним и отвечают,
- * и на круг это выходит примерно четверть минуты. Настоящей длительности игры
- * сайт не знает и знать не может — он видит только файлы паков.
+ * из статистики, а из здравого смысла: вопрос читают, думают над ним, отвечают,
+ * спорят с ответом и записывают очки, — и на круг это выходит треть минуты.
+ * Настоящей длительности игры сайт не знает и знать не может: он видит только
+ * файлы паков.
  */
-const SECONDS_PER_QUESTION = 15;
+const SECONDS_PER_QUESTION = 20;
 
 /**
  * Ступени полосы времени. Стоят они на равном расстоянии друг от друга, а не
@@ -57,33 +67,35 @@ const DURATION_UNITS = [
 	{ seconds: 60, one: 'минута', few: 'минуты', many: 'минут' },
 ];
 
-let facets = null;
+/** Числа профиля и чёрный список: всё, что отвечает /api/profile. */
 let profile = null;
 
 /**
- * Какая вкладка открыта: 'planned' или 'played'. Переживает перерисовку страницы.
+ * Что открыто. Переживает перерисовку страницы и стоит в адресе: ссылка на свои
+ * планы должна открывать планы, а не профиль с планами за вкладкой.
  *
- * Запланированное открыто по умолчанию, но счётчик «Сыграно» в шапке (см.
- * renderTopbarCounters в web/common.js) ведёт сразу на сыгранное — заглянуть
- * в запланированное после клика по чужому числу было бы лишним шагом.
+ * Профиль открыт по умолчанию — за ним сюда и приходят. Счётчик «Сыграно»
+ * в шапке (см. renderTopbarCounters в web/common.js) по-прежнему ведёт сразу
+ * на сыгранное: тот, кто нажал на число, просит список, а не разбивку.
  */
-let tab = new URLSearchParams(window.location.search).get('tab') === 'played' ? 'played' : 'planned';
+const TABS = {
+	profile: { button: 'tabProfile', panel: 'profilePanel' },
+	planned: { button: 'tabPlanned', panel: 'listPanel' },
+	played: { button: 'tabPlayed', panel: 'listPanel' },
+	banPacks: { button: 'tabBanPacks', panel: 'banPacksPanel' },
+	banAuthors: { button: 'tabBanAuthors', panel: 'banAuthorsPanel' },
+};
+
+const askedTab = new URLSearchParams(window.location.search).get('tab');
+
+let tab = Object.hasOwn(TABS, askedTab ?? '') ? askedTab : 'profile';
 
 /**
- * Какие страницы списков открыты. Паки приезжают по две дюжины за раз — столько
- * же, сколько в библиотеке, — и по той же причине: две сотни отметок это две
- * сотни полных паков в одном ответе, и страница «во что я играл» открывалась
- * дольше, чем страница со всей библиотекой сразу.
- *
- * Числа профиля от этого не пострадали: сложности, тематики и авторы по-прежнему
- * считаются по всему сыгранному — просто считает их сервер (см. getProfile).
+ * Заведена ли уже библиотека под списки. Заводится она один раз и лениво:
+ * до первого открытия списка ходить за выдачей незачем, а после — незачем
+ * заводить её заново, переключение вкладки это просто другой отбор.
  */
-const pages = { played: 1, planned: 1 };
-
-const topicInfo = key => facets.topicNames[key] ?? EXTRA_TOPICS[key] ?? { name: key, packName: key };
-
-/** Кто вошёл через Discord, или null. */
-let user = null;
+let listMounted = false;
 
 /**
  * Шапка профиля. У вошедшего это имя и аватар из Discord, менять их здесь нечего:
@@ -161,79 +173,102 @@ function bindWho() {
 }
 
 /**
- * Личный чёрный список целиком — и единственное место, где он есть: в библиотеке
- * его больше нет ни в колонке фильтров, ни где-либо ещё. Спрятанные паки уходят
- * из выдачи при первом же обновлении страницы, и вернуть их можно только отсюда.
+ * Личные чёрные списки — паки и авторы порознь, по вкладке на каждый.
+ *
+ * Порознь потому, что это и есть два разных списка: спрятанный пак уходит
+ * из выдачи один, спрятанный автор уносит с собой все свои. Вместе они читались
+ * одной кучей значков, где не видно, чего в ней больше.
+ *
+ * Вкладок нет вовсе у того, кому прятать нечем: без входа на общем сайте
+ * чёрного списка не существует.
  */
 function renderBlacklist() {
-	const block = $('blacklistBlock');
 	const items = profile.blacklist ?? [];
 
 	// Без входа список тоже бывает: на своей машине он принадлежит установке,
 	// как и отметки «сыграно» (см. config.localBlacklist)
-	const visible = Boolean(user) || facets?.localBlacklist === true;
+	const visible = serverMarks();
 
-	block.hidden = !visible;
+	for (const [kind, box, button, count, empty] of [
+		['pack', 'blacklist', 'tabBanPacks', 'tabBanPacksCount', 'Спрятанных паков пока нет.'],
+		['author', 'blacklistAuthors', 'tabBanAuthors', 'tabBanAuthorsCount', 'Спрятанных авторов пока нет.'],
+	]) {
+		const mine = items.filter(item => (kind === 'author' ? item.kind === 'author' : item.kind !== 'author'));
 
-	if (!visible) {
-		return;
-	}
+		$(button).hidden = !visible;
+		$(count).textContent = formatNumber(mine.length);
 
-	const box = $('blacklist');
-	box.textContent = '';
+		const container = $(box);
+		container.textContent = '';
 
-	if (items.length === 0) {
-		box.append(element('p', 'hint', 'Пока пусто.'));
-		return;
-	}
+		if (mine.length === 0) {
+			container.append(element('p', 'hint', empty));
+			continue;
+		}
 
-	for (const item of items) {
-		const chip = element('span', 'profile__chip');
-		chip.append(iconText(item.kind === 'author' ? 'user' : 'box', item.label));
-
-		const remove = element('button', 'chip-x', '✕');
-		remove.type = 'button';
-		remove.title = 'Вернуть в выдачу';
-		remove.addEventListener('click', async () => {
-			remove.disabled = true;
-
-			await fetch('/api/blacklist', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ kind: item.kind, value: item.value, blacklisted: false }),
-			});
-
-			await refresh();
-		});
-
-		chip.append(remove);
-		box.append(chip);
+		for (const item of mine) {
+			container.append(createBanChip(item));
+		}
 	}
 }
 
-/** Крупные числа профиля: сколько всего сыграно и что за этим стоит. */
+/** Одна строка чёрного списка: что спрятано и крестик, который это возвращает. */
+function createBanChip(item) {
+	const chip = element('span', 'profile__chip');
+	chip.append(iconText(item.kind === 'author' ? 'user' : 'box', item.label));
+
+	const remove = element('button', 'chip-x', '✕');
+	remove.type = 'button';
+	remove.title = 'Вернуть в выдачу';
+	remove.addEventListener('click', async () => {
+		remove.disabled = true;
+
+		await fetch('/api/blacklist', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ kind: item.kind, value: item.value, blacklisted: false }),
+		});
+
+		await refresh();
+	});
+
+	chip.append(remove);
+	return chip;
+}
+
+/**
+ * Крупные числа профиля: сколько всего сыграно и что за этим стоит. Два из трёх —
+ * кнопки: за числом «205 паков сыграно» стоит список, и ходить за ним к вкладкам,
+ * когда число под рукой, незачем.
+ */
 function renderNumbers() {
 	const box = $('numbers');
 	box.textContent = '';
 
-	const played = profile.total;
+	const played = profile.total ?? 0;
+	const planned = profile.plannedTotal ?? 0;
 	const share = facets.total > 0 ? Math.round((played / facets.total) * 100) : 0;
 
-	const add = (value, label, title) => {
-		const item = element('div', 'profile__number');
+	const add = (value, label, title, goes = null) => {
+		const item = element(goes ? 'button' : 'div', goes ? 'profile__number profile__number--link' : 'profile__number');
 		item.append(element('span', 'profile__number-value', value), element('span', 'profile__number-label', label));
 		item.title = title;
+
+		if (goes) {
+			item.type = 'button';
+			item.addEventListener('click', () => openTab(goes));
+		}
+
 		box.append(item);
 	};
 
 	add(formatNumber(played), plural(played, 'пак сыгран', 'пака сыграно', 'паков сыграно'),
-		'Копии одного и того же пака считаются за один');
+		'Открыть список сыгранного. Копии одного и того же пака считаются за один', 'played');
+	add(formatNumber(planned), plural(planned, 'пак в планах', 'пака в планах', 'паков в планах'),
+		'Открыть список отложенного на будущее', 'planned');
 	add(`${share}%`, 'от всей библиотеки', `Всего в библиотеке ${formatNumber(facets.total)} паков`);
 	add(formatNumber(profile.questions), plural(profile.questions, 'вопрос', 'вопроса', 'вопросов'),
 		'Столько вопросов лежит в сыгранных паках — не столько прозвучало за столом');
-
-	// Числа «в планах» здесь больше нет: оно стоит прямо на вкладке
-	// «Запланировано» и повторять его в колонке незачем
 }
 
 /**
@@ -274,9 +309,9 @@ function formatDuration(seconds) {
  * с отметками — пройденные помечены галочкой, — и заполняется по отрезкам:
  * внутри отрезка заливка идёт ровно, а сами отрезки одной ширины (см. TIME_MARKS).
  *
- * Считается это всё по 15 секунд на вопрос, и число получается заведомо
- * приблизительное. Поэтому у подписи есть подсказка, где расчёт назван прямо:
- * человек должен видеть, что перед ним прикидка, а не показания секундомера.
+ * Считается это всё по SECONDS_PER_QUESTION на вопрос, и число получается
+ * заведомо приблизительное. Поэтому у подписи есть подсказка, где расчёт назван
+ * прямо: человек должен видеть, что перед ним прикидка, а не показания секундомера.
  */
 function renderTime() {
 	const questions = profile.questions;
@@ -338,37 +373,100 @@ function renderTime() {
 	}
 }
 
+/** Числа на вкладках. Стоят там до того, как вкладку открыли, — за тем и нужны. */
+function renderTabCounts() {
+	$('tabPlannedCount').textContent = formatNumber(profile?.plannedTotal ?? 0);
+	$('tabPlayedCount').textContent = formatNumber(profile?.total ?? 0);
+}
+
 /**
- * Вкладки «Запланировано» и «Сыграно». Списки эти нужны порознь: вместе они
- * на всю библиотеку длиной, и второй всё равно оказывался за краем экрана.
+ * Показать то, что выбрано. Колонка фильтров при этом появляется и пропадает
+ * вместе со списками: в самом профиле и в чёрных списках фильтровать нечего,
+ * а пустая колонка сбоку выглядит поломкой.
  */
 function renderTabs() {
-	const counts = {
-		planned: profile?.plannedTotal ?? 0,
-		played: profile?.total ?? 0,
-	};
-
-	$('tabPlannedCount').textContent = formatNumber(counts.planned);
-	$('tabPlayedCount').textContent = formatNumber(counts.played);
-
-	for (const [key, button, panel] of [
-		['planned', $('tabPlanned'), $('plannedBlock')],
-		['played', $('tabPlayed'), $('playedBlock')],
-	]) {
+	for (const [key, { button, panel }] of Object.entries(TABS)) {
 		const active = key === tab;
 
-		button.classList.toggle('tab--active', active);
-		button.setAttribute('aria-selected', String(active));
-		panel.hidden = !active;
+		$(button).classList.toggle('tab--active', active);
+		$(button).setAttribute('aria-selected', String(active));
+		// Панель у списков одна на две вкладки: показать её надо, если открыта
+		// любая из них, а спрятать — только когда обе закрыты
+		$(panel).hidden = true;
 	}
+
+	$(TABS[tab].panel).hidden = false;
+
+	const list = tab === 'played' || tab === 'planned';
+
+	$('filters').hidden = !list;
+	$('page').classList.toggle('layout--filters', list);
+}
+
+/**
+ * Открыть вкладку. Списки при этом заводятся лениво и один раз: до первого
+ * открытия ходить за выдачей незачем, а дальше переключение — это просто другой
+ * закреплённый отбор, и перезаводить ради него всю библиотеку не за чем.
+ */
+async function openTab(key) {
+	tab = key;
+
+	const url = new URL(window.location.href);
+
+	if (key === 'profile') {
+		url.searchParams.delete('tab');
+	} else {
+		url.searchParams.set('tab', key);
+	}
+
+	window.history.replaceState({}, '', url);
+	renderTabs();
+
+	if (key !== 'played' && key !== 'planned') {
+		return;
+	}
+
+	// Отбирает по отметкам база, а до входа они лежат в самом браузере: списка
+	// у сервера нет, и притворяться, что он пуст, нельзя — это разные вещи
+	if (!serverMarks()) {
+		showListLocked();
+		return;
+	}
+
+	if (!listMounted) {
+		listMounted = true;
+		pinMarks(key);
+		await mountLibrary();
+		return;
+	}
+
+	pinMarks(key);
+	state.page = 1;
+	renderActiveFilters();
+	load();
+}
+
+/**
+ * Что показать вместо списка тому, кто не вошёл. Отметки у него есть — они лежат
+ * в самом браузере (см. web/common.js), — но отбирать по ним умеет только база,
+ * и молчать об этом нельзя: человек, отметивший вчера десяток паков, решит,
+ * что они пропали.
+ */
+function showListLocked() {
+	$('grid').textContent = '';
+	$('resultInfo').textContent = '';
+	$('pager').textContent = '';
+	$('filters').hidden = true;
+	$('page').classList.remove('layout--filters');
+
+	$('grid').append(element('div', 'empty',
+		'Списками заведует база, а до входа отметки живут в самом браузере и до неё не доходят. '
+		+ 'Войдите через Discord — они переедут в учётную запись, и списки заработают.'));
 }
 
 function bindTabs() {
-	for (const [key, button] of [['planned', $('tabPlanned')], ['played', $('tabPlayed')]]) {
-		button.addEventListener('click', () => {
-			tab = key;
-			renderTabs();
-		});
+	for (const [key, { button }] of Object.entries(TABS)) {
+		$(button).addEventListener('click', () => openTab(key));
 	}
 }
 
@@ -416,21 +514,22 @@ function renderBreakdown(containerId, order, counts, info, href) {
 }
 
 function renderAuthors() {
-	const authors = profile.favouriteAuthors;
+	const authors = profile.favouriteAuthors ?? [];
+
+	$('authorsBlock').hidden = authors.length === 0;
 
 	if (authors.length === 0) {
 		return;
 	}
 
-	$('authorsBlock').hidden = false;
-	const box = $('authors');
+	const box = $('favouriteAuthors');
 	box.textContent = '';
 
 	for (const author of authors) {
 		const chip = element('a', 'profile__chip');
-		// hidePlayed=0 — потому что вся эта страница про сыгранное, а библиотека
-		// сыгранное по умолчанию прячет: без приписки под числом «сыграно 7 паков
-		// этого автора» открывалась бы выдача, где именно этих семи и нет
+		// hidePlayed=0 — потому что эта строка про сыгранное, а библиотека сыгранное
+		// по умолчанию прячет: без приписки под числом «сыграно 7 паков этого автора»
+		// открывалась бы выдача, где именно этих семи и нет
 		chip.href = `/?author=${encodeURIComponent(author.name)}&hidePlayed=0`;
 		chip.append(
 			element('span', null, author.name),
@@ -441,245 +540,11 @@ function renderAuthors() {
 	}
 }
 
-/**
- * Карточка сыгранного пака. Короче, чем в библиотеке: здесь уже не выбирают,
- * во что играть, а вспоминают, во что играли, — значит, важны название, когда
- * это было, и возможность вернуться к паку или снять отметку.
- */
-function createCard(pack, options = {}) {
-	const planned = options.planned === true;
-	const card = element('div', 'card card--clickable');
-
-	// Карточка целиком ведёт на страницу пака — как и в библиотеке (см. card.js).
-	// Кнопки внизу до этого обработчика не доходят: они останавливают событие
-	// сами, а здесь их всего две и обе — <button>.
-	card.addEventListener('click', event => {
-		if (event.target.closest('a, button')) {
-			return;
-		}
-
-		window.location.href = pack.slug ? `/pack/${pack.id}-${pack.slug}` : `/pack/${pack.id}`;
-	});
-
-	const head = element('div', 'card__head');
-	head.append(createLogo(pack));
-
-	const titleBox = element('div', 'card__title');
-	titleBox.append(element('h3', 'card__name', pack.name ?? pack.fileName ?? 'Без названия'));
-
-	if (pack.authors.length > 0) {
-		titleBox.append(element('p', 'card__authors', pack.authors.join(', ')));
-	}
-
-	const badges = element('div', 'badges');
-	const level = pack.stats?.level ?? null;
-
-	badges.append(level
-		? element('span', `badge badge--${pack.stats.levelKey}`, pack.stats.levelName)
-		: element('span', 'badge badge--none', 'Нет оценки'));
-
-	if (pack.primaryTopic) {
-		const info = topicInfo(pack.primaryTopic);
-		const badge = element('span', `badge badge--topic topic--${pack.primaryTopic}`);
-		badge.append(topicIcon(pack.primaryTopic), element('span', null, info.packName));
-		badges.append(badge);
-	}
-
-	titleBox.append(badges);
-	head.append(titleBox);
-	card.append(head);
-
-	const meta = element('div', 'meta');
-
-	if (pack.markedAt) {
-		const date = iconText(planned ? 'bookmark' : 'check', new Date(pack.markedAt).toLocaleDateString('ru-RU'), 'meta__date');
-		date.title = planned ? 'Когда пак отложили на будущее' : 'Когда пак был отмечен сыгранным';
-		meta.append(date);
-	}
-
-	if (pack.questionCount) {
-		const questions = iconText('question', pack.questionCount);
-		questions.title = `Вопросов в паке: ${pack.questionCount}`;
-		meta.append(questions);
-	}
-
-	if (pack.specialCount !== null && pack.specialCount !== undefined) {
-		const specials = iconText('special', pack.specialCount);
-		specials.title = `Спецвопросов: ${pack.specialCount}`;
-		meta.append(specials);
-	}
-
-	if (pack.stats?.startedGames) {
-		const games = iconText('gamepad', formatNumber(pack.stats.startedGames));
-		games.title = 'Сколько раз пак запускали по данным статистики SIGame';
-		meta.append(games);
-	}
-
-	const size = formatSize(pack.size);
-
-	if (size) {
-		meta.append(iconText('box', size));
-	}
-
-	card.append(meta);
-
-	const actions = element('div', 'card__actions');
-	actions.append(createPlayLink(pack, facets.playerUri));
-
-	// У запланированного пака второе действие своё: не «убрать из сыгранного»,
-	// а «сыграно» — за него как раз садятся, и отметка сама уберёт его из планов
-	// (см. setPlayed на сервере). Передумать можно третьей кнопкой.
-	if (planned) {
-		const done = element('button', 'button', 'Сыграно');
-		done.type = 'button';
-		done.title = 'Отметить сыгранным. Из запланированного пак при этом уйдёт';
-		done.addEventListener('click', () => mark(done, '/api/played', { id: pack.id, played: true }));
-
-		const forget = element('button', 'button button--ghost', 'Убрать из планов');
-		forget.type = 'button';
-		forget.addEventListener('click', () => mark(forget, '/api/planned', { id: pack.id, planned: false }));
-
-		actions.append(done, forget);
-		card.append(actions);
-
-		return card;
-	}
-
-	const remove = element('button', 'button', 'Убрать из сыгранного');
-	remove.type = 'button';
-	remove.addEventListener('click', () => mark(remove, '/api/played', { id: pack.id, played: false }));
-
-	actions.append(remove);
-	card.append(actions);
-
-	return card;
-}
-
-/** Отметка со страницы профиля: отправить и перечитать страницу целиком. */
-async function mark(button, url, body) {
-	button.disabled = true;
-
-	try {
-		await fetch(url, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body),
-		});
-
-		await refresh();
-	} catch {
-		button.disabled = false;
-	}
-}
-
-/**
- * Запланированное: паки, отобранные на будущий вечер, — за этим страницу
- * и открывают чаще всего, поэтому список стоит выше сыгранного.
- *
- * Без входа на общем сайте отметок здесь нет: они лежат в самом браузере,
- * а страница показывает то, что знает сервер (то же самое, что и с сыгранным).
- */
-/**
- * Один из двух списков профиля. Устроены они одинаково — сетка карточек, строка
- * «показаны такие-то из стольких-то» и кнопки страниц, — и различаются только
- * тем, что в них лежит и что написано в пустом.
- *
- * @param {string} list 'played' или 'planned'
- * @param {object} nodes на чём рисовать: сетка, строка над ней, кнопки страниц
- * @param {string} empty что написать, когда список пуст
- * @param {Function} tail чем закончить строку над списком, если есть чем
- */
-function renderList(list, nodes, empty, tail = null) {
-	const packs = (list === 'planned' ? profile.planned : profile.packages) ?? [];
-	const total = (list === 'planned' ? profile.plannedTotal : profile.total) ?? 0;
-	const grid = $(nodes.grid);
-	const info = $(nodes.info);
-
-	grid.textContent = '';
-	info.textContent = '';
-
-	if (total === 0) {
-		// Без входа отметки лежат в самом браузере и до профиля не доходят: он
-		// показывает то, что знает сервер. Сказать об этом надо здесь — иначе
-		// человек, отметивший вчера десяток паков, решит, что они пропали.
-		const anonymous = !user && facets.localBlacklist !== true;
-
-		grid.append(element('div', 'empty', anonymous
-			? `${empty.what} Пока входа нет, отметки живут в самом браузере и сюда не попадают: `
-				+ 'войдите через Discord — они переедут в учётную запись.'
-			: `${empty.what} ${empty.how}`));
-
-		$(nodes.pager).textContent = '';
-		return;
-	}
-
-	const pageSize = profile.pageSize ?? packs.length;
-
-	// Последний пак со страницы могли только что убрать — тогда страницы с таким
-	// номером больше нет, и стоять на ней значит смотреть в пустоту
-	if (packs.length === 0) {
-		pages[list] = Math.max(1, Math.ceil(total / pageSize));
-		refresh();
-		return;
-	}
-
-	for (const pack of packs) {
-		grid.append(createCard(pack, { planned: list === 'planned' }));
-	}
-
-	const from = (pages[list] - 1) * pageSize + 1;
-
-	info.append(document.createTextNode(`Показаны ${from}–${from + packs.length - 1} из ${total}, ${empty.order}`));
-
-	if (tail) {
-		tail(info);
-	}
-
-	renderPages($(nodes.pager), {
-		page: pages[list],
-		pageSize,
-		total,
-		onGo: page => {
-			pages[list] = page;
-			refresh();
-		},
-	});
-}
-
-/**
- * Запланированное: паки, отобранные на будущий вечер, — за этим страницу
- * и открывают чаще всего, поэтому список стоит первой вкладкой.
- */
-function renderPlanned() {
-	renderList('planned', { grid: 'plannedGrid', info: 'plannedInfo', pager: 'plannedPager' }, {
-		what: 'Здесь собираются паки, отложенные на будущее.',
-		how: 'Отложить можно в библиотеке — кнопкой «Запланировать» на карточке.',
-		order: 'сначала отложенные недавно',
-	}, info => {
-		// Ссылка в библиотеку с уже выставленным отбором: здесь список целиком,
-		// а там по нему можно искать теми же фильтрами, что и по всей базе.
-		// hidePlayed=0 — чтобы список и там остался целым: отложить можно и сыгранный
-		// пак, а библиотека сыгранное по умолчанию прячет
-		const inLibrary = element('a', null, 'показать в библиотеке');
-		inLibrary.href = '/?onlyPlanned=1&hidePlayed=0';
-
-		info.append(document.createTextNode(' · '), inLibrary);
-	});
-}
-
-function renderLibrary() {
-	renderList('played', { grid: 'grid', info: 'resultInfo', pager: 'pager' }, {
-		what: 'Здесь появятся паки, отмеченные сыгранными.',
-		how: 'Отметить можно в библиотеке — кнопкой на карточке.',
-		order: 'сначала недавние',
-	});
-}
-
 // ————— список файлом —————
 //
 // Формат описан там, где его читает сервер (см. src/packlist.js).
-// Здесь только два конца: собрать файл из того, что показано на странице,
-// и отдать принесённый файл серверу — опознать паки по названиям.
+// Здесь только два конца: собрать файл из того, что знает сервер,
+// и отдать принесённый файл ему же — опознать паки по названиям.
 
 const LIST_FORMAT = 'sigame-pack-list';
 const LIST_VERSION = 1;
@@ -695,9 +560,8 @@ const LIST_VERSION = 1;
 const listFileName = () => `sifirepacks-${new Date().toISOString().slice(0, 10)}.json`;
 
 /**
- * Записи файла из того, что знает страница. Порядок тот же, что в списках:
- * сначала недавнее — файл читают глазами, и сверху должно стоять то же самое,
- * что стоит сверху на странице.
+ * Записи файла. Порядок тот же, что в списках: сначала недавнее — файл читают
+ * глазами, и сверху должно стоять то же самое, что стоит сверху на странице.
  */
 function buildList(played, planned) {
 	const entry = (pack, kind) => ({
@@ -721,11 +585,9 @@ function buildList(played, planned) {
 
 /**
  * Что вывозить. У вошедшего (и дома, где отметки принадлежат установке) списки
- * знает сервер, и спрашиваются они целиком: на странице их видно по две дюжины,
- * а файл со страницы сыгранного врал бы про то, во что играли. До входа на общем
- * сайте отметки лежат в браузере одними ключами, и названия к ним приходится
- * спрашивать отдельно — в файл идёт то, что человек прочитает, а не
- * «b88b8a6e…\nАниме пак № 5».
+ * знает сервер, и спрашиваются они целиком. До входа на общем сайте отметки лежат
+ * в браузере одними ключами, и названия к ним приходится спрашивать отдельно —
+ * в файл идёт то, что человек прочитает, а не «b88b8a6e…\nАниме пак № 5».
  */
 async function collectList() {
 	if (serverMarks()) {
@@ -891,19 +753,15 @@ function bindList() {
 }
 
 /**
- * Перечитать страницу целиком. Зовётся и при открытии, и после каждой отметки,
- * и при переходе на другую страницу списка: ответ теперь весит две дюжины паков,
- * и разбирать, что именно из него менять, дороже, чем перерисовать всё.
+ * Перечитать профиль: числа, разбивку и чёрные списки. Зовётся при открытии
+ * страницы и после каждой правки — ввоза списка файлом, возврата из чёрного
+ * списка. Ответ здесь короткий: паков в нём нет ни одного, они приезжают
+ * выдачей (см. getProfile в cf/src/library.js).
  */
 async function refresh() {
-	const query = new URLSearchParams({
-		playedPage: String(pages.played),
-		plannedPage: String(pages.planned),
-	});
-
 	[facets, profile] = await Promise.all([
 		fetch('/api/facets').then(r => r.json()),
-		fetch(`/api/profile?${query}`).then(r => r.json()),
+		fetch('/api/profile').then(r => r.json()),
 	]);
 
 	user = facets.user ?? null;
@@ -912,30 +770,47 @@ async function refresh() {
 	renderWho();
 	renderNumbers();
 	renderTime();
-	renderTabs();
+	renderTabCounts();
 
-	renderBreakdown('levels', LEVEL_ORDER, profile.levels,
+	renderBreakdown('playedLevels', LEVEL_ORDER, profile.levels,
 		key => ({ name: facets.levelNames[key].name, className: `level--${facets.levelNames[key].key}` }),
 		key => `/?levels=${key}&hidePlayed=0`);
 
 	// Здесь стоит вопрос «сколько паков какого типа сыграно», и отвечает на него
 	// packName — «Аниме-пак», а не «Аниме» (то же правило, что в web/app.js)
-	renderBreakdown('topics', TOPIC_ORDER, profile.topics,
+	renderBreakdown('playedTopics', TOPIC_ORDER, profile.topics,
 		key => ({ name: topicInfo(key).packName, iconNode: topicIcon(key), className: `topic--${key}` }),
 		key => `/?topic=${encodeURIComponent(key)}&hidePlayed=0`);
 
 	renderAuthors();
 	renderBlacklist();
-	renderPlanned();
-	renderLibrary();
+
+	// Список уже открыт и на нём что-то отметили — перечитаем и его: числа
+	// на вкладках уже новые, и списку отставать от них незачем
+	if (listMounted && (tab === 'played' || tab === 'planned')) {
+		load();
+	}
 }
 
-// Имя и аватар ставятся дважды: сразу — из localStorage, чтобы страница не начиналась
-// с пустой шапки, и ещё раз в refresh(), когда станет известно, вошёл ли кто-нибудь
-renderWho();
-bindWho();
-bindTabs();
-bindList();
-bindTopbarSearch();
-renderTabs();
-refresh();
+async function start() {
+	// Имя ставится дважды: сразу — из localStorage, чтобы страница не начиналась
+	// с пустой шапки, и ещё раз в refresh(), когда станет известно, вошёл ли кто
+	renderWho();
+	bindWho();
+	bindTabs();
+	bindList();
+	bindTopbarSearch();
+	loadLocalMarks();
+	renderTabs();
+
+	await refresh();
+
+	// Вкладку могли попросить прямо адресом — /profile?tab=played из шапки.
+	// Открываем её только теперь: до ответа не известно даже, есть ли чем
+	// отбирать по отметкам
+	if (tab !== 'profile') {
+		await openTab(tab);
+	}
+}
+
+start();

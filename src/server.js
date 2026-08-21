@@ -118,6 +118,10 @@ const SORTS = {
 	comics: shareOf('comics'),
 	music: shareOf(MUSIC_KEY),
 	franchise: 'COALESCE(p.franchise_top_share, -1)',
+	// Какая часть тем пака уже стояла в чужих паках. Паки без метки уходят
+	// в конец при любом направлении: у них не «ноль процентов», а «ничего
+	// заметного не нашлось», и притворяться нулём им незачем
+	plagiarism: 'COALESCE(p.plagiarism_share, -1)',
 	// Паки без нужного числа оценок сортировать не по чему: они уходят в конец,
 	// а не притворяются нулями — иначе «по оценке» ставило бы неоценённые
 	// впереди тех, у кого оценка есть, но низкая.
@@ -500,8 +504,26 @@ function buildWhere(query, userId) {
 	// вопросы. Метку ставит шаг plagiarism (см. src/plagiarism.js), и слова
 	// «плагиат» галочка не говорит нарочно — правило не отличает вора
 	// от соавтора, а выдача не суд.
+	//
+	// Нижняя ступень метки (`partial`) сюда не попадает: пак, где чужого треть,
+	// копией не является, и прятать его под этой подписью было бы обманом.
+	// На него отвечает соседний порог по доле.
 	if (query.get('hidePlagiarism') === '1') {
-		conditions.push('p.plagiarism_kind IS NULL');
+		conditions.push(`COALESCE(p.plagiarism_kind, '') NOT IN ('pack', 'compiled')`);
+	}
+
+	// …и он сам: «покажи паки, где чужого не меньше вот стольких процентов».
+	// Отдельно от галочки нарочно — вопросы разные. Галочка прячет, этот порог
+	// показывает: им library просматривают нарочно, разбираясь, кто у кого берёт,
+	// и он же кормит сортировку по доле заимствованного.
+	//
+	// Ниже plagiarismPartialShare доля в базе не записана вовсе, и это не потеря:
+	// одна совпавшая тема на тридцать — совпадение, а не находка (см. settings.js).
+	const minPlagiarism = Number(query.get('minPlagiarism'));
+
+	if (Number.isFinite(minPlagiarism) && minPlagiarism > 0) {
+		conditions.push('p.plagiarism_share >= ?');
+		params.push(minPlagiarism);
 	}
 
 	// У пака без разобранных вопросов доли нет вовсе, и «мало» про него сказать
@@ -655,7 +677,7 @@ function countLevels(query, userId) {
  */
 const NARROWING = [
 	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
-	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism',
+	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism', 'minPlagiarism',
 	'showBlacklisted',
 ];
 

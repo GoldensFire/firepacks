@@ -30,10 +30,13 @@ const WINDOW_ATTEMPTS = 3;
  * это дорого: одна оборванная страница означала брошенную тему целиком и тысячи
  * ненайденных паков (см. readTopic).
  */
-export async function callVk(method, params, attempt = 1, attempts = CALL_ATTEMPTS) {
+export async function callVk(method, params, attempt = 1, attempts = CALL_ATTEMPTS, asUser = false) {
 	const query = new URLSearchParams({
 		...params,
-		access_token: config.vkToken,
+		// Пользовательский ключ берётся только там, где его прямо просят,
+		// и только если он есть. Нет его — идём с сервисным и получаем от ВК
+		// внятный отказ вместо тихой поломки (см. vkUserToken в config.js)
+		access_token: (asUser && config.vkUserToken) || config.vkToken,
 		v: config.vkApiVersion,
 	});
 
@@ -51,7 +54,7 @@ export async function callVk(method, params, attempt = 1, attempts = CALL_ATTEMP
 	} catch (error) {
 		if (attempt < attempts) {
 			await sleep(config.vkDelayMs * attempt * 2);
-			return callVk(method, params, attempt + 1, attempts);
+			return callVk(method, params, attempt + 1, attempts, asUser);
 		}
 
 		throw new Error(`не дозвонились до VK API: ${error.message}`);
@@ -60,7 +63,7 @@ export async function callVk(method, params, attempt = 1, attempts = CALL_ATTEMP
 	// 5xx у ВК — обычное дело под нагрузкой, и это не отказ, а «зайдите попозже»
 	if (response.status >= 500 && attempt < attempts) {
 		await sleep(config.vkDelayMs * attempt * 2);
-		return callVk(method, params, attempt + 1, attempts);
+		return callVk(method, params, attempt + 1, attempts, asUser);
 	}
 
 	let data;
@@ -70,7 +73,7 @@ export async function callVk(method, params, attempt = 1, attempts = CALL_ATTEMP
 	} catch (error) {
 		if (attempt < attempts) {
 			await sleep(config.vkDelayMs * attempt * 2);
-			return callVk(method, params, attempt + 1, attempts);
+			return callVk(method, params, attempt + 1, attempts, asUser);
 		}
 
 		throw new Error(`VK API ответил не по-человечески (HTTP ${response.status}): ${error.message}`);
@@ -81,12 +84,15 @@ export async function callVk(method, params, attempt = 1, attempts = CALL_ATTEMP
 
 		if ((code === 6 || code === 9 || code === 10 || code === 1) && attempt < attempts) {
 			await sleep(config.vkDelayMs * attempt * 2);
-			return callVk(method, params, attempt + 1, attempts);
+			return callVk(method, params, attempt + 1, attempts, asUser);
 		}
 
 		const hints = {
 			5: 'ключ не подошёл: он истёк или скопирован с ошибкой',
 			15: 'нет доступа: сервисного ключа мало, нужен пользовательский токен',
+			// 28 приходит ровно от одного метода — docs.getById, — и приходит
+			// не «иногда», а всегда, пока в data/vk-user-token.txt пусто
+			28: 'сервисному ключу этот метод недоступен: нужен пользовательский, data/vk-user-token.txt',
 			29: 'исчерпан суточный лимит метода',
 		};
 
@@ -487,17 +493,86 @@ export async function* readTopicSince(topicUrl, since, options = {}) {
 	}
 }
 
-/**
- * Свежая ссылка на документ. Ссылки из API подписаны и со временем перестают работать,
- * поэтому постоянным считается только ключ вида doc123_456.
- */
-export async function refreshDocumentUrl(sourceKey) {
-	const match = /^doc(-?\d+)_(\d+)$/.exec(sourceKey);
+/** Есть ли пользовательский ключ — тот, без которого docs.getById не работает. */
+export function hasVkUserToken() {
+	return Boolean(config.vkUserToken);
+}
 
-	if (!match) {
-		return null;
+/**
+ * Сколько документов ВК отдаёт за один вызов docs.getById. Столько и берём:
+ * вся база — это 114 вызовов вместо 11 397.
+ */
+const DOCS_PER_CALL = 100;
+
+/** Ключ документа вида doc123_456 в то, что понимает docs.getById: «123_456». */
+const documentId = sourceKey => /^doc(-?\d+)_(\d+)$/.exec(sourceKey)?.slice(1, 3).join('_') ?? null;
+
+/**
+ * Свежие ссылки на документы — пачкой.
+ *
+ * Ссылки, которые ВК отдаёт в обсуждении, подписаны и живут недолго: через
+ * несколько недель по такой ссылке приезжает не файл, а HTML или 404 (см.
+ * DeadLinkError в src/zip.js). Постоянен у документа только ключ вида
+ * doc123_456 — из него и берётся свежая ссылка.
+ *
+ * Пачкой, а не по одному, потому что метод это умеет, а поход к ВК стоит
+ * от полусекунды до трёх независимо от того, один в нём документ или сотня.
+ * Обновить ссылки всей библиотеки — это 114 вызовов и пара минут; по одному
+ * это было бы 11 397 вызовов и полдня.
+ *
+ * Ключ нужен пользовательский: сервисному ВК отвечает «method is unavailable
+ * with service token» и ничего не отдаёт (см. vkUserToken в config.js).
+ * Отсутствие ключа здесь молча не проглатывается — ошибка нужна вслух, иначе
+ * протухшая ссылка выглядела бы «просто мёртвым паком».
+ *
+ * @param {string[]} sourceKeys ключи документов, любое число
+ * @returns {Promise<Map<string, string>>} ключ → свежая ссылка. Документа,
+ *          который ВК не отдал (удалён, скрыт), в ответе просто нет
+ */
+export async function refreshDocumentUrls(sourceKeys) {
+	const wanted = new Map();
+
+	for (const key of sourceKeys) {
+		const id = documentId(key);
+
+		if (id !== null) {
+			wanted.set(id, key);
+		}
 	}
 
-	const docs = await callVk('docs.getById', { docs: `${match[1]}_${match[2]}` });
-	return docs?.[0]?.url ?? null;
+	const fresh = new Map();
+	const ids = [...wanted.keys()];
+
+	for (let from = 0; from < ids.length; from += DOCS_PER_CALL) {
+		const chunk = ids.slice(from, from + DOCS_PER_CALL);
+		const docs = await callVk('docs.getById', { docs: chunk.join(',') }, 1, CALL_ATTEMPTS, true);
+
+		for (const doc of docs ?? []) {
+			// В ответе документ назван парой «владелец и номер», а спрашивали мы
+			// той же парой строкой: собираем её обратно, чтобы разложить ответ
+			// по тем ключам, которыми его просили
+			const key = wanted.get(`${doc.owner_id}_${doc.id}`);
+
+			if (key && doc.url) {
+				fresh.set(key, doc.url);
+			}
+		}
+
+		if (from + DOCS_PER_CALL < ids.length) {
+			await sleep(config.vkDelayMs);
+		}
+	}
+
+	return fresh;
+}
+
+/**
+ * Свежая ссылка на один документ.
+ *
+ * Тонкая обёртка над пачкой, а не отдельный вызов: правило разбора ключа
+ * и раскладки ответа должно быть одно, и пусть оно ходит каждый день, а не
+ * ждёт своего часа в неиспользуемой ветке.
+ */
+export async function refreshDocumentUrl(sourceKey) {
+	return (await refreshDocumentUrls([sourceKey])).get(sourceKey) ?? null;
 }

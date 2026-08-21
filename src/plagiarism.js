@@ -287,7 +287,12 @@ export function reviewPlagiarism(rows, limits) {
 			byDonor.set(donor, (byDonor.get(donor) ?? 0) + 1);
 		}
 
-		if (marks.length / own.length < limits.plagiarismShare) {
+		const share = marks.length / own.length;
+
+		// Ниже нижнего порога пак чист. Одна совпавшая тема на тридцать — это
+		// совпадение, а не находка: заводить из-за неё запись, ярлык и метки
+		// у тем значило бы шуметь на всю библиотеку ради шума
+		if (share < limits.plagiarismPartialShare) {
 			continue;
 		}
 
@@ -295,11 +300,20 @@ export function reviewPlagiarism(rows, limits) {
 		const top = ranked[0][1] / marks.length;
 
 		verdicts.set(entry.id, {
-			// Копия одного пака или солянка из нескольких чужих. Третья ступень —
-			// «заметная доля чужого при своём костяке» — правилом пока не выносится:
-			// порог ей подбирается глазами по улову, а улова на неё ещё не было
-			kind: top >= limits.plagiarismDonorShare ? 'pack' : 'compiled',
-			share: round(marks.length / own.length),
+			// Три ступени, а не «да/нет».
+			//
+			//   pack     — копия: чужого почти всё, и почти всё от одного донора;
+			//   compiled — солянка: чужого почти всё, но собрано из нескольких;
+			//   partial  — заметная доля чужого при своём костяке.
+			//
+			// Разница между первыми двумя не косметическая: у копии один виноватый
+			// и одна ссылка, у солянки их пять, и обещать ей «списано вот отсюда»
+			// значило бы соврать. Третья же — не обвинение вовсе, а наблюдение,
+			// и отбор «без копий чужих паков» её не трогает
+			kind: share < limits.plagiarismShare
+				? 'partial'
+				: (top >= limits.plagiarismDonorShare ? 'pack' : 'compiled'),
+			share: round(share),
 			borrowed: marks.length,
 			total: own.length,
 			// Название донора лежит рядом с номером нарочно: адрес страницы пака

@@ -40,6 +40,10 @@ const state = {
 	lowSpecials: false,
 	noFranchise: false,
 	hidePlagiarism: false,
+	// Порог по доле заимствованных тем: '' — любая, иначе '0.25'…'0.9'. Строкой,
+	// а не числом, потому что строка и лежит в списке, и едет в адресе, и пустое
+	// значение здесь честно значит «не спрашивали», а не «ноль процентов»
+	minPlagiarism: '',
 	// Тем, типов пака и языков можно выбрать сразу несколько: подходит тот пак,
 	// что попал хотя бы в один из выбранных
 	tags: new Set(),
@@ -295,6 +299,10 @@ function buildQuery() {
 		query.set('hidePlagiarism', '1');
 	}
 
+	if (state.minPlagiarism) {
+		query.set('minPlagiarism', state.minPlagiarism);
+	}
+
 	if (state.tags.size > 0) {
 		query.set('tag', [...state.tags].join(','));
 	}
@@ -368,6 +376,8 @@ function renderChecks() {
 	for (const id of ['lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism']) {
 		$(id).checked = state[id];
 	}
+
+	$('minPlagiarism').value = state.minPlagiarism;
 
 	const locked = !canHide();
 
@@ -860,6 +870,11 @@ function renderActiveFilters() {
 		add('Без копий чужих паков', () => { state.hidePlagiarism = false; });
 	}
 
+	if (state.minPlagiarism) {
+		const percent = Math.round(Number(state.minPlagiarism) * 100);
+		add(`Чужих тем от ${percent}%`, () => { state.minPlagiarism = ''; });
+	}
+
 	if (state.showBlacklisted) {
 		add('С чёрным списком', () => { state.showBlacklisted = false; });
 	}
@@ -906,6 +921,7 @@ function countActiveFilters() {
 		+ (state.lowSpecials ? 1 : 0)
 		+ (state.noFranchise ? 1 : 0)
 		+ (state.hidePlagiarism ? 1 : 0)
+		+ (state.minPlagiarism ? 1 : 0)
 		+ (state.showBlacklisted ? 1 : 0)
 		+ (state.unrated || state.levels.size > 0 ? 0 : 1);
 }
@@ -1164,6 +1180,13 @@ function bind() {
 		});
 	}
 
+	$('minPlagiarism').addEventListener('change', event => {
+		state.minPlagiarism = event.target.value;
+		state.page = 1;
+		renderActiveFilters();
+		load();
+	});
+
 	let tagTimer = null;
 
 	$('tagSearch').addEventListener('input', () => {
@@ -1232,6 +1255,7 @@ function resetFilters() {
 	state.lowSpecials = false;
 	state.noFranchise = false;
 	state.hidePlagiarism = false;
+	state.minPlagiarism = '';
 	state.tags.clear();
 	state.topics.clear();
 	state.languages.clear();
@@ -1313,6 +1337,7 @@ function readUrlState() {
 	state.lowSpecials = query.get('lowSpecials') === '1';
 	state.noFranchise = query.get('noFranchise') === '1';
 	state.hidePlagiarism = query.get('hidePlagiarism') === '1';
+	state.minPlagiarism = query.get('minPlagiarism') ?? '';
 
 	// Сыгранное спрятано само собой, и снять это можно только адресом: /?hidePlayed=0
 	// стоит в ссылках профиля, которые ведут в библиотеку как раз к сыгранному.

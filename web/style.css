@@ -1556,6 +1556,19 @@ a.brand:hover .brand__text {
 	background: color-mix(in srgb, var(--clue) 14%, transparent);
 }
 
+/* Нижняя ступень: чужого заметная доля, но пак стоит на своём костяке. Тон
+   приглушённый нарочно — таких паков в базе шесть десятков против одиннадцати
+   копий, и покрась их тем же тревожным цветом, библиотека зарябила бы метками,
+   а сама метка обесценилась бы. Серый говорит ровно то, что нужно: «имейте
+   в виду», а не «вот вор». */
+.badge--clue-soft {
+	color: var(--text-muted);
+}
+
+.badge--clue-soft:hover {
+	background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+}
+
 .topic-icon {
 	width: 0.9375rem;
 	height: 0.9375rem;

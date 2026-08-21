@@ -2534,7 +2534,7 @@ function checkPlagiarism() {
 	};
 
 	let cleared = 0;
-	const kinds = { pack: 0, compiled: 0 };
+	const kinds = { pack: 0, compiled: 0, partial: 0 };
 
 	for (const [id, verdict] of verdicts) {
 		// Приговор вынесен по всей базе, а записывается только названным:
@@ -2559,7 +2559,8 @@ function checkPlagiarism() {
 	say('plagiarism', `разных тем ${stats.fingerprints}, из них общих мест ${stats.common}`
 		+ ` (встречаются в ${config.plagiarismCommonPacks}+ паках и в счёт не идут);`
 		+ ` паков с отпечатками ${stats.withThemes} из ${stats.packs}`);
-	say('plagiarism', `отмечено ${kinds.pack + kinds.compiled}: копий ${kinds.pack}, солянок ${kinds.compiled}`
+	say('plagiarism', `отмечено ${kinds.pack + kinds.compiled + kinds.partial}: копий ${kinds.pack}, `
+		+ `солянок ${kinds.compiled}, с заметной долей чужого ${kinds.partial}`
 		+ `${cleared > 0 ? `; метка снята у ${cleared}` : ''}`);
 }
 

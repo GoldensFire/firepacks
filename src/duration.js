@@ -22,13 +22,19 @@
 // и берутся они у всех медиафайлов пака одним запросом (см. fetchRanges
 // и heads в src/zip.js). Это два-три похода к ВК на пак вместо полусотни.
 //
+// Формат при этом узнаётся по содержимому, а не по имени: файл с расширением
+// .m4a сплошь и рядом оказывается голым потоком AAC без всякой коробки вокруг,
+// и разбор коробок выдал бы на нём мусор с длиной в четыре гигабайта.
+//
 // ————— чего этот разбор не умеет —————
 //
-// Сжатых записей. В архиве пака звук и видео лежат как есть (метод 0):
-// сжимать уже сжатое незачем, и все встреченные паки так и устроены. Но если
-// автор всё же сжал их, начало записи — это поток deflate, а не заголовок
-// файла, и распаковать его с середины нечем. Такой файл в счёт не идёт вовсе:
-// у пака просто окажется меньше измеренных файлов, а не выдуманная длина.
+// FLV. MP4, нарезанный на фрагменты и не записавший общей длины: сложить её
+// можно только прочитав файл целиком, а ровно этого мы здесь и не делаем.
+// И сжатых в архиве файлов, чьё оглавление лежит в конце: начало такой записи
+// распаковать можно (см. heads в src/zip.js), а середину — нечем.
+//
+// Такой файл в счёт не идёт вовсе: у пака просто окажется меньше измеренных
+// файлов, а не выдуманная длина. Сколько их было, видно по числу рядом.
 //
 // Точность здесь тоже не абсолютная: у MP3 с переменным битрейтом без
 // заголовка Xing секунды считаются по первому кадру, и на файле, где битрейт
@@ -193,6 +199,43 @@ function mp3Duration(head, size, from = 0) {
 	return null;
 }
 
+// ————— AAC россыпью (ADTS) —————
+
+/** Частоты по индексу в заголовке ADTS. */
+const AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+
+/**
+ * Длительность голого потока AAC — того, что лежит кадрами ADTS, без всякой
+ * коробки вокруг.
+ *
+ * Такие файлы попадаются под именем `.m4a`, и это не ошибка автора пака:
+ * телефоны и онлайновые резалки выдают их именно так. Внутри же не ISO-BMFF
+ * вовсе, а поток кадров, и разбор коробок на нём выдаёт мусор с длиной
+ * в четыре гигабайта — узнаётся такой файл по первым двум байтам (0xFFF…),
+ * а не по имени.
+ *
+ * Секунды считаются как у MP3 с постоянным битрейтом: в кадре ровно 1024
+ * сэмпла, длина кадра написана в его заголовке, а сколько таких кадров
+ * в файле — это его размер, делённый на эту длину. У переменного битрейта
+ * выходит оценка, и для «сколько тянется вопрос» её хватает.
+ */
+function adtsDuration(head, size) {
+	if (head.length < 7 || head[0] !== 0xff || (head[1] & 0xf6) !== 0xf0) {
+		return null;
+	}
+
+	const rate = AAC_RATES[(head[2] >> 2) & 0x0f];
+	const frameLength = ((head[3] & 0x03) << 11) | (head[4] << 3) | (head[5] >> 5);
+	// Блоков в кадре обычно один; каждый — те самые 1024 сэмпла
+	const samples = 1024 * ((head[6] & 0x03) + 1);
+
+	if (!rate || frameLength < 7 || size <= 0) {
+		return null;
+	}
+
+	return (size / frameLength) * samples / rate;
+}
+
 // ————— MP4, M4A, MOV —————
 
 /**
@@ -234,36 +277,84 @@ function walkBoxes(buffer, from, to, visit) {
 	return null;
 }
 
-/** Секунды из коробки mvhd, чьё тело начинается с byte-смещения body. */
-function mvhdSeconds(buffer, body) {
+/**
+ * Тиков и тиков в секунде — из коробки mvhd, чьё тело начинается со смещения body.
+ *
+ * Порядок полей в ней зависит от версии: нулевая пишет времена по четыре байта,
+ * первая — по восемь, и оттого timescale стоит в разных местах.
+ */
+function mvhdParts(buffer, body) {
 	const version = buffer[body];
 	const at = body + (version === 1 ? 20 : 12);
+	const wide = version === 1;
 
-	if (version === 1) {
-		if (at + 12 > buffer.length) {
-			return null;
-		}
-
-		const timescale = buffer.readUInt32BE(at);
-		const duration = Number(buffer.readBigUInt64BE(at + 4));
-
-		return timescale > 0 ? duration / timescale : null;
-	}
-
-	if (at + 8 > buffer.length) {
+	if (at + (wide ? 12 : 8) > buffer.length) {
 		return null;
 	}
 
 	const timescale = buffer.readUInt32BE(at);
-	const duration = buffer.readUInt32BE(at + 4);
+	const duration = wide ? Number(buffer.readBigUInt64BE(at + 4)) : buffer.readUInt32BE(at + 4);
 
-	// 0xffffffff — «длительность неизвестна», так пишут в потоковых файлах
-	return timescale > 0 && duration !== 0xffffffff ? duration / timescale : null;
+	if (timescale <= 0) {
+		return null;
+	}
+
+	// 0xffffffff — «длительность неизвестна», так пишут в потоковых файлах;
+	// для нас это то же самое, что ноль, — оба значат «здесь не записано»
+	return { timescale, duration: duration === 0xffffffff ? 0 : duration };
 }
 
-/** mvhd внутри коробки moov, чьё тело лежит в buffer от body до end. */
-const moovSeconds = (buffer, body, end) =>
-	walkBoxes(buffer, body, end, (inner, innerBody) => (inner === 'mvhd' ? mvhdSeconds(buffer, innerBody) : null));
+/** Секунды из mvhd — там, где кроме неё смотреть нечего (поиск по сигнатуре). */
+function mvhdSeconds(buffer, body) {
+	const parts = mvhdParts(buffer, body);
+
+	return parts && parts.duration > 0 ? parts.duration / parts.timescale : null;
+}
+
+/**
+ * Длительность из коробки moov, чьё тело лежит в buffer от body до end.
+ *
+ * Обычно её говорит mvhd, и на этом всё. Но у файла, нарезанного на фрагменты
+ * (fMP4 — так пишут всё, что готовили для потокового вещания), в mvhd стоит
+ * ноль: содержимого на момент записи заголовка ещё не было. Тогда длительность
+ * ищется в mvex/mehd — это и есть «сколько получится, когда все фрагменты
+ * сложатся».
+ *
+ * Нет и его — файл остаётся неизмеренным, и это честно: сложить фрагменты
+ * можно только прочитав файл целиком, а ровно этого мы здесь и не делаем.
+ */
+function moovSeconds(buffer, body, end) {
+	let timescale = 0;
+	let duration = 0;
+	let fragments = 0;
+
+	walkBoxes(buffer, body, end, (type, at, boxEnd) => {
+		if (type === 'mvhd') {
+			const parts = mvhdParts(buffer, at);
+
+			if (parts) {
+				timescale = parts.timescale;
+				duration = parts.duration;
+			}
+		} else if (type === 'mvex') {
+			walkBoxes(buffer, at, boxEnd, (inner, innerAt) => {
+				if (inner === 'mehd' && innerAt + 12 <= buffer.length) {
+					fragments = buffer[innerAt] === 1
+						? Number(buffer.readBigUInt64BE(innerAt + 4))
+						: buffer.readUInt32BE(innerAt + 4);
+				}
+
+				return null;
+			});
+		}
+
+		return null;
+	});
+
+	const ticks = duration || fragments;
+
+	return timescale > 0 && ticks > 0 ? ticks / timescale : null;
+}
 
 /**
  * Длительность MP4 и родственников.
@@ -285,7 +376,7 @@ const moovSeconds = (buffer, body, end) =>
  * бы на длинных moov — у видео на четыре минуты таблица кадров легко перерастает
  * любой разумный хвост.
  */
-function isoDuration(head) {
+function isoDuration(head, fileSize) {
 	let at = 0;
 
 	while (at + 8 <= head.length) {
@@ -302,15 +393,23 @@ function isoDuration(head) {
 			body = at + 16;
 		}
 
-		// Нулевая длина значит «до конца файла», и следующей коробки нет
-		if (size === 0) {
-			return type === 'moov'
-				? { seconds: moovSeconds(head, body, head.length) }
-				: null;
+		if (size > 0 && size < 8) {
+			return null;
 		}
 
-		if (size < 8) {
-			return null;
+		// Коробка до конца файла: либо честный ноль, либо «сколько получится»,
+		// записанное как 0xffffffff. Так пишет всё, что записывает на ходу,
+		// не зная заранее итоговой длины, — диктофоны и захват экрана.
+		// Следующей коробки за такой нет, и вычислить её место нечем:
+		// если оглавление не здесь, остаётся смотреть конец файла
+		if (size === 0 || (fileSize > 0 && at + size > fileSize)) {
+			if (type !== 'moov') {
+				return { needTail: true };
+			}
+
+			const seconds = moovSeconds(head, body, head.length);
+
+			return seconds ? { seconds } : null;
 		}
 
 		if (type === 'moov') {
@@ -324,7 +423,11 @@ function isoDuration(head) {
 
 	// Начало кончилось раньше оглавления. Место следующей коробки известно
 	// точно — за ним и пойдём
-	return at + 8 > head.length ? { needAt: at } : null;
+	if (at + 8 > head.length && (fileSize === 0 || at + 8 < fileSize)) {
+		return { needAt: at };
+	}
+
+	return null;
 }
 
 /**
@@ -543,6 +646,44 @@ function aviDuration(head) {
 	return microsPerFrame > 0 && frames > 0 ? microsPerFrame * frames / 1e6 : null;
 }
 
+// ————— ASF: WMV и WMA —————
+
+/** Начало заголовка ASF и начало его же «свойств файла» — оба GUID'а как байты. */
+const ASF_HEADER = Buffer.from('3026b2758e66cf11a6d900aa0062ce6c', 'hex');
+const ASF_PROPERTIES = Buffer.from('a1dcab8c47a9cf118ee400c00c205365', 'hex');
+
+/**
+ * Длительность WMV и WMA.
+ *
+ * Формат микрософтовский и снаружи ни на что не похож: файл начинается
+ * шестнадцатибайтным GUID'ом, а не четырьмя буквами, и всё внутри устроено
+ * так же. Нужен один вложенный объект — «свойства файла»: в нём длительность
+ * записана прямым числом в стонаносекундных долях, а рядом стоит задержка
+ * перед началом воспроизведения, которую из неё положено вычесть.
+ *
+ * Файлов этих в паках немного, но там, где они есть, их обычно целая тема:
+ * автор один раз собрал папку и залил её всю.
+ */
+function asfDuration(head) {
+	if (head.length < 30 || !head.subarray(0, 16).equals(ASF_HEADER)) {
+		return null;
+	}
+
+	const at = head.indexOf(ASF_PROPERTIES);
+
+	// Длительность лежит за FileID, размером файла, датой создания и числом
+	// пакетов — то есть в шестидесяти четырёх байтах от начала объекта
+	if (at < 0 || at + 88 > head.length) {
+		return null;
+	}
+
+	const hundredNanos = Number(head.readBigUInt64LE(at + 64));
+	const preroll = Number(head.readBigUInt64LE(at + 80));
+	const seconds = hundredNanos / 1e7 - preroll / 1000;
+
+	return seconds > 0 ? seconds : null;
+}
+
 /**
  * Длительность файла по его началу.
  *
@@ -568,7 +709,10 @@ export function probeDuration(name, head, size) {
 		case 'm4a':
 		case 'm4v':
 		case 'mov':
-			return isoDuration(head);
+		case 'aac':
+			// Имя говорит «коробка», а внутри бывает голый поток кадров:
+			// решает содержимое, а не расширение
+			return wrap(adtsDuration(head, size)) ?? isoDuration(head, size);
 		case 'ogg':
 		case 'oga':
 		case 'opus':
@@ -582,6 +726,9 @@ export function probeDuration(name, head, size) {
 			return wrap(matroskaDuration(head));
 		case 'avi':
 			return wrap(aviDuration(head));
+		case 'wma':
+		case 'wmv':
+			return wrap(asfDuration(head));
 		default:
 			return null;
 	}
@@ -589,13 +736,25 @@ export function probeDuration(name, head, size) {
 
 /**
  * Длительность файла, которому не хватило начала: досчитывается по концу.
- * Так устроен только Ogg — номер последнего сэмпла лежит на последней странице.
+ *
+ * Так устроен Ogg — номер последнего сэмпла лежит на последней странице.
+ * Сюда же попадает MP4, у которого содержимое записано коробкой «до конца
+ * файла»: место оглавления по такой не вычислить, и остаётся искать mvhd
+ * в конце по сигнатуре.
  *
  * @returns {number|null} секунды
  */
 export function probeDurationTail(name, head, tail) {
 	if (!tail || tail.length < 16) {
 		return null;
+	}
+
+	const extension = extensionOf(name);
+
+	if (extension !== 'ogg' && extension !== 'oga' && extension !== 'opus') {
+		const seconds = isoChunkDuration(tail);
+
+		return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 	}
 
 	const stream = oggRate(head);

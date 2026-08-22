@@ -9,13 +9,15 @@
 //   node src/indexer.js --summary-only  только составить краткие описания паков
 //   node src/indexer.js --logos         только докачать логотипы
 //   node src/indexer.js --specials      досчитать спецвопросы у старых паков
-//   node src/indexer.js --plagiarism    пересмотреть, кто у кого списал: без сети, по темам
+//   node src/indexer.js --prints        снять отпечатки вопросов у старых паков (по ним ищется списанное)
+//   node src/indexer.js --durations    померить длительность медиафайлов (среднюю и самую большую)
+//   node src/indexer.js --plagiarism    пересмотреть, кто у кого списал: без сети, по отпечаткам вопросов
 //   node src/indexer.js --reparse       разобрать заново уже разобранные паки
 //   node src/indexer.js --retopics      переспросить Gemini даже про уже размеченные паки
 //   node src/indexer.js --resummary     переписать уже готовые описания
 //   node src/indexer.js --upgrade       переспросить то, что размечено моделью слабее нынешней
 //   node src/indexer.js --recalc        пересчитать уровни и ярлыки по сохранённым данным, без сети
-//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, plagiarism, recalc
+//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, prints, durations, plagiarism, recalc
 //   node src/indexer.js --model=имя     разово взять другую модель Gemini
 //   node src/indexer.js --fallback      кончились суточные запросы — перейти на запасную модель
 //   node src/indexer.js --gemini-models показать доступные модели Gemini
@@ -75,7 +77,7 @@ import {
 	db, buildMatchKey, buildTagsKey, buildAuthorKey, saveAuthors, parseVkDate, normalizeRounds,
 	jsonOrDefault, repeatShare,
 } from './db.js';
-import { readTopic as readTopicHtml } from './vk.js';
+import { readTopic as readTopicHtml, normalizeTopicUrl } from './vk.js';
 import { readTopic as readTopicApi, readTopicSince, hasVkApi, refreshDocumentUrl } from './vkapi.js';
 import { openRemoteZip, DeadLinkError } from './zip.js';
 import { parseContentXml } from './siq.js';
@@ -87,7 +89,8 @@ import {
 	computeGenres, computeForms, computeDecades, computeOrigin,
 } from './topics.js';
 import { isCategoryName } from './franchise.js';
-import { reviewPlagiarism } from './plagiarism.js';
+import { reviewPlagiarism, encodePrints, countPrints, PRINTS_VERSION } from './plagiarism.js';
+import { measureMedia } from './duration.js';
 import { ensureThumb } from './thumbs.js';
 import { thumbName } from './settings.js';
 
@@ -670,6 +673,8 @@ const TAGS = {
 	analyze: 'разметка',
 	logos: 'логотипы',
 	specials: 'спецвопросы',
+	prints: 'отпечатки',
+	durations: 'длительность',
 	plagiarism: 'плагиат',
 	recalc: 'пересчёт',
 	// Не шаг, а весь обход разом: строка про то, что отпущенное время вышло
@@ -697,6 +702,20 @@ const knownInComment = db.prepare(`
 
 /** Есть ли такой документ в базе вообще — хоть под этим сообщением, хоть под другим. */
 const knownDocument = db.prepare('SELECT id FROM packages WHERE source_key = ?');
+
+/**
+ * Живые паки одной темы обсуждения — все, каким бы сообщением они ни были
+ * выложены. По ним после ПОЛНОГО обхода темы видно, чьё сообщение исчезло:
+ * пак, номера сообщения которого нет среди прочитанных, в обсуждении больше
+ * не лежит (см. missingComments в scanVk).
+ *
+ * Похоронённые и мёртвые не спрашиваются по той же причине, что и в syncComment:
+ * их и так не показывают, и хоронить их второй раз незачем.
+ */
+const knownInTopic = db.prepare(`
+	SELECT id, vk_comment, name, file_name, source_key
+	FROM packages WHERE vk_topic = ? AND status <> 'gone' AND status <> 'dead'
+`);
 
 /**
  * Сообщение переписали: у пака меняется описание, но не он сам. Заодно
@@ -828,6 +847,55 @@ const languageLine = (language, fromFile) => {
 		: `язык: модель не назвала${own}`;
 };
 const updateSpecials = db.prepare('UPDATE packages SET special_count = ?, special_stat = ? WHERE id = ?');
+
+/**
+ * Отпечатки вопросов пака (см. encodePrints в src/plagiarism.js).
+ *
+ * Пишутся двумя разными шагами и потому через ON CONFLICT: разбор кладёт их
+ * заодно с самим паком, а шаг prints добирает те паки, что разобраны до его
+ * появления. Кто из двоих успел позже, тот и прав — свёртка одна и та же,
+ * считается она из одного и того же content.xml.
+ */
+const savePrints = db.prepare(`
+	INSERT INTO pack_prints (package_id, prints, questions, parsed_at, version)
+	VALUES (?, ?, ?, ?, ?)
+	ON CONFLICT (package_id) DO UPDATE SET
+		prints = excluded.prints,
+		questions = excluded.questions,
+		parsed_at = excluded.parsed_at,
+		version = excluded.version
+`);
+
+/** Свёртка отпечатков и число вопросов в ней — одним местом для обоих шагов. */
+function storePrints(packageId, questions) {
+	const prints = encodePrints(questions);
+	const count = countPrints(prints);
+	savePrints.run(packageId, prints, count, Date.now(), PRINTS_VERSION);
+	return count;
+}
+
+const updateDurations = db.prepare(`
+	UPDATE packages SET media_avg = ?, media_max = ?, media_total = ?, media_files = ?, media_at = ?
+	WHERE id = ?
+`);
+
+/**
+ * Длительность медиа пака — одним местом для разбора и для своего шага.
+ *
+ * Пак без медиафайлов записывается тоже, пустыми числами: «мерили, мерить
+ * нечего» — это ответ, и без него такой пак попадал бы в очередь каждую ночь
+ * до скончания века.
+ */
+function storeDurations(packageId, media) {
+	updateDurations.run(
+		media.average,
+		media.longest,
+		media.total,
+		media.files,
+		Date.now(),
+		packageId,
+	);
+}
 
 const upsertStats = db.prepare(`
 	INSERT INTO stats (package_id, started_games, completed_games, shown, answered, correct, wrong,
@@ -974,6 +1042,58 @@ function syncComment(comment, useApi, tally) {
 }
 
 /**
+ * Сообщения, которых в теме больше нет вовсе.
+ *
+ * ————— чего не видел прежний обход —————
+ *
+ * syncComment сверяет сообщение с тем, что о нём записано, и потому видит ровно
+ * то, что ВК ему приносит, — а приносит он только сообщения с приложенными
+ * файлами (см. buildComments в vkapi.js и parseComments в vk.js). Сообщение,
+ * из которого убрали все файлы, и сообщение, удалённое целиком, до сверки
+ * не доходили никогда, и «файл убран» у них не срабатывало ни разу. Так и вышло
+ * в ночь на 21 августа 2026: обход прочитал все 26 289 сообщений темы, нашёл
+ * 11 392 с файлами — и убрал ноль файлов, при том что паки из группы удаляли.
+ * Пак, чьё сообщение стёрли, оставался на сайте живым навсегда, потому что
+ * заметить его исчезновение было нечем.
+ *
+ * Теперь есть чем: обход отдельным потоком сообщает номера ВСЕХ прочитанных
+ * сообщений (`onSeen`), и пак, номера которого среди них не оказалось, в теме
+ * больше не лежит. Разница с syncComment только в том, что именно исчезло:
+ * там — файл из сообщения, здесь — само сообщение; хоронятся оба одинаково
+ * и одинаково же оживают, когда сообщение возвращают.
+ *
+ * Спрашивать об этом вправе только полный обход темы. Хвост старой её части
+ * не читал вовсе, оборванный обход не дочитал, перешагнутое окно унесло с собой
+ * до сотни сообщений — для всех троих «сообщения нет» неотличимо от «мы туда
+ * не дошли». Проверяет это зовущий (см. `whole` в scanVk), а сам приговор,
+ * как и все прочие пропажи, копится до конца обхода и проходит через общий
+ * предохранитель по числу (см. applyPending).
+ *
+ * @param {string} topicUrl тема, которую только что прочитали целиком
+ * @param {Set<number>} seen номера сообщений, которые в ней нашлись
+ * @param {object} tally общая копилка обхода
+ */
+function missingComments(topicUrl, seen, tally) {
+	const normalized = normalizeTopicUrl(topicUrl);
+
+	for (const row of knownInTopic.all(normalized)) {
+		// Пак, заведённый без номера сообщения, судить не по чему: его не было бы
+		// среди прочитанных при любом исходе
+		if (row.vk_comment === null || seen.has(row.vk_comment)) {
+			continue;
+		}
+
+		const title = row.name ?? row.file_name ?? row.source_key;
+
+		tally.pending.push({
+			kind: 'gone',
+			apply: () => markGone.run('сообщение с паком удалено из обсуждения', row.id),
+			say: `сообщение удалено: «${title}»`,
+		});
+	}
+}
+
+/**
  * Пропажи и подмены не применяются сразу, а копятся до конца обхода — и здесь
  * решается, применять ли их вообще.
  *
@@ -1060,9 +1180,22 @@ async function scanVk() {
 		let announced = null;
 		let read = 0;
 
+		// Номера всех сообщений темы, какие удалось прочитать, — вместе с теми,
+		// где нет ни одного файла. По ним ниже разбирается, чьё сообщение
+		// из обсуждения убрали (см. missingComments)
+		const seenComments = new Set();
+		let torn = false;
+		const gapsBefore = gaps;
+		const unreadableBefore = unreadable;
+
 		try {
 			for await (const comment of readTopic(topicUrl, {
 				maxPages,
+				onSeen: ids => {
+					for (const id of ids) {
+						seenComments.add(id);
+					}
+				},
 				// Сообщение, на котором спотыкается сам ВК. Его пропускают, чтобы
 				// прочитать всё остальное; пак под ним, если он там был, найдётся
 				// только когда ВК починится (см. readWindow в vkapi.js)
@@ -1124,13 +1257,38 @@ async function scanVk() {
 			// та мера, ниже которой это точно не поломка.
 			if (!tailOnly && announced !== null && announced - read > 100 && maxPages === Infinity) {
 				broken++;
+				torn = true;
 				console.error(`[ВК] тема прочитана не до конца: ${read} сообщений из ${announced}. `
 					+ 'Собранное осталось в базе, недочитанное подберётся следующим обходом.');
 			}
 		} catch (error) {
 			broken++;
+			torn = true;
 			console.error(`[ВК] обход темы оборвался на ${read} сообщении: ${error.message}`);
 			console.error('[ВК] Собранное до обрыва осталось в базе; остальное подберёт следующий обход.');
+		}
+
+		// Тема прочитана целиком — можно спросить, чьих сообщений в ней не стало.
+		// Судит об этом только тот обход, который видел тему всю: у хвоста, у обхода
+		// с оборванной темой, с перешагнутым окном и с сообщением, которое ВК
+		// не отдал, «сообщения нет» и «до сообщения не дошли» выглядят одинаково.
+		//
+		// Нечитаемое сообщение стоит в этом ряду не для полноты: его номер
+		// в прочитанные не попадает вовсе (см. readWindow в vkapi.js), и пак
+		// под ним был бы похоронен ни за что.
+		//
+		// Отдельно — про `announced`. Это число сообщений в теме, названное самим
+		// ВК, и приходит оно только через API. У разбора страниц его нет: там
+		// признаком конца темы служит первая страница без сообщений, а такая
+		// страница приходит и из середины темы. Обход, который не может отличить
+		// конец темы от заминки на её середине, хоронить не вправе никого —
+		// и без ключа ВК этот разбор просто не делается
+		const whole = !torn && !tailOnly && maxPages === Infinity
+			&& announced !== null && read >= announced
+			&& gaps === gapsBefore && unreadable === unreadableBefore;
+
+		if (whole) {
+			missingComments(topicUrl, seenComments, tally);
 		}
 	}
 
@@ -1158,7 +1316,7 @@ async function scanVk() {
 		+ `${unreadable ? ` Сообщений, которые ВК не отдал: ${unreadable}.` : ''}`
 		+ `${gaps ? ` Кусков темы, которые ВК не отдал: ${gaps}.` : ''}`);
 	say('vk', `изменений в прежних: файл заменён у ${applied.replaced}, `
-		+ `переписано сообщений ${tally.edited}, убрано файлов ${applied.gone}, вернулось ${tally.back}.`);
+		+ `переписано сообщений ${tally.edited}, убрано из обсуждения ${applied.gone}, вернулось ${tally.back}.`);
 
 	if (broken > 0) {
 		throw new Error(`обход не завершён: тем с обрывом — ${broken}`);
@@ -1427,7 +1585,11 @@ async function parsePackages() {
 						throw new Error('в архиве нет content.xml');
 					}
 
-					const parsed = parseContentXml(await archive.read(entry));
+					// Вес вложенных файлов идёт в разбор из оглавления архива:
+					// по нему отпечаток вопроса отличает «тот же файл» от «то же
+					// имя» (см. sameWeight в src/plagiarism.js). Оглавление уже
+					// прочитано, так что стоит это ничего
+					const parsed = parseContentXml(await archive.read(entry), archive.mediaSizes());
 
 					if (!parsed.name) {
 						throw new Error('в паке не указано имя');
@@ -1466,6 +1628,12 @@ async function parsePackages() {
 				);
 
 				saveAuthors(row.id, parsed.authors);
+
+				// Отпечатки вопросов — здесь же, из того же разбора. Отдельный шаг
+				// prints нужен только тем пакам, что разобраны до его появления:
+				// второй раз качать content.xml ради того, что уже прочитано,
+				// незачем (см. fetchPrints)
+				storePrints(row.id, parsed.questions);
 
 				ok++;
 
@@ -1592,6 +1760,197 @@ async function fetchLogos() {
 	});
 
 	say('logos', `скачано ${ok}, в паке нет ${none}, ошибок ${failed}.`);
+}
+
+/**
+ * Досчитывает отпечатки вопросов у паков, разобранных до того, как их научились
+ * считать.
+ *
+ * ————— зачем этот шаг вообще есть —————
+ *
+ * Плагиат ищется по вопросам: совпал текст вопроса, имя приложенного файла
+ * и ответ — это тот же самый вопрос (см. src/plagiarism.js). Сами тексты
+ * в базе не хранятся, хранится восьмибайтный отпечаток, и считает его разбор
+ * пака заодно со всем остальным. Но библиотека разобрана давно, а отпечатков
+ * тогда не считал никто — и без этого шага правило было бы слепым ко всей
+ * старой базе, то есть ко всей базе.
+ *
+ * ————— почему это не «переразобрать библиотеку» —————
+ *
+ * Потому что качается не пак, а один файл из него. src/zip.js читает архив
+ * range-запросами: оглавление, потом нужная запись, — и content.xml выходит
+ * около семи килобайт при паке в сорок мегабайт. На всю базу это порядка
+ * семидесяти мегабайт и два запроса на пак вместо полной закачки, которая
+ * шла бы сотнями гигабайт. Ровно так же ходит соседний шаг спецвопросов.
+ *
+ * ————— почему шаг обязан идти следом за обходом обсуждений —————
+ *
+ * Ссылки ВК на документы подписаны и живут недолго, а обновляет их только
+ * полный обход темы (см. refreshLink в syncComment). Страховки на этот случай
+ * нет: docs.getById чужие документы не отдаёт вовсе — ни с сервисным ключом,
+ * ни с пользовательским, ни даже с access_key. Значит, отпечатки собираются
+ * в ту же ночь, что и обход, — иначе половина ссылок окажется мёртвой
+ * (см. REST_STEPS в scripts/nightly.js).
+ *
+ * Пак берётся в очередь, когда отпечатков у него нет вовсе или когда они
+ * старше его разбора: перезалитый файл — это другие вопросы.
+ */
+async function fetchPrints() {
+	const target = targetSql();
+	// Свёртка прежнего вида — тоже очередь, но самая последняя: без веса файлов
+	// правило работает ровно как работало, просто не умеет отменять совпадение
+	// имени при разном файле (см. PRINTS_VERSION в src/plagiarism.js)
+	const missing = force
+		? ''
+		: ' AND (q.package_id IS NULL OR q.parsed_at IS NULL OR q.parsed_at < COALESCE(p.indexed_at, 0)'
+			+ ` OR COALESCE(q.version, 1) < ${PRINTS_VERSION})`;
+
+	const pending = db.prepare(`
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		LEFT JOIN pack_prints q ON q.package_id = p.id
+		WHERE p.status = 'ok'${missing}${target.where}
+		ORDER BY p.id
+	`);
+
+	const params = target.params;
+	const waiting = pending.all(...params).length;
+
+	say('prints', `отпечатков вопросов нет у ${waiting} паков${queueNote(false)}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+
+	let ok = 0;
+	let failed = 0;
+	let questions = 0;
+
+	await drain({
+		step: 'prints',
+		jobs,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			try {
+				const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
+					const archive = await openRemoteZip(url);
+					const entry = archive.find('content.xml');
+
+					if (!entry) {
+						throw new Error('в архиве нет content.xml');
+					}
+
+					return parseContentXml(await archive.read(entry), archive.mediaSizes());
+				}));
+
+				questions += storePrints(row.id, parsed.questions);
+				ok++;
+			} catch (error) {
+				failed++;
+				say('prints', `${row.name ?? row.file_name}: ${error.message}`);
+			}
+
+			if (bar.milestone(100)) {
+				say('prints', bar.line);
+			}
+		},
+	});
+
+	say('prints', `сняты у ${ok} паков, вопросов в них ${questions}, ошибок ${failed}.`);
+
+	// Снятый отпечаток обесценивает все уже вынесенные приговоры: пак, который
+	// час назад был для правила пуст, теперь и донор, и подозреваемый сразу для
+	// всей библиотеки. Пока шаг об этом молчал, ровно это и случилось — отпечатки
+	// сняли отдельным запуском, плагиат пересмотреть забыли, и списанные слово
+	// в слово темы месяц стояли неотмеченными. Сам себя следующий шаг позвать
+	// не может (шаги выбирает человек), но сказать вслух — обязан
+	if (ok > 0 && !chosenKeys.has('plagiarism')) {
+		say('prints', 'приговоры плагиата теперь устарели: судили без этих отпечатков. '
+			+ 'Нужен шаг «Плагиат» (--plagiarism) — он идёт по базе и укладывается в секунды.');
+	}
+}
+
+/**
+ * Меряет, сколько тянется медиа в паках: среднее по файлам и самый длинный.
+ *
+ * ————— зачем —————
+ *
+ * Число вопросов не говорит, на сколько пак: сотня вопросов бывает и на два
+ * часа, и на пять. Разницу делает длина куска — тема из шести песен по полторы
+ * минуты идёт девять минут одна, и пак из тридцати таких тем за вечер
+ * не проходят никогда. Среднее отвечает на «сколько тянется вопрос», самое
+ * длинное — на «нет ли там целой серии» (см. src/duration.js).
+ *
+ * ————— почему это не «скачать пак» —————
+ *
+ * Длительность лежит в заголовке файла, то есть в первых его килобайтах:
+ * MP3 говорит битрейт, MP4 — прямое число, WAV — размер куска данных. Поэтому
+ * с каждого медиафайла берётся начало на двенадцать килобайт, изредка ещё
+ * и конец, — а не сам файл. На пак с полусотней песен это меньше мегабайта
+ * вместо трёхсот.
+ *
+ * Дорог тут не трафик, а походы: составной range-запрос, которым все эти
+ * начала брались бы разом, ВК понимает только на нескольких килобайтах
+ * и на большем рвёт соединение (см. fetchRanges в src/zip.js). Значит, поход
+ * на файл — то есть шаг этот из всех самый долгий, и по умолчанию он не идёт.
+ * Зато идти ему надо один раз: новый пак меряется вместе со своим разбором,
+ * а перемеривать неизменившийся незачем.
+ *
+ * ————— почему шаг обязан идти следом за обходом обсуждений —————
+ *
+ * По той же причине, что и отпечатки: ссылки ВК на документы подписаны и живут
+ * недолго, а обновляет их только полный обход темы. Страховки нет —
+ * docs.getById чужие документы не отдаёт вовсе (см. fetchPrints).
+ */
+async function fetchDurations() {
+	const target = targetSql();
+	const missing = force
+		? ''
+		: ' AND (p.media_at IS NULL OR p.media_at < COALESCE(p.indexed_at, 0))';
+
+	const pending = db.prepare(`
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		WHERE p.status = 'ok'${missing}${target.where}
+		ORDER BY p.id
+	`);
+
+	const params = target.params;
+	const waiting = pending.all(...params).length;
+
+	say('durations', `не мерена длительность у ${waiting} паков${queueNote(false)}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+
+	let ok = 0;
+	let failed = 0;
+	let withMedia = 0;
+	let files = 0;
+
+	await drain({
+		step: 'durations',
+		jobs,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			try {
+				const media = await retryNetwork(() => withFreshUrl(row, async url => measureMedia(await openRemoteZip(url))));
+
+				storeDurations(row.id, media);
+				ok++;
+
+				if (media.files > 0) {
+					withMedia++;
+					files += media.files;
+					say('durations', `${bar.label()} ${row.name ?? row.file_name}: `
+						+ `${media.files} из ${media.total} файлов, в среднем ${Math.round(media.average)} с, `
+						+ `самый длинный ${Math.round(media.longest)} с`);
+				}
+			} catch (error) {
+				failed++;
+				say('durations', `${row.name ?? row.file_name}: ${error.message}`);
+			}
+
+			if (bar.milestone(25)) {
+				say('durations', bar.line);
+			}
+		},
+	});
+
+	say('durations', `померено у ${ok} паков, из них с медиа ${withMedia}, файлов в них ${files}, ошибок ${failed}.`);
 }
 
 /**
@@ -2457,10 +2816,18 @@ function markStolenThemes(stored, places) {
  *
  * ————— почему база читается потоком —————
  *
- * У пака в поле rounds лежит его разбор — килобайты на пак, полтораста
- * мегабайт на библиотеку. Поднимать это в память все разом незачем: от пака
- * нужны одни отпечатки тем, по восемь байт на тему, и складывает их сам
- * plagiarism.js по мере чтения.
+ * Свёртка отпечатков — двенадцать байт на вопрос, то есть около килобайта
+ * на пак и тринадцать мегабайт на библиотеку. Поднимать это разом незачем:
+ * от пака нужны одни числа, и раскладывает их сам plagiarism.js по мере
+ * чтения, а свёртка живёт ровно до конца своего витка.
+ *
+ * ————— пак без отпечатков —————
+ *
+ * Для правила он попросту пуст: сравнивать нечего, и ни донором, ни вором он
+ * не станет. Это не молчаливая потеря, а очередь шага prints — он их и снимет
+ * (см. fetchPrints). Сколько таких паков осталось, шаг говорит вслух: пока
+ * их много, приговоры по всей базе неполны, и знать об этом важнее, чем
+ * получить красивое число отмеченных.
  */
 function checkPlagiarism() {
 	const target = targetSql();
@@ -2483,26 +2850,33 @@ function checkPlagiarism() {
 			.all(...target.params).map(row => row.id))
 		: null;
 
+	// Приговор устарел не только у переразобранного пака, но и у того, чьи
+	// отпечатки сняты позже приговора. Разница не теоретическая: шаг prints
+	// идёт часами и его запускают отдельно, а пак, отпечатков у которого
+	// на момент суда не было, для правила был попросту пуст — ни донором,
+	// ни вором он тогда стать не мог. Так и вышло, что тема, списанная слово
+	// в слово, месяц стояла неотмеченной: судили её раньше, чем прочитали
+	// того, у кого списали
 	const stale = db.prepare(`SELECT COUNT(*) AS c FROM packages p
-		WHERE p.status = 'ok' AND (p.plagiarism_at IS NULL OR p.plagiarism_at < COALESCE(p.indexed_at, 0))${target.where}`)
+		LEFT JOIN pack_prints q ON q.package_id = p.id
+		WHERE p.status = 'ok' AND (p.plagiarism_at IS NULL
+			OR p.plagiarism_at < COALESCE(p.indexed_at, 0)
+			OR p.plagiarism_at < COALESCE(q.parsed_at, 0))${target.where}`)
 		.get(...target.params).c;
 
 	say('plagiarism', `приговор устарел у ${stale} паков${queueNote(false)}; `
 		+ 'пересматриваю базу целиком — иначе найденный сегодня старый пак так и останется первоисточником');
 
+	// Отпечатки подшиваются слева: пак, у которого их ещё нет, из счёта
+	// не выпадает — он просто приходит с пустой свёрткой и остаётся ни при чём
 	const rows = db.prepare(`
-		SELECT p.id, p.name, p.vk_ts, p.vk_author, p.vk_author_url, p.authors_key, p.rounds
-		FROM packages p WHERE p.status = 'ok' ORDER BY p.id
+		SELECT p.id, p.name, p.vk_ts, p.vk_author, p.vk_author_url, p.authors_key,
+			q.prints, COALESCE(q.version, 1) AS prints_version
+		FROM packages p LEFT JOIN pack_prints q ON q.package_id = p.id
+		WHERE p.status = 'ok' ORDER BY p.id
 	`).iterate();
 
-	const { verdicts, stats } = reviewPlagiarism(
-		(function* () {
-			for (const row of rows) {
-				yield { ...row, rounds: normalizeRounds(row.rounds) };
-			}
-		})(),
-		config,
-	);
+	const { verdicts, stats } = reviewPlagiarism(rows, config);
 
 	// Кто числился вором вчера. Нужны затем, чтобы снять метку с того, кто её
 	// потерял: пак, у которого сменился разбор или у которого нашёлся ещё более
@@ -2536,7 +2910,7 @@ function checkPlagiarism() {
 
 	let cleared = 0;
 	let questions = 0;
-	const kinds = { pack: 0, compiled: 0, partial: 0 };
+	const kinds = { pack: 0, compiled: 0, partial: 0, trace: 0 };
 
 	for (const [id, verdict] of verdicts) {
 		// Приговор вынесен по всей базе, а записывается только названным:
@@ -2559,11 +2933,22 @@ function checkPlagiarism() {
 		cleared++;
 	}
 
-	say('plagiarism', `разных тем ${stats.fingerprints}, из них общих мест ${stats.common}`
+	const marks = kinds.pack + kinds.compiled + kinds.partial + kinds.trace;
+	const blind = stats.packs - stats.withPrints;
+
+	say('plagiarism', `разных вопросов ${stats.fingerprints}, из них общих мест ${stats.common}`
 		+ ` (встречаются в ${config.plagiarismCommonPacks}+ паках и в счёт не идут);`
-		+ ` паков с отпечатками ${stats.withThemes} из ${stats.packs}`);
-	say('plagiarism', `отмечено ${kinds.pack + kinds.compiled + kinds.partial}: копий ${kinds.pack}, `
-		+ `солянок ${kinds.compiled}, с заметной долей чужого ${kinds.partial}`
+		+ ` паков с отпечатками ${stats.withPrints} из ${stats.packs}`);
+
+	// Пак без отпечатков для правила пуст, и молчать об этом нельзя: приговоры
+	// по такой базе неполны, а выглядят они точно так же, как полные
+	if (blind > 0) {
+		say('plagiarism', `у ${blind} паков отпечатков вопросов ещё нет — по ним ничего не найдено `
+			+ 'и найдено быть не могло. Снимает их шаг «Отпечатки вопросов» (--prints).');
+	}
+
+	say('plagiarism', `отмечено ${marks}: копий ${kinds.pack}, солянок ${kinds.compiled}, `
+		+ `с заметной долей чужого ${kinds.partial}, с единичными чужими вопросами ${kinds.trace}`
 		+ `${cleared > 0 ? `; метка снята у ${cleared}` : ''}`);
 	say('plagiarism', `чужих вопросов в отмеченных паках ${questions}`);
 }
@@ -2809,6 +3194,17 @@ const STEPS = [
 	{ key: 'analyze', name: 'Проценты и описания', flag: '--analyze', run: refreshAnalysis, byDefault: false, feeds: ['parse'] },
 	{ key: 'logos', name: 'Логотипы', flag: '--logos', run: fetchLogos, byDefault: false, feeds: ['parse'] },
 	{ key: 'specials', name: 'Спецвопросы', flag: '--specials', run: fetchSpecials, byDefault: false, feeds: ['parse'] },
+	// Отпечатки вопросов — то, по чему ищется списанное. Идут по умолчанию, хотя
+	// и ходят в сеть: без них шаг плагиата слеп ко всей старой библиотеке,
+	// а работы у них ровно один раз — дальше очередь пуста, потому что новым
+	// пакам отпечатки считает сам разбор (см. fetchPrints)
+	{ key: 'prints', name: 'Отпечатки вопросов', flag: '--prints', run: fetchPrints, byDefault: true, feeds: ['parse'] },
+	// Длительность медиа. По умолчанию не идёт, и это единственный шаг с сетью,
+	// про который так решено нарочно: остальные тратят на пак два-три похода
+	// к ВК, а этот — по одному на каждый медиафайл, потому что составной
+	// range-запрос ВК не тянет (см. fetchDurations). На библиотеке это часы,
+	// и ставить их в обычную ночь незачем — числа эти не портятся
+	{ key: 'durations', name: 'Длительность медиа', flag: '--durations', run: fetchDurations, byDefault: false, feeds: ['parse'] },
 	// Ждёт разбора по-настоящему, а не «кормится» им, как соседи выше. Разница
 	// в том, что делает: остальные шаги разбирают очередь пак за паком и потому
 	// спокойно берут добавку на ходу, а этот раскладывает в память всю базу разом
@@ -2816,7 +3212,7 @@ const STEPS = [
 	// приговор по половине библиотеки: пак, разобранный минутой позже, не попал бы
 	// в старшинство вовсе. Стоит ожидание недорого — сам пересмотр укладывается
 	// в секунды, и сети он не касается
-	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', run: checkPlagiarism, byDefault: true, after: ['parse'] },
+	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', run: checkPlagiarism, byDefault: true, after: ['parse', 'prints'] },
 	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', run: recalcAll, byDefault: false, after: ['stats', 'statsnew', 'topics', 'analyze'] },
 ];
 

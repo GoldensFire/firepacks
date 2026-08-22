@@ -42,9 +42,21 @@ async function loadPage(topicUrl, offset) {
 	return decoder.decode(new Uint8Array(await response.arrayBuffer()));
 }
 
+/**
+ * Разбирает страницу темы.
+ *
+ * Возвращается две вещи, и вторая не для полноты. `comments` — сообщения
+ * с приложенными файлами, то есть паки; `ids` — номера ВСЕХ сообщений
+ * страницы, включая те, где файлов нет. По вторым узнаётся, что сообщение
+ * с паком из темы убрали совсем: пак, чьего сообщения не оказалось ни на одной
+ * странице полного обхода, в обсуждении больше не лежит (см. scanVk
+ * в src/indexer.js). Без этого списка удаление сообщения было неотличимо
+ * от «до сообщения не дошли», и убранные паки висели на сайте вечно.
+ */
 function parseComments(html, topicUrl) {
 	const blocks = html.split('<div class="bp_post');
 	const comments = [];
+	const ids = [];
 
 	for (let i = 1; i < blocks.length; i++) {
 		const block = blocks[i];
@@ -53,6 +65,8 @@ function parseComments(html, topicUrl) {
 		if (!idMatch) {
 			continue;
 		}
+
+		ids.push(parseInt(idMatch[2], 10));
 
 		const authorMatch = /<a class="bp_author"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/.exec(block);
 		const dateMatch = /<a class="bp_date"[^>]*>([\s\S]*?)<\/a>/.exec(block);
@@ -95,14 +109,15 @@ function parseComments(html, topicUrl) {
 		});
 	}
 
-	return comments;
+	return { comments, ids };
 }
 
 /**
  * Перебирает страницы обсуждения с начала темы и отдаёт комментарии с файлами.
  * Новые сообщения ВК добавляет в конец, поэтому полный проход всегда захватывает свежие.
  * @param {string} topicUrl ссылка на тему
- * @param {object} options maxPages — сколько страниц пройти, onPage — колбэк прогресса
+ * @param {object} options maxPages — сколько страниц пройти, onPage — колбэк прогресса,
+ *   onSeen — номера всех прочитанных сообщений, включая пустые (см. parseComments)
  */
 export async function* readTopic(topicUrl, options = {}) {
 	const maxPages = options.maxPages ?? Infinity;
@@ -117,8 +132,10 @@ export async function* readTopic(topicUrl, options = {}) {
 			return;
 		}
 
-		const comments = parseComments(html, topicUrl);
+		const { comments, ids } = parseComments(html, topicUrl);
 		page++;
+
+		options.onSeen?.(ids);
 
 		// Сколько всего сообщений в теме, со страницы не видно: total остаётся пустым,
 		// и полоска выполнения у этого способа обхода просто считает прочитанное

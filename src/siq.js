@@ -230,6 +230,101 @@ function dominantMedia(themeBody) {
 	return total > 0 && count / total > 0.4 ? type : '';
 }
 
+/**
+ * Правильные ответы вопроса. Берутся только из <right>: в <wrong> лежат
+ * неверные, и складывать их вместе значило бы считать разными два одинаковых
+ * вопроса, у одного из которых автор дописал пару неправильных вариантов.
+ */
+const RIGHT_BLOCK = /<right\b[^>]*>([\s\S]*?)<\/right>/;
+
+/**
+ * Содержимое одного вопроса, разобранное на три части: сам вопрос, имена
+ * приложенных к нему файлов и правильный ответ.
+ *
+ * Ради поиска списанного (см. src/plagiarism.js). Тексты вопросов в базе
+ * не хранятся — они весят больше всего остального пака вместе взятого, —
+ * а хранится восьмибайтный отпечаток вот этих трёх частей: он отвечает
+ * на единственный вопрос, который тут задают, «стоял ли ровно этот вопрос
+ * в чужом паке раньше».
+ *
+ * Части разделены нарочно, а не склеены в одну строку прямо здесь: склейку
+ * с разделителями делает тот, кто считает отпечаток, и делает одинаково
+ * для всех — иначе «вопрос без файла» и «файл без вопроса» с одинаковым
+ * ответом сошлись бы в один отпечаток.
+ *
+ * Имя файла в счёт входит на равных с текстом. У медиавопроса текста нет вовсе
+ * («что это за песня?» задаёт сам файл), и без имени файла все такие вопросы
+ * одного пака различались бы только ответом. А имя это как раз и переезжает
+ * из пака в пак нетронутым: перекладывают папку Audio целиком.
+ *
+ * Формат 4 держит содержимое в <atom>, формат 5 — в <item>; и там, и там
+ * ссылка на файл пишется с собачкой впереди («@Naruto.mp3»).
+ */
+function questionParts(questionBody, mediaSizes) {
+	const pieces = [...collectTexts(questionBody, 'item'), ...collectTexts(questionBody, 'atom')];
+	const text = [];
+	const media = [];
+	let mediaBytes = 0;
+
+	for (const piece of pieces) {
+		if (piece.startsWith('@') || FILE_NAME.test(piece)) {
+			const name = piece.replace(/^@/, '');
+			media.push(name);
+			// Вес файла из оглавления архива. Ноль — «в архиве такого файла нет»
+			// или «разбирали без архива»: это неизвестность, а не пустота,
+			// и толкуется она в пользу совпадения (см. sameWeight в plagiarism.js)
+			mediaBytes += mediaSizes?.get(name.split('/').pop().toLowerCase()) ?? 0;
+		} else {
+			text.push(piece);
+		}
+	}
+
+	const right = RIGHT_BLOCK.exec(questionBody);
+
+	return {
+		text: text.join(' '),
+		media: media.join(' '),
+		answer: right ? collectTexts(right[1], 'answer').join(' ') : '',
+		// Сумма, а не список: вопросу с двумя файлами всё равно нужно одно число,
+		// а сумма расходится ровно тогда же, когда разошёлся бы любой из двух
+		mediaBytes,
+	};
+}
+
+/**
+ * Все вопросы пака подряд, каждый со своим местом в раундах.
+ *
+ * Место (номер раунда и номер темы) едет рядом с содержимым потому, что метку
+ * «взято отсюда» сайт ставит теме, а не вопросу: мельче темы он ничего
+ * не показывает (см. roundsForApi в src/keys.js). Считается плагиат по вопросам,
+ * а показывается по темам — и связывает одно с другим как раз это место.
+ */
+function collectQuestions(body, mediaSizes) {
+	const questions = [];
+
+	splitByTag(body, 'round').forEach((round, roundIndex) => {
+		// Номер темы считается своим счётчиком, а не местом в разборе: тему
+		// без названия parseRounds выбрасывает, и порядковый номер после неё
+		// съезжает. Разойдись эти два счёта — и метка «взято отсюда» встала бы
+		// не на ту тему
+		let themeIndex = 0;
+
+		for (const theme of splitByTag(round.body, 'theme')) {
+			if (!theme.attributes.name) {
+				continue;
+			}
+
+			for (const question of splitByTag(theme.body, 'question')) {
+				questions.push({ round: roundIndex, theme: themeIndex, ...questionParts(question.body, mediaSizes) });
+			}
+
+			themeIndex++;
+		}
+	});
+
+	return questions;
+}
+
 function parseRounds(body) {
 	const rounds = [];
 	const regions = splitByTag(body, 'round');
@@ -264,9 +359,15 @@ function parseRounds(body) {
 
 /**
  * Разбирает content.xml.
+ *
  * @param {Buffer} buffer содержимое content.xml
+ * @param {Map<string, number>} [mediaSizes] вес вложенных файлов по имени
+ *        без папки (см. mediaSizes в src/zip.js). Нужен только отпечаткам
+ *        вопросов: по весу отменяется совпадение, у которого сошлись имя файла
+ *        и ответ, а сам файл разный. Без него разбор считает как раньше —
+ *        вес у всех вопросов выходит нулевым, то есть неизвестным.
  */
-export function parseContentXml(buffer) {
+export function parseContentXml(buffer, mediaSizes = null) {
 	// SIQ пишется в UTF-8, но с BOM
 	let xml = buffer.toString('utf8');
 
@@ -310,5 +411,9 @@ export function parseContentXml(buffer) {
 		specialCount: specials.total,
 		specialStat: specials.byKind,
 		contentStat: countContentTypes(body),
+		// Содержимое вопросов — единственное, что отсюда не попадает в саму базу:
+		// из него считается восьмибайтный отпечаток на вопрос, и хранится он
+		// (см. encodePrints в src/plagiarism.js и таблицу pack_prints в src/db.js)
+		questions: collectQuestions(body, mediaSizes),
 	};
 }

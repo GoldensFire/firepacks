@@ -31,7 +31,7 @@ const state = {
 	//   lowSpecials — спецвопросов меньше specialWarnShare пака;
 	//   noFranchise — пак не про одну франшизу (порог тот же, по которому
 	//     карточка ставит ярлык «целиком про одно»);
-	//   hidePlagiarism — темы пака почти целиком уже стояли в чужом паке,
+	//   hidePlagiarism — вопросы пака почти целиком уже стояли в чужом паке,
 	//     выложенном раньше (см. src/plagiarism.js).
 	//
 	// Пороги приезжают с сервера вместе с остальными настройками: те же самые
@@ -40,10 +40,14 @@ const state = {
 	lowSpecials: false,
 	noFranchise: false,
 	hidePlagiarism: false,
-	// Порог по доле заимствованных тем: '' — любая, иначе '0.25'…'0.9'. Строкой,
-	// а не числом, потому что строка и лежит в списке, и едет в адресе, и пустое
-	// значение здесь честно значит «не спрашивали», а не «ноль процентов»
+	// Порог по доле заимствованных вопросов: '' — любая, иначе '0.1'…'0.9'.
+	// Строкой, а не числом, потому что строка и лежит в списке, и едет в адресе,
+	// и пустое значение здесь честно значит «не спрашивали», а не «ноль процентов»
 	minPlagiarism: '',
+	// Тот же вопрос числом: сколько в паке чужих вопросов. Из доли он не выводится
+	// никак — десять чужих вопросов в паке на сотню ниже любого порога доли,
+	// а за столом на них сыграют, — поэтому и спрашивается отдельно
+	minPlagiarismQuestions: '',
 	// Тем, типов пака и языков можно выбрать сразу несколько: подходит тот пак,
 	// что попал хотя бы в один из выбранных
 	tags: new Set(),
@@ -303,6 +307,10 @@ function buildQuery() {
 		query.set('minPlagiarism', state.minPlagiarism);
 	}
 
+	if (state.minPlagiarismQuestions) {
+		query.set('minPlagiarismQuestions', state.minPlagiarismQuestions);
+	}
+
 	if (state.tags.size > 0) {
 		query.set('tag', [...state.tags].join(','));
 	}
@@ -378,6 +386,7 @@ function renderChecks() {
 	}
 
 	$('minPlagiarism').value = state.minPlagiarism;
+	$('minPlagiarismQuestions').value = state.minPlagiarismQuestions;
 
 	const locked = !canHide();
 
@@ -872,7 +881,12 @@ function renderActiveFilters() {
 
 	if (state.minPlagiarism) {
 		const percent = Math.round(Number(state.minPlagiarism) * 100);
-		add(`Чужих тем от ${percent}%`, () => { state.minPlagiarism = ''; });
+		add(`Чужого от ${percent}%`, () => { state.minPlagiarism = ''; });
+	}
+
+	if (state.minPlagiarismQuestions) {
+		const n = Number(state.minPlagiarismQuestions);
+		add(`Чужих вопросов от ${n}`, () => { state.minPlagiarismQuestions = ''; });
 	}
 
 	if (state.showBlacklisted) {
@@ -922,6 +936,7 @@ function countActiveFilters() {
 		+ (state.noFranchise ? 1 : 0)
 		+ (state.hidePlagiarism ? 1 : 0)
 		+ (state.minPlagiarism ? 1 : 0)
+		+ (state.minPlagiarismQuestions ? 1 : 0)
 		+ (state.showBlacklisted ? 1 : 0)
 		+ (state.unrated || state.levels.size > 0 ? 0 : 1);
 }
@@ -1180,6 +1195,13 @@ function bind() {
 		});
 	}
 
+	$('minPlagiarismQuestions').addEventListener('change', event => {
+		state.minPlagiarismQuestions = event.target.value;
+		state.page = 1;
+		renderActiveFilters();
+		load();
+	});
+
 	$('minPlagiarism').addEventListener('change', event => {
 		state.minPlagiarism = event.target.value;
 		state.page = 1;
@@ -1256,6 +1278,7 @@ function resetFilters() {
 	state.noFranchise = false;
 	state.hidePlagiarism = false;
 	state.minPlagiarism = '';
+	state.minPlagiarismQuestions = '';
 	state.tags.clear();
 	state.topics.clear();
 	state.languages.clear();
@@ -1338,6 +1361,7 @@ function readUrlState() {
 	state.noFranchise = query.get('noFranchise') === '1';
 	state.hidePlagiarism = query.get('hidePlagiarism') === '1';
 	state.minPlagiarism = query.get('minPlagiarism') ?? '';
+	state.minPlagiarismQuestions = query.get('minPlagiarismQuestions') ?? '';
 
 	// Сыгранное спрятано само собой, и снять это можно только адресом: /?hidePlayed=0
 	// стоит в ссылках профиля, которые ведут в библиотеку как раз к сыгранному.

@@ -118,9 +118,9 @@ const SORTS = {
 	comics: shareOf('comics'),
 	music: shareOf(MUSIC_KEY),
 	franchise: 'COALESCE(p.franchise_top_share, -1)',
-	// Какая часть тем пака уже стояла в чужих паках. Паки без метки уходят
+	// Какая часть вопросов пака уже стояла в чужих паках. Паки без метки уходят
 	// в конец при любом направлении: у них не «ноль процентов», а «ничего
-	// заметного не нашлось», и притворяться нулём им незачем
+	// не нашлось», и притворяться нулём им незачем
 	plagiarism: 'COALESCE(p.plagiarism_share, -1)',
 	// Паки без нужного числа оценок сортировать не по чему: они уходят в конец,
 	// а не притворяются нулями — иначе «по оценке» ставило бы неоценённые
@@ -240,6 +240,19 @@ function toPackage(row) {
 		// как их научились считать»: это не ноль, и сайт про такой пак молчит
 		specialCount: row.special_count ?? null,
 		specialStat: row.special_stat ? jsonOrDefault(row.special_stat, {}) : null,
+		// Сколько тянется медиа в паке, секунды: среднее по файлам и самый
+		// длинный (см. src/duration.js). null — «не мерили» или «мерить нечего»:
+		// у пака из одних картинок длительности нет, и ноль вместо неё объявил бы
+		// его самым коротким в библиотеке. files и total стоят рядом затем, чтобы
+		// было видно, по скольким файлам из скольких это посчитано
+		media: row.media_at
+			? {
+				average: row.media_avg,
+				longest: row.media_max,
+				files: row.media_files ?? 0,
+				total: row.media_total ?? 0,
+			}
+			: null,
 		url: row.url,
 		// Карточке нужен квадратик 72×72, а не заставка на весь экран, поэтому
 		// сюда идёт адрес уменьшенной копии (см. thumbs.js). Оригинал никуда
@@ -284,9 +297,9 @@ function toPackage(row) {
 			? {
 				kind: row.plagiarism_kind,
 				share: row.plagiarism_share,
-				// Сколько вопросов пака стоит в заимствованных темах. Ноль
-				// значит «неизвестно» — так у паков, разобранных до того, как
-				// у темы появилось число вопросов, — и карточка тогда молчит
+				// Сколько в паке дословно совпавших чужих вопросов. Ноль значит
+				// «неизвестно» — так у паков, отмеченных до того, как счёт стал
+				// вестись по вопросам, — и карточка тогда молчит про число
 				questions: row.plagiarism_questions ?? 0,
 				sources: jsonOrDefault(row.plagiarism_sources, [])
 					.map(source => ({ ...source, slug: packSlug(source.name) })),
@@ -503,15 +516,15 @@ function buildWhere(query, userId) {
 	}
 
 	// Четвёртая галочка того же ряда, и вопрос у неё тот же — «дайте пак, который
-	// стоит вечера». Пак, чьи темы почти целиком уже стояли в чужом паке, вечера
+	// стоит вечера». Пак, чьи вопросы почти целиком уже стояли в чужом паке, вечера
 	// не стоит по самой понятной причине: за столом это будет вторая игра в те же
 	// вопросы. Метку ставит шаг plagiarism (см. src/plagiarism.js), и слова
 	// «плагиат» галочка не говорит нарочно — правило не отличает вора
 	// от соавтора, а выдача не суд.
 	//
-	// Нижняя ступень метки (`partial`) сюда не попадает: пак, где чужого треть,
-	// копией не является, и прятать его под этой подписью было бы обманом.
-	// На него отвечает соседний порог по доле.
+	// Нижние ступени метки (`partial` и `trace`) сюда не попадают: пак, где
+	// чужого треть, копией не является, и прятать его под этой подписью было бы
+	// обманом. На них отвечают соседние пороги — по доле и по числу вопросов.
 	if (query.get('hidePlagiarism') === '1') {
 		conditions.push(`COALESCE(p.plagiarism_kind, '') NOT IN ('pack', 'compiled')`);
 	}
@@ -520,14 +533,30 @@ function buildWhere(query, userId) {
 	// Отдельно от галочки нарочно — вопросы разные. Галочка прячет, этот порог
 	// показывает: им library просматривают нарочно, разбираясь, кто у кого берёт,
 	// и он же кормит сортировку по доле заимствованного.
-	//
-	// Ниже plagiarismPartialShare доля в базе не записана вовсе, и это не потеря:
-	// одна совпавшая тема на тридцать — совпадение, а не находка (см. settings.js).
 	const minPlagiarism = Number(query.get('minPlagiarism'));
 
 	if (Number.isFinite(minPlagiarism) && minPlagiarism > 0) {
 		conditions.push('p.plagiarism_share >= ?');
 		params.push(minPlagiarism);
+	}
+
+	// Третий отбор того же ряда, и спрашивает он не долю, а число: «покажи паки,
+	// где чужих вопросов хотя бы столько-то».
+	//
+	// Доля на этот вопрос не отвечает и ответить не может. Десять чужих вопросов
+	// в паке на сотню — это десять процентов, то есть ниже любого порога доли;
+	// а спрашивают-то именно про них: за столом на них сыграют, кто бы какую
+	// долю ни насчитал. И наоборот: «половина чужого» у пака в тридцать вопросов
+	// и у пака в триста — новости разной величины.
+	//
+	// Единица здесь — осмысленный ответ, а не край шкалы: один дословно
+	// совпавший вопрос — текст, файл и ответ — случайностью не бывает
+	// (см. src/plagiarism.js).
+	const minStolen = Number(query.get('minPlagiarismQuestions'));
+
+	if (Number.isFinite(minStolen) && minStolen > 0) {
+		conditions.push('COALESCE(p.plagiarism_questions, 0) >= ?');
+		params.push(minStolen);
 	}
 
 	// У пака без разобранных вопросов доли нет вовсе, и «мало» про него сказать
@@ -681,7 +710,7 @@ function countLevels(query, userId) {
  */
 const NARROWING = [
 	'search', 'levels', 'tag', 'lang', 'topic', 'author', 'franchise', 'subject',
-	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism', 'minPlagiarism',
+	'onlyPlayed', 'onlyPlanned', 'hidePlanned', 'lowRepeats', 'lowSpecials', 'noFranchise', 'hidePlagiarism', 'minPlagiarism', 'minPlagiarismQuestions',
 	'showBlacklisted',
 ];
 
@@ -1198,6 +1227,11 @@ function getFacets() {
 		repeatAlarmShare: config.repeatAlarmShare,
 		specialWarnShare: config.specialWarnShare,
 		specialAlarmShare: config.specialAlarmShare,
+		// Пороги, по которым карточка красит среднюю длительность медиа:
+		// после первого — жёлтым, после второго — красным (см. mediaWarnSeconds
+		// в src/settings.js)
+		mediaWarnSeconds: config.mediaWarnSeconds,
+		mediaAlarmSeconds: config.mediaAlarmSeconds,
 		// Дополнительные типы паков и порог, с которого пак считается паком про одно.
 		// key — то же название латиницей и без номера части: по нему в колонке
 		// фильтров находится «Дота», когда набирают «dota»

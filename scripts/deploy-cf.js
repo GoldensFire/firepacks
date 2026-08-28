@@ -1,0 +1,141 @@
+// Выкладка сайта на Cloudflare одной командой.
+//
+// По порядку: собрать статику, выгрузить базу, залить схему (она создаётся
+// только в первый раз), залить паки, выложить Worker, положить базу на полку
+// и стукнуться в IndexNow. Всё это можно делать и вручную — здесь просто
+// перечислено, что за чем, чтобы не забыть половину.
+//
+// Ключи: --local  — залить в местную базу для проверки (npm run cf:dev),
+//                   Worker при этом не выкладывается;
+//        --db-only — только база, без выкладки Worker;
+//        --full    — залить базу целиком, а не только изменившееся.
+//
+// Наверх обычно уезжают только те строки, которые с прошлого раза изменились
+// (см. scripts/export-d1.js). Отметка «доехало» ставится здесь и только после
+// того, как последний кусок SQL действительно выполнился: сорвавшаяся на середине
+// выкладка не должна оставить базу в уверенности, что наверху лежит то, чего
+// там нет. Следующий запуск тогда просто отправит те же строки заново.
+//
+// ————— Из чего она собрана —————
+//
+// Сам этот файл — только порядок шагов. Всё остальное рядом, в scripts/deploy/:
+//
+//   options.js    ключи выкладки и пути
+//   wrangler.js   запуск wrangler: ключи Cloudflare, разбор отказов, execute
+//   d1.js         заливка базы запросами через D1 REST, а не файлом
+//   indexnow.js   пинг поисковикам о том, что изменилось
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+import { dataPath, dbOnly, local, root, toShelf, whole } from './deploy/options.js';
+import { checkAuth, run, writeDevVars } from './deploy/wrangler.js';
+import { pour } from './deploy/d1.js';
+import { pingIndexNow } from './deploy/indexnow.js';
+
+/**
+ * Положить базу на полку — ту самую, с которой её берёт запуск сайта дома
+ * и ночной обход в облаке.
+ *
+ * Сорвалось — говорим и живём дальше: сайт-то уже обновлён, и валить из-за
+ * этого всю выкладку не за что. Но сказать надо громко: пока на полке лежит
+ * прежнее, здешняя база расходится с сайтом, и первая же сверка вернёт её
+ * к вчерашнему виду.
+ */
+function shelve() {
+	console.log('\n───── Полка ─────');
+
+	const result = spawnSync(process.execPath, ['--no-warnings', 'scripts/state.js', 'push'], {
+		cwd: root,
+		stdio: 'inherit',
+	});
+
+	if (result.status !== 0) {
+		console.error('');
+		console.error('На полку база не легла. Сайт при этом обновлён — расходится только полка.');
+		console.error('Положить руками: npm run state:push.');
+		console.error('');
+		console.error('Не откладывайте: пока на полке лежит прежнее, здешняя разметка живёт');
+		console.error('только здесь, и ближайшая сверка при запуске сайта уведёт её в sibase.prev.db.');
+	}
+}
+
+async function main() {
+	if (!local) {
+		const config = fs.readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8');
+
+		if (config.includes('поставит-npm-run-cf-setup')) {
+			console.error('Сначала заведите базу в Cloudflare: npm run cf:setup');
+			process.exit(1);
+		}
+
+	}
+
+	// Первым делом, до всякой долгой работы: без пропуска наверх всё равно
+	// ничего не уедет, а узнать об этом лучше сейчас, чем через пять минут
+	checkAuth();
+
+	// Статику собирает тот, у кого она есть. В репозитории её нет: наверх
+	// из Actions уезжает только база, а сайт — код страниц, стили и готовые
+	// ответы prebuilt.json — выкладывается из дома (см. dbOnly в deploy/options.js).
+	// Поэтому «только база» здесь не «собери и не выкладывай», а «не собирай»:
+	// scripts/build-web.js читает web/ и src/meta/, которых в Actions попросту нет.
+	if (dbOnly) {
+		console.log('\nСтатику не собираем: наверх едет только база.');
+	} else {
+		console.log('\n───── Статика ─────');
+		run('node', ['--no-warnings', 'scripts/build-web.js']);
+	}
+
+	console.log('\n───── Выгрузка базы ─────');
+	run('node', ['--no-warnings', 'scripts/export-d1.js', ...(whole ? ['--full'] : [])]);
+
+	// Схема прогоняется каждый раз, но делает что-то только в первый: таблицы
+	// с оценками и входами создаются с IF NOT EXISTS и потом не трогаются.
+	// Заливка паков их не касается вовсе — иначе выкладка стирала бы всё,
+	// что накопили посетители (см. cf/schema.sql).
+	console.log('\n───── Таблицы посетителей ─────');
+	await pour('cf/schema.sql');
+
+	console.log('\n───── Паки ─────');
+
+	for (const name of fs.readdirSync(dataPath).sort()) {
+		await pour(path.join('cf', 'data', name));
+	}
+
+	if (local) {
+		writeDevVars();
+		console.log('\nМестная копия готова. Дальше: npx wrangler dev');
+		return;
+	}
+
+	// Всё доехало — можно запомнить, что именно
+	run('node', ['--no-warnings', 'scripts/export-d1.js', '--commit']);
+
+	if (dbOnly) {
+		console.log('\nБаза залита. Сам сайт не трогали.');
+
+		if (toShelf) {
+			shelve();
+		}
+
+		return;
+	}
+
+	console.log('\n───── Выкладка ─────');
+	run('npx', ['wrangler', 'deploy']);
+
+	// Сайт наверху обновлён — самое время сказать об этом поисковикам. До полки,
+	// а не после: отметка «эти адреса отправлены» ложится в домашнюю базу,
+	// и уехать на полку она должна вместе со всем остальным.
+	await pingIndexNow();
+
+	if (toShelf) {
+		shelve();
+	}
+
+	console.log('\nГотово.');
+}
+
+await main();

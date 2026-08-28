@@ -1,0 +1,35 @@
+{
+  "name": "firepacks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Локальная библиотека пакетов SIGame с уровнями сложности по статистике",
+  "scripts": {
+    "start": "node --no-warnings scripts/start.js",
+    "start:asis": "node --no-warnings scripts/start.js --no-sync",
+    "index": "node --no-warnings scripts/update.js",
+    "stats": "node --no-warnings scripts/update.js --stats-only",
+    "topics": "node --no-warnings scripts/update.js --topics-only",
+    "summary": "node --no-warnings scripts/update.js --summary-only",
+    "logos": "node --no-warnings scripts/update.js --logos",
+    "nightly": "node --no-warnings scripts/nightly.js",
+    "state": "node --no-warnings scripts/state.js status",
+    "sync": "node --no-warnings scripts/state.js sync",
+    "state:pull": "node --no-warnings scripts/state.js pull",
+    "state:push": "node --no-warnings scripts/state.js push",
+    "i18n": "node --no-warnings scripts/i18n.js translate",
+    "i18n:status": "node --no-warnings scripts/i18n.js status",
+    "i18n:summaries": "node --no-warnings scripts/i18n.js summaries",
+    "cf:setup": "node --no-warnings scripts/setup-cf.js",
+    "cf:dev": "node --no-warnings scripts/deploy-cf.js --local && wrangler dev",
+    "cf:db": "node --no-warnings scripts/deploy-cf.js --db-only",
+    "deploy": "node --no-warnings scripts/deploy-cf.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "wrangler": "^4.123.0"
+  }
+}

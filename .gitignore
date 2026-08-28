@@ -1,0 +1,93 @@
+node_modules/
+
+# Ключи. В репозитории им не место ни в каком виде.
+data/*.txt
+.dev.vars
+
+# База и обложки: собираются дома, весят десятки мегабайт. Между ночами они
+# лежат приложением к отметке релиза, а не в истории правок (см. scripts/state.js).
+data/sibase.db
+data/sibase.db-shm
+data/sibase.db-wal
+data/logos/
+data/thumbs/
+data/state.tgz
+data/state-stage/
+
+# Прежняя здешняя база, отодвинутая сверкой, и отметка о том, какой свёрток
+# с полки здесь развёрнут: и то, и другое своё у каждой машины.
+data/sibase.prev.db
+data/sibase.prev.db-shm
+data/sibase.prev.db-wal
+data/state-mark.json
+
+# Отчёты о ночных обходах: у каждой машины свои
+data/nightly/
+
+# Вывод разовых запусков индексатора, отложенный в файл
+data/*.log
+
+# Всё, что собирается для Cloudflare: перезаписывается каждой выкладкой
+cf/public/
+cf/data/
+.wrangler/
+
+# ————— Сайт. Его здесь нет и быть не должно —————
+#
+# В этом репозитории живёт ровно одна половина проекта: та, которой обновляется
+# база. Обход ВК, разбор паков, статистика, разметка Gemini, заливка данных в D1
+# и полка — всё, что делает ночь в GitHub Actions.
+#
+# Вторая половина — сам сайт: страницы, стили, Worker, домашний сервер и сборка
+# статики. Она живёт только на домашней машине и выкладывается оттуда командой
+# `npm run deploy`. Наверх из Actions уезжают одни данные (см. dbOnly
+# в scripts/deploy/options.js), поэтому ничего из перечисленного ниже ночи
+# не нужно — а лежать в открытом репозитории ему незачем.
+#
+# Всё это на диске есть и никуда не делось: не отслеживается — не значит удалено.
+
+# Страницы, стили и скрипты сайта
+web/
+
+# Worker: роутер, API и слой запросов к D1
+cf/src/
+
+# Домашний сервер и сборка страниц
+src/server.js
+src/server/
+src/meta/
+
+# Общее с сайтом, но обходу ненужное
+src/auth.js
+src/fuzzy.js
+src/i18n.js
+src/i18n/
+src/packlist.js
+src/search.js
+src/slug.js
+src/subject.js
+src/updater.js
+src/gemini/translate.js
+data/.fuzzy-nomask.mjs
+
+# Сборка статики, запуск дома, разовые команды. Ночь зовёт src/indexer.js
+# напрямую, а scripts/update.js — это `npm run index` и его соседи по package.json:
+# разовая работа руками, которой в Actions не бывает.
+scripts/build-web.js
+scripts/update.js
+scripts/start.js
+scripts/setup-cf.js
+scripts/i18n.js
+scripts/schedule-nightly.ps1
+scripts/.hashcheck.mjs
+
+# Значок сайта
+icon.ico
+icon.png
+icon_Сжатый.webp
+
+# Домашние ярлыки и записки
+*.bat
+.claude/
+CLAUDE.md
+README.md

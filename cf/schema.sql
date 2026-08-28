@@ -155,3 +155,91 @@ WHERE kind = 'pack' AND instr(value, CHAR(10)) > 0 AND EXISTS (
 	SELECT 1 FROM packages p
 	WHERE TRIM(p.pack_id) || CHAR(10) || TRIM(COALESCE(p.name, '')) = blacklist.value
 );
+
+-- ————— комментарии к пакам —————
+--
+-- Лежат по общему ключу пака (COALESCE(copy_of, id) строкой) — по тому же,
+-- по которому лежат оценки и отметки, и ровно по той же причине: у пака бывают
+-- копии, разговор у них общий, а номера строк переживают не всякую заливку.
+--
+-- Удалённое не стирается, а помечается временем в deleted_at: на комментарий
+-- ссылаются лайки, а у автора и у модератора должно оставаться место, куда
+-- смотреть, когда спорят, что именно было написано. Наружу такие строки
+-- не отдаются вовсе.
+--
+-- Правка хранится двумя полями: body — то, что видно сейчас, original — то,
+-- что было написано в первый раз. Второе заполняется ровно один раз, при первой
+-- же правке, и дальше не трогается: показывать под наводкой надо исходное,
+-- а не предпоследнее. Ни разу не правленный комментарий держит здесь NULL.
+CREATE TABLE IF NOT EXISTS comments (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	pack_key TEXT NOT NULL,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	body TEXT NOT NULL,
+	original TEXT,
+	created_at INTEGER NOT NULL,
+	edited_at INTEGER,
+	deleted_at INTEGER,
+	deleted_by INTEGER
+);
+
+-- Указатель составной и не случайно: страница пака спрашивает разом «чьи это»
+-- и «в каком порядке», а живые от удалённых отделяет deleted_at. По одному
+-- pack_key планировщик D1 (у которого нет sqlite_stat1 и который выбирает
+-- указатель наугад) складывал бы найденное в память ради сортировки.
+CREATE INDEX IF NOT EXISTS ix_comments_pack ON comments (pack_key, deleted_at, created_at);
+
+-- А этот — для частоты отправки и для поиска дублей: оба вопроса задаются
+-- про одного человека и про последние его строки (см. cf/src/library/spam.js).
+CREATE INDEX IF NOT EXISTS ix_comments_user ON comments (user_id, created_at);
+
+-- Лайки комментариев. Один человек — один лайк, отсюда и составной ключ:
+-- второе нажатие снимает своё, а не добавляет ещё одно.
+CREATE TABLE IF NOT EXISTS comment_likes (
+	comment_id INTEGER NOT NULL REFERENCES comments (id) ON DELETE CASCADE,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	liked_at INTEGER NOT NULL,
+	PRIMARY KEY (comment_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_comment_likes_user ON comment_likes (user_id);
+
+-- ————— наказания —————
+--
+-- Одна строка на человека, а не журнал: у наказания нет истории, у него есть
+-- нынешнее состояние — «молчит до среды» или «забанен». Снятие удаляет строку.
+--
+-- kind: 'mute' — нельзя писать комментарии; 'ban' — нельзя ничего, что человек
+-- оставляет от своего имени: ни комментариев, ни лайков, ни оценок.
+-- until: до какого времени, NULL — бессрочно. Мут без срока тоже бывает,
+-- и это не то же самое, что бан: бан снимает и оценки тоже.
+CREATE TABLE IF NOT EXISTS punishments (
+	user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+	kind TEXT NOT NULL,
+	until INTEGER,
+	reason TEXT NOT NULL DEFAULT '',
+	set_at INTEGER NOT NULL,
+	set_by INTEGER
+);
+
+-- ————— паки, снятые с публикации —————
+--
+-- Сам запрет живёт не здесь, а в самой строке пака: у неё становится
+-- status = 'hidden', и пак пропадает разом отовсюду — из выдачи, из поиска,
+-- из счётчиков, из карты сайта, со своей страницы, — потому что все запросы
+-- сайта и так спрашивают status = 'ok'. Ни одного нового условия в них
+-- добавлять не пришлось, а значит, и ни одной лишней прочитанной строки:
+-- у D1 они считаны по тарифу (см. cf/src/library/counts.js).
+--
+-- Тогда зачем таблица. Затем, что таблица packages приезжает из домашней базы
+-- и переписывается заливкой (см. scripts/export-d1.js), а домашняя база про
+-- снятые паки не знает вовсе: там нет ни модерации, ни посетителей. Первая же
+-- заливка изменившегося пака вернула бы ему status = 'ok'. Здесь лежит список,
+-- по которому запрет накладывается заново после каждой заливки — этим и занят
+-- cf/hidden.sql, который выкладка прогоняет сразу за паками.
+CREATE TABLE IF NOT EXISTS hidden_packs (
+	pack_key TEXT PRIMARY KEY,
+	reason TEXT NOT NULL DEFAULT '',
+	hidden_at INTEGER NOT NULL,
+	hidden_by INTEGER
+);

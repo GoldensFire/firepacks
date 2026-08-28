@@ -104,6 +104,12 @@ async function main() {
 		await pour(path.join('cf', 'data', name));
 	}
 
+	// Заливка только что переписала строки паков теми, что лежат дома, — а дома
+	// про снятые с публикации паки не знает никто. Возвращаем им запрет по списку,
+	// который заливка не трогает (см. cf/hidden.sql).
+	console.log('\n───── Снятые с публикации ─────');
+	await pour('cf/hidden.sql');
+
 	if (local) {
 		writeDevVars();
 		console.log('\nМестная копия готова. Дальше: npx wrangler dev');

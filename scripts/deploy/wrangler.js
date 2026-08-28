@@ -304,21 +304,30 @@ export function execute(file) {
 }
 
 /**
- * Ключи Discord для местной проверки. Наверху они лежат в секретах Cloudflare,
+ * Ключи входов для местной проверки. Наверху они лежат в секретах Cloudflare,
  * а `wrangler dev` их оттуда не видит и читает файл .dev.vars — поэтому при
- * проверке он собирается из тех же data/discord-*.txt, которыми пользуется
- * домашний сайт.
+ * проверке он собирается из тех же data/*.txt, которыми пользуется домашний
+ * сайт.
  *
  * Без него вход на местной копии не работает вовсе: сайт, не видя ключей,
  * даже не спрашивает, кто пришёл, — и проверить оценки с отметками нечем.
  * Файл переписывается каждой проверкой и в облако не уезжает никогда.
+ *
+ * Входов два, и каждый заводится сам по себе: заведён один — работает один,
+ * и это не поломка. У ВК при этом секрета нет вовсе — в VK ID его заменяет
+ * PKCE (см. cf/src/auth/vk.js), — поэтому от него нужен только номер приложения.
  */
 export function writeDevVars() {
-	const id = readSecret('DISCORD_CLIENT_ID', 'discord-client-id.txt');
-	const secret = readSecret('DISCORD_CLIENT_SECRET', 'discord-client-secret.txt');
+	const found = [
+		['DISCORD_CLIENT_ID', 'discord-client-id.txt'],
+		['DISCORD_CLIENT_SECRET', 'discord-client-secret.txt'],
+		['VK_CLIENT_ID', 'vk-client-id.txt'],
+	]
+		.map(([name, file]) => [name, readSecret(name, file)])
+		.filter(([, value]) => value);
 
-	if (!id || !secret) {
-		console.log('Ключей Discord в data нет — вход на местной копии работать не будет.');
+	if (found.length === 0) {
+		console.log('Ключей входа в data нет — вход на местной копии работать не будет.');
 		return;
 	}
 
@@ -326,9 +335,9 @@ export function writeDevVars() {
 		path.join(root, '.dev.vars'),
 		`# Собрано scripts/deploy-cf.js для местной проверки. Наверху эти ключи живут\n`
 		+ `# в секретах Cloudflare (npx wrangler secret put), а не в файлах.\n`
-		+ `DISCORD_CLIENT_ID=${id}\nDISCORD_CLIENT_SECRET=${secret}\n`,
+		+ `${found.map(([name, value]) => `${name}=${value}`).join('\n')}\n`,
 		'utf8',
 	);
 
-	console.log('Ключи Discord для местной проверки записаны в .dev.vars');
+	console.log(`Ключи входа для местной проверки записаны в .dev.vars: ${found.map(([name]) => name).join(', ')}`);
 }

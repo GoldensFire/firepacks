@@ -21,6 +21,7 @@
     "i18n:status": "node --no-warnings scripts/i18n.js status",
     "i18n:summaries": "node --no-warnings scripts/i18n.js summaries",
     "cf:setup": "node --no-warnings scripts/setup-cf.js",
+    "cf:migrate-auth": "node --no-warnings scripts/migrate-auth.js",
     "cf:dev": "node --no-warnings scripts/deploy-cf.js --local && wrangler dev",
     "cf:db": "node --no-warnings scripts/deploy-cf.js --db-only",
     "deploy": "node --no-warnings scripts/deploy-cf.js"

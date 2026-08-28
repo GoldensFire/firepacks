@@ -91,13 +91,18 @@ CREATE TABLE IF NOT EXISTS planned (
    canon_key и canon_name — тот же автор, сведённый к одному человеку: паки,
    выложенные с одной страницы ВК, подписаны одним человеком, как бы он себя
    в файле ни называл (см. mergeAuthors в src/indexer/authors.js). Пока шаг не прошёл,
-   канон равен подписи. */
+   канон равен подписи.
+
+   canon_account — номер той самой страницы ВК. По нему сайт узнаёт автора
+   в лицо: вошедший через ВК получает подтверждённое авторство своих паков,
+   не доказывая ничего отдельно (см. cf/src/library/authorship.js). */
 CREATE TABLE IF NOT EXISTS pack_authors (
 	package_id INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
 	author_key TEXT NOT NULL,
 	author TEXT NOT NULL,
 	canon_key TEXT,
 	canon_name TEXT,
+	canon_account TEXT,
 	PRIMARY KEY (package_id, author_key)
 );
 
@@ -464,6 +469,26 @@ for (const [name, definition] of [
 		// подписи, и всё работает ровно как раньше
 		['canon_key', 'TEXT'],
 		['canon_name', 'TEXT'],
+
+		// Номер страницы ВК, с которой этот человек выкладывает свои паки, —
+		// или пусто, если такой страницы одной не набралось.
+		//
+		// Считается тем же шагом и по тому же правилу, что и канон: страница
+		// достаётся человеку, только если все его подписи ведут на неё одну
+		// (см. mergeAuthors в src/indexer/authors.js). Иначе бы человек,
+		// перевыложивший чужой пак, забрал бы себе и чужого автора.
+		//
+		// Зачем это в базе, а не считается на месте. По этой колонке сайт
+		// узнаёт своего: вошедший через ВК получает подтверждённое авторство
+		// тех подписей, у которых здесь стоит номер его страницы
+		// (см. cf/src/library/authorship.js). Считать это наверху значило бы
+		// на каждый вход поднимать всю таблицу подписей, а у D1 прочитанные
+		// строки идут по тарифу.
+		//
+		// Номер, а не адрес: адрес у одного и того же человека бывает двух
+		// видов — vk.com/id123 и vk.com/короткое_имя, — а ВК при входе
+		// называет только номер, и сравнивать с адресом его нечем
+		['canon_account', 'TEXT'],
 	]) {
 		if (!columns.has(name)) {
 			db.exec(`ALTER TABLE pack_authors ADD COLUMN ${name} ${definition}`);
@@ -479,6 +504,11 @@ for (const [name, definition] of [
 	// с CREATE TABLE IF NOT EXISTS, то есть выполнялся бы на старой таблице,
 	// где колонки ещё нет, — и весь модуль падал бы на первом же запуске
 	db.exec('CREATE INDEX IF NOT EXISTS ix_pack_authors_canon ON pack_authors (canon_key)');
+
+	// А этот — ради одного вопроса, который задаёт каждый вход через ВК: «какие
+	// подписи принадлежат вот этой странице». Без него он обходил бы всю таблицу
+	// подписей — двадцать тысяч строк, считанных по тарифу D1, на каждый вход
+	db.exec('CREATE INDEX IF NOT EXISTS ix_pack_authors_account ON pack_authors (canon_account)');
 }
 
 // Дозаливка колонок в свёртку отпечатков

@@ -98,17 +98,36 @@ export function mergeAuthors() {
 	}
 
 	const write = db.prepare('UPDATE pack_authors SET canon_key = ?, canon_name = ? WHERE author_key = ?');
+	const mark = db.prepare('UPDATE pack_authors SET canon_account = ? WHERE author_key = ?');
 	const reset = db.prepare('UPDATE pack_authors SET canon_key = author_key, canon_name = author WHERE canon_key <> author_key');
+	const unmark = db.prepare('UPDATE pack_authors SET canon_account = NULL WHERE canon_account IS NOT NULL');
 
 	// Сначала всё возвращается к подписям, потом сливается заново. Иначе слияние,
 	// отменённое новыми паками (подпись встретилась у второго аккаунта), осталось
-	// бы в базе навсегда
+	// бы в базе навсегда. То же и со страницей ВК: подпись, у которой появился
+	// второй аккаунт, своего человека больше не называет, и метка обязана сойти —
+	// иначе на сайте остался бы подтверждённый автор, которого уже нечем
+	// подтвердить (см. cf/src/library/authorship.js)
 	reset.run();
+	unmark.run();
 
 	let merged = 0;
 	let people = 0;
+	let marked = 0;
 
-	for (const group of byAccount.values()) {
+	for (const [account, group] of byAccount) {
+		// Номер страницы ВК, если он вообще есть. Ставится и одиночной подписи —
+		// сливать у неё нечего, а человек за ней стоит такой же настоящий,
+		// и подтверждать своё авторство он должен наравне со всеми
+		const number = accountNumber(account);
+
+		if (number) {
+			for (const item of group) {
+				mark.run(number, item.key);
+				marked++;
+			}
+		}
+
 		if (group.length < 2) {
 			continue;
 		}
@@ -133,5 +152,27 @@ export function mergeAuthors() {
 	}
 
 	say('authors', `подписей ${signatures.size}; сведено ${merged} лишних к ${people} авторам `
-		+ '(паки выложены с одной страницы ВК)');
+		+ `(паки выложены с одной страницы ВК); с номером страницы ${marked}`);
+}
+
+/**
+ * Номер страницы ВК из её адреса, или null.
+ *
+ * Адрес автора приходит из ВК в двух видах: vk.com/id123456 — так его строит
+ * обход по номеру отправителя сообщения (см. buildAuthor в src/vkapi.js), —
+ * и vk.com/короткое_имя, как он записан у старых паков, разобранных ещё
+ * по странице обсуждения. Второй вид номера не содержит вовсе, и достать
+ * его оттуда нечем: короткое имя человек меняет, когда захочет.
+ *
+ * Почему это важно именно здесь. Войдя, ВК называет сайту номер — и только
+ * номер. Сравнить его с коротким именем нельзя ничем, поэтому подпись,
+ * у которой известно лишь короткое имя, остаётся без метки: пусть автор
+ * не подтвердится, чем подтвердится не тот.
+ *
+ * Страницы сообществ (vk.com/club123, vk.com/public123) не в счёт по той же
+ * причине с другой стороны: войти сообществом нельзя, и метка на нём была бы
+ * меткой, которую некому предъявить.
+ */
+function accountNumber(url) {
+	return /^https:\/\/vk\.com\/id(\d+)$/.exec(String(url ?? '').trim())?.[1] ?? null;
 }

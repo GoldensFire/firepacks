@@ -537,7 +537,17 @@ function main() {
 	// Канон едет наверх наравне с подписью: по нему сайт и считает автора одним
 	// человеком (см. mergeAuthors в src/indexer/authors.js). Без него топ авторов наверху
 	// сходится в одну строку с пустым именем — все canon_key там NULL
-	const authorsQuery = 'SELECT package_id, author_key, author, canon_key, canon_name'
+	//
+	// Вместе с ним едет и номер страницы ВК: по нему сайт узнаёт автора в лицо,
+	// когда тот входит через ВК (см. cf/src/library/authorship.js).
+	//
+	// Колонки здесь перечислены поимённо, а не звёздочкой, — и новая колонка
+	// таблицы сама сюда не попадает. Добавлять её надо в трёх местах разом:
+	// в этот запрос, в отпечаток ниже и в сам INSERT. Пропустишь отпечаток —
+	// наверх не уедет ничего (строки не будут считаться изменившимися);
+	// пропустишь INSERT — уедут NULL. И то и другое расходится с домашней базой
+	// молча, потому что дома всё останется целым
+	const authorsQuery = 'SELECT package_id, author_key, author, canon_key, canon_name, canon_account'
 		+ ' FROM pack_authors ORDER BY package_id, author_key';
 
 	for (const row of db.prepare(authorsQuery).iterate()) {
@@ -552,7 +562,7 @@ function main() {
 	const redo = [];
 
 	for (const [packageId, list] of authorsOf) {
-		const hash = digest(list.map(row => `${row.author_key}${row.author}${row.canon_key}${row.canon_name}`).join(' '));
+		const hash = digest(list.map(row => `${row.author_key}${row.author}${row.canon_key}${row.canon_name}${row.canon_account}`).join(' '));
 		remember.run('pack_authors', packageId, hash);
 
 		if (known.get(packageId) !== hash) {
@@ -567,9 +577,9 @@ function main() {
 
 		batched(
 			writer,
-			'INSERT OR REPLACE INTO pack_authors (package_id, author_key, author, canon_key, canon_name) VALUES\n',
+			'INSERT OR REPLACE INTO pack_authors (package_id, author_key, author, canon_key, canon_name, canon_account) VALUES\n',
 			'',
-			redo.flatMap(item => item.list.map(row => `(${literal(row.package_id)},${literal(row.author_key)},${literal(row.author)},${literal(row.canon_key)},${literal(row.canon_name)})`)),
+			redo.flatMap(item => item.list.map(row => `(${literal(row.package_id)},${literal(row.author_key)},${literal(row.author)},${literal(row.canon_key)},${literal(row.canon_name)},${literal(row.canon_account)})`)),
 		);
 	}
 

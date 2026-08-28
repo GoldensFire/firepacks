@@ -81,6 +81,12 @@ scripts/i18n.js
 scripts/schedule-nightly.ps1
 scripts/.hashcheck.mjs
 
+# Разовая перестройка таблицы вошедших: делается руками один раз на базу,
+# ночи не касается вовсе. Команда `npm run cf:migrate-auth` в package.json
+# остаётся — как и `cf:setup`, чей файл тоже лежит только дома.
+scripts/migrate-auth.js
+cf/migrate-auth.sql
+
 # Значок сайта
 icon.ico
 icon.png

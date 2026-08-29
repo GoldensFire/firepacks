@@ -333,3 +333,22 @@ CREATE INDEX IF NOT EXISTS ix_notifications_user ON notifications (user_id, read
 -- А этот — для подчистки прочитанного по сроку: она спрашивает про всех разом
 -- и только по времени.
 CREATE INDEX IF NOT EXISTS ix_notifications_read ON notifications (read_at);
+
+
+-- ————— состояние самого сайта —————
+
+-- Одна строка на признак: сейчас в ней живёт единственный — идут ли технические
+-- работы (см. cf/src/library/status.js). Ключ и значение, а не колонка на каждый
+-- признак, потому что признаки эти появляются и исчезают, а менять схему боевой
+-- базы ради одного логического значения — работа несоразмерная.
+--
+-- Значение — строка JSON: { on, note, since }. Разбирает её тот, кто читает;
+-- базе она безразлична.
+--
+-- Пишет сюда выкладка, напрямую через D1 REST (см. scripts/deploy/works.js),
+-- и заливка паков этой таблицы не касается вовсе — как и таблиц посетителей.
+CREATE TABLE IF NOT EXISTS site_state (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at INTEGER NOT NULL
+);

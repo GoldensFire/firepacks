@@ -73,9 +73,12 @@ export async function accountId() {
  * Один запрос к базе наверху. Отказ возвращается строкой, а не бросается:
  * решать, ждать его или сдаваться, будет позвавший (см. IMPORT_BUSY).
  *
+ * Наружу он торчит ради плашки технических работ: она ставит и снимает свою
+ * строку тем же способом, что и заливка (см. scripts/deploy/works.js).
+ *
  * @returns {Promise<string|null>} null — получилось; строка — чем ругались
  */
-async function askDatabase(sql) {
+export async function askDatabase(sql) {
 	const account = await accountId();
 
 	let response;

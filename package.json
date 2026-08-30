@@ -24,7 +24,8 @@
     "cf:migrate-auth": "node --no-warnings scripts/migrate-auth.js",
     "cf:dev": "node --no-warnings scripts/deploy-cf.js --local && wrangler dev",
     "cf:db": "node --no-warnings scripts/deploy-cf.js --db-only",
-    "deploy": "node --no-warnings scripts/deploy-cf.js"
+    "deploy": "node --no-warnings scripts/deploy-cf.js",
+    "deploy:logos": "node --no-warnings scripts/deploy-logos.js"
   },
   "engines": {
     "node": ">=22"

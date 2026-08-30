@@ -13,6 +13,18 @@ import { fileURLToPath } from 'node:url';
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const dataPath = path.join(root, 'cf', 'data');
 
+/**
+ * Склад готовых уменьшенных обложек. Он же `config.thumbsPath` дома и он же
+ * `thumbsPath` у полки (см. scripts/state/config.js) — папка одна на всех,
+ * а считается здесь заново нарочно: выкладка запускается и в GitHub Actions,
+ * где src/config.js с его ключами и настройками не нужен вовсе (та же причина,
+ * по которой ключи Cloudflare читает scripts/deploy/wrangler.js, а не config).
+ *
+ * Отсюда его берёт scripts/deploy-logos.js: всё, что лежит в этой папке,
+ * и есть то, что видно на сайте.
+ */
+export const thumbsPath = path.join(root, 'data', 'thumbs');
+
 export const local = process.argv.includes('--local');
 
 /**

@@ -22,6 +22,7 @@
 //   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, prints, durations, authors, copies, plagiarism, recalc
 //   node src/indexer.js --model=имя     разово взять другую модель Gemini
 //   node src/indexer.js --fallback      кончились суточные запросы — перейти на запасную модель
+//   node src/indexer.js --fallback=any  то же, но на любую другую, начиная с самой мощной
 //   node src/indexer.js --gemini-models показать доступные модели Gemini
 //   node src/indexer.js --gemini-usage  показать расход запросов за сегодня
 //   node src/indexer.js --pages=5       ограничить число страниц обсуждения
@@ -30,7 +31,7 @@
 //   node src/indexer.js --packs=12,34   работать только с этими паками (номера из адреса /pack/N)
 //   node src/indexer.js --authors=А,Б   работать только с паками этих авторов
 //   node src/indexer.js --fresh=3       только паки, выложенные за последние трое суток
-//   node src/indexer.js --tail          обойти не тему целиком, а её хвост по --fresh
+//   node src/indexer.js --tail          обойти не тему целиком, а её хвост: то, чего прошлый такой обход не читал
 //   node src/indexer.js --first=virgin  чем начинать очередь: fresh (свежие, по умолчанию),
 //                                       virgin (совсем неразобранные, потом самые давние),
 //                                       oldest (самые давние)
@@ -80,6 +81,7 @@
 //   queue.js      из чего складывается очередь шага и в каком она порядке
 //   store.js      заготовленные запросы: всё, что обход пишет о паке
 //   steps.js      расписание: имена шагов, кто кого кормит, кто кого ждёт
+//   tail.js       докуда ежечасный обход дочитал обсуждения в прошлый раз
 //   pipeline.js   drain(): полоса работы, у которой работа прибывает на ходу
 //   vk-scan.js    обход обсуждений
 //   parse.js      разбор архивов и логотипы
@@ -114,6 +116,10 @@ function printSummary() {
 	const errors = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'error'`).get().c;
 	const deadLinks = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'dead'`).get().c;
 	const gone = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'gone'`).get().c;
+	// Паки, которые наполовину и больше держатся на чужих ссылках: на сайте
+	// их нет, но в базе они есть и вернутся, если автор перезальёт пак
+	// с файлами внутри (см. recalcOffsite в src/indexer/recalc.js)
+	const offsite = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'offsite'`).get().c;
 	const waiting = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'new'`).get().c;
 	const withStats = db.prepare('SELECT COUNT(*) AS c FROM stats WHERE found = 1').get().c;
 	const withLogo = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE logo_state = 'ok'`).get().c;
@@ -132,7 +138,9 @@ function printSummary() {
 	console.log('');
 	console.log('=== Итого');
 	console.log(`Паков в базе: ${total} (разобрано ${parsed}, мёртвых ссылок ${deadLinks}, с ошибками ${errors}`
-		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''}${waiting > 0 ? `, ждут разбора ${waiting}` : ''})`);
+		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''}`
+		+ `${offsite > 0 ? `, на чужих ссылках ${offsite}` : ''}`
+		+ `${waiting > 0 ? `, ждут разбора ${waiting}` : ''})`);
 	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}. С описанием: ${described}. С предметом: ${withSubject}.`);
 
 	if (specials > 0) {

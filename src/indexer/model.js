@@ -9,7 +9,7 @@
 
 import { activeModel, hasGemini, useModel } from '../gemini/api.js';
 import { nextSpareModel, usage, usageLine } from '../models.js';
-import { fallback } from './options.js';
+import { fallback, fallbackAny } from './options.js';
 import { say } from './progress.js';
 
 /**
@@ -52,7 +52,7 @@ function switchModel(step, model) {
 		return true;
 	}
 
-	const next = nextSpareModel(model);
+	const next = nextSpareModel(model, { any: fallbackAny });
 
 	if (!next) {
 		return false;

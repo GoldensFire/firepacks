@@ -109,6 +109,44 @@ export async function askDatabase(sql) {
 }
 
 /**
+ * То же самое, но с ответом: один запрос к базе наверху, из которого нужны
+ * строки, а не «получилось или нет».
+ *
+ * Заливке такое не нужно вовсе — она только пишет, — а вот сверке нужно:
+ * чтобы узнать, чем наверху отличается от здешнего, надо это оттуда прочитать
+ * (см. scripts/deploy/drift.js).
+ *
+ * Отказ возвращается пустотой, а не бросается: сверка — дело необязательное,
+ * и валить из-за неё выкладку не за что.
+ *
+ * @returns {Promise<Array<object>|null>} строки или null — не вышло
+ */
+export async function readDatabase(sql) {
+	const account = await accountId();
+
+	try {
+		const response = await fetch(`${CLOUDFLARE_API}/accounts/${account}/d1/database/${databaseId()}/query`, {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ sql }),
+		});
+
+		const body = await response.json().catch(() => null);
+
+		if (!response.ok || !body?.success) {
+			return null;
+		}
+
+		return body.result?.[0]?.results ?? [];
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Отказы, которые проходят сами: чужая заливка (см. IMPORT_BUSY), обрыв сети
  * и «слишком часто» от самого Cloudflare. Всё остальное — наша ошибка в SQL,
  * и повторять её бессмысленно.

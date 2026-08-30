@@ -12,12 +12,13 @@ import { config } from '../config.js';
 import { db, parseVkDate } from '../db.js';
 import { readTopic as readTopicHtml, normalizeTopicUrl } from '../vk.js';
 import { readTopic as readTopicApi, readTopicSince, hasVkApi } from '../vkapi.js';
-import { freshDays, freshSince, maxPages, tail } from './options.js';
+import { freshSince, maxPages, tail } from './options.js';
 import { formatSpan, say, track } from './progress.js';
 import {
 	insertPackage, knownDocument, knownInComment, knownInTopic, markBack, markGone,
-	rebindDocument, refreshComment, refreshLink,
+	rebindComment, rebindDocument, refreshComment, refreshLink,
 } from './store.js';
+import { noteTailRead, tailReadUntil } from './tail.js';
 
 /**
  * Сверяет одно сообщение обсуждения с тем, что о нём уже записано.
@@ -80,6 +81,18 @@ function syncComment(comment, useApi, tally) {
 		});
 	} else {
 		for (const document of fresh) {
+			// Документ, который в базе уже есть, но записан за другим сообщением.
+			// Завести его второй раз нельзя (source_key неповторим), и до сих пор
+			// он молча пропускался — а это и есть перевыкладка: автор удалил своё
+			// сообщение и написал заново с тем же файлом. Запоминаем, где файл
+			// лежит теперь; решать, переезд это или один документ, честно
+			// висящий сразу в двух сообщениях, будет тот, кто прочитал тему
+			// целиком (см. missingComments)
+			if (knownDocument.get(document.key) !== undefined) {
+				tally.moved.set(document.key, comment);
+				continue;
+			}
+
 			const result = insertPackage.run(
 				document.key,
 				document.url,
@@ -190,6 +203,29 @@ function missingComments(topicUrl, seen, tally) {
 		}
 
 		const title = row.name ?? row.file_name ?? row.source_key;
+		// Только внутри своей темы: файл, всплывший в другом обсуждении, — это
+		// перевыкладка чужой рукой, и переселять туда строку вместе с оценками
+		// и отметками «сыграно» не за что
+		const found = tally.moved.get(row.source_key);
+		const now = found?.topicUrl === normalized ? found : undefined;
+
+		// Сообщения нет, а файл из него в теме есть — под другим номером. Это
+		// не удаление, а перевыкладка, и хоронить тут нечего: пак переезжает
+		// в новое сообщение вместе с его текстом и датой (см. rebindComment).
+		//
+		// Сомнений эта развилка не оставляет ровно потому, что спрашивают её
+		// после полного обхода. Один и тот же документ и вправду бывает
+		// приложен сразу к двум сообщениям — но тогда старое сообщение среди
+		// прочитанных есть, и до этого места мы просто не доходим
+		if (now !== undefined) {
+			tally.pending.push({
+				kind: 'moved',
+				apply: () => rebindComment.run(now.id, now.author, now.authorUrl, now.date,
+					now.ts ?? parseVkDate(now.date), now.text, row.id),
+				say: `пак перевыложен другим сообщением: «${title}» — ${row.vk_comment} -> ${now.id}`,
+			});
+			continue;
+		}
 
 		tally.pending.push({
 			kind: 'gone',
@@ -213,7 +249,7 @@ function missingComments(topicUrl, seen, tally) {
  */
 function applyPending(pending, known) {
 	if (pending.length === 0) {
-		return { replaced: 0, gone: 0 };
+		return { replaced: 0, gone: 0, moved: 0 };
 	}
 
 	const ceiling = Math.max(25, Math.round(known * 0.05));
@@ -222,10 +258,10 @@ function applyPending(pending, known) {
 		console.error(`Обход насчитал ${pending.length} пропавших и подменённых файлов при ${known} паках в базе — `
 			+ `это больше похоже на сломавшийся обход, чем на правки в обсуждении.`);
 		console.error('Ничего не меняю. Если так и есть на самом деле, повторите запуск: порог считается от размера базы.');
-		return { replaced: 0, gone: 0, refused: pending.length };
+		return { replaced: 0, gone: 0, moved: 0, refused: pending.length };
 	}
 
-	const counts = { replaced: 0, gone: 0 };
+	const counts = { replaced: 0, gone: 0, moved: 0 };
 
 	for (const change of pending) {
 		change.apply();
@@ -237,7 +273,8 @@ function applyPending(pending, known) {
 }
 
 /**
- * Насколько раньше отсечки свежести начинать читать хвост темы.
+ * Насколько раньше отсечки свежести начинать читать хвост темы, когда отметки
+ * «докуда дочитали» ещё нет.
  *
  * Отсечка считается от нынешнего мига (`--fresh=1` — сутки назад), а пак попадает
  * в тему тогда, когда его выложили. Между тем и другим лежат все обычные
@@ -248,23 +285,46 @@ function applyPending(pending, known) {
  */
 const TAIL_MARGIN_MS = 86_400_000;
 
+/**
+ * С какого мига читать хвост темы.
+ *
+ * Отметка «докуда дочитал прошлый такой обход» сильнее любого счёта от часов,
+ * и в этом весь смысл ежечасного обхода: читать надо то, чего ещё не читали,
+ * а не «последние двое суток» в тысячный раз. Пришёл обход через час — прочтёт
+ * час; не приходил трое суток, потому что расписание GitHub пропустило запуски, —
+ * прочтёт трое суток (см. src/indexer/tail.js).
+ *
+ * Отметки нет — считаем от часов, как раньше: так выглядит первый запуск
+ * и база, приехавшая с полки постарше.
+ *
+ * Со свежестью работы это не путать. Здесь решается, сколько сообщений читать;
+ * какие паки считать свежими для разбора и разметки, решает freshSince — и там
+ * сутки остаются сутками, даже если хвоста прочитан час. Иначе пак, найденный
+ * прошлым обходом и не доделанный им (кончилось время, кончилась квота),
+ * выпал бы из работы насовсем: сообщение с ним прочитано, а значит, второй раз
+ * прочитано не будет.
+ */
+const tailSince = () => tailReadUntil() ?? (freshSince - TAIL_MARGIN_MS);
+
 export async function scanVk() {
 	const useApi = hasVkApi();
+	const startedAt = Date.now();
 
 	// Хвостом читается тема тогда, когда об этом попросили ключом и когда есть
 	// от чего считать хвост. Без ключа ВК так нельзя вовсе: разбор страниц темы
 	// с конца читать не умеет
 	const tailOnly = tail && useApi && freshSince !== null;
+	const since = tailOnly ? tailSince() : null;
 	const readTopic = !useApi
 		? readTopicHtml
 		: tailOnly
-			? (url, options) => readTopicSince(url, freshSince - TAIL_MARGIN_MS, options)
+			? (url, options) => readTopicSince(url, since, options)
 			: readTopicApi;
 
 	say('vk', `обход обсуждений (${useApi ? 'через API' : 'разбором страниц, ключа нет'}`
-		+ `${tailOnly ? `, только хвост — сообщения за последние ${freshDays + 1} суток` : ''})`);
+		+ `${tailOnly ? `, только хвост — сообщения новее ${new Date(since).toLocaleString('ru-RU')}` : ''})`);
 
-	const tally = { added: 0, edited: 0, back: 0, pending: [] };
+	const tally = { added: 0, edited: 0, back: 0, pending: [], moved: new Map() };
 	const bar = track('vk');
 	let comments = 0;
 	let skipped = 0;
@@ -409,8 +469,22 @@ export async function scanVk() {
 	const incomplete = broken > 0 || gaps > 0 || tailOnly;
 
 	const applied = incomplete
-		? { replaced: 0, gone: 0, refused: tally.pending.length }
+		? { replaced: 0, gone: 0, moved: 0, refused: tally.pending.length }
 		: applyPending(tally.pending, known);
+
+	// Докуда дочитали. Двигает отметку только обход хвоста и только тогда, когда
+	// прошёл целиком: сорвавшийся на середине или перешагнувший кусок темы
+	// оставил бы за отметкой непрочитанное, и следующий обход туда уже не пошёл
+	// бы никогда (см. src/indexer/tail.js).
+	//
+	// Сообщения, которых не отдал сам ВК (`unreadable`), отметке не мешают.
+	// Такое сообщение не отдаётся и завтра, и послезавтра — держи мы из-за него
+	// отметку на месте, ежечасный обход перестал бы двигаться вовсе.
+	// Ограничение по числу окон (`--pages`) отметку тоже не двигает: такой обход
+	// прочитал сколько велено, а не сколько надо, и до отсечки мог не дойти
+	if (tailOnly && broken === 0 && gaps === 0 && maxPages === Infinity) {
+		noteTailRead(startedAt);
+	}
 
 	if (incomplete && tally.pending.length > 0) {
 		say('vk', `подмен и пропаж отложено: ${tally.pending.length}. `
@@ -422,6 +496,7 @@ export async function scanVk() {
 		+ `${unreadable ? ` Сообщений, которые ВК не отдал: ${unreadable}.` : ''}`
 		+ `${gaps ? ` Кусков темы, которые ВК не отдал: ${gaps}.` : ''}`);
 	say('vk', `изменений в прежних: файл заменён у ${applied.replaced}, `
+		+ `перевыложено другим сообщением ${applied.moved}, `
 		+ `переписано сообщений ${tally.edited}, убрано из обсуждения ${applied.gone}, вернулось ${tally.back}.`);
 
 	if (broken > 0) {

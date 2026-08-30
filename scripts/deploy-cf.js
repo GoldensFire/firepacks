@@ -31,6 +31,8 @@
 //   options.js    ключи выкладки и пути
 //   wrangler.js   запуск wrangler: ключи Cloudflare, разбор отказов, execute
 //   d1.js         заливка базы запросами через D1 REST, а не файлом
+//   drift.js      сверка: не разошлось ли лежащее наверху с тем, что база
+//                 считает отправленным
 //   site.js       по какому адресу сайт открывается наверху
 //   works.js      плашка «идут работы» и проверка живости после выкладки
 //   indexnow.js   пинг поисковикам о том, что изменилось
@@ -42,6 +44,7 @@ import { spawnSync } from 'node:child_process';
 import { dataPath, dbOnly, local, root, toShelf, whole } from './deploy/options.js';
 import { checkAuth, run, writeDevVars } from './deploy/wrangler.js';
 import { pour } from './deploy/d1.js';
+import { forgetDrifted } from './deploy/drift.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
 
@@ -98,6 +101,13 @@ async function main() {
 		console.log('\n───── Статика ─────');
 		run('node', ['--no-warnings', 'scripts/build-web.js']);
 	}
+
+	// До выгрузки, а не после: сверка убирает отметки «отправлено» у строк,
+	// которые наверху выглядят иначе, чем база про них думает, — и выгрузка
+	// следом отправляет их как изменившиеся. Порядок тут и есть весь смысл
+	// (см. scripts/deploy/drift.js).
+	console.log('\n───── Сверка с базой наверху ─────');
+	await forgetDrifted();
 
 	console.log('\n───── Выгрузка базы ─────');
 	run('node', ['--no-warnings', 'scripts/export-d1.js', ...(whole ? ['--full'] : [])]);

@@ -39,9 +39,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+// Отпечаток строки считается не здесь, а рядом: тем же счётом пользуется сверка
+// с базой наверху, и разойтись им нельзя (см. scripts/deploy/rowhash.js)
+import { digest, literal, rowHash, SKIP } from './deploy/rowhash.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dbPath = path.join(root, 'data', 'sibase.db');
@@ -72,32 +74,6 @@ const CHUNK_SIZE = 2 * 1024 * 1024;
 const full = process.argv.includes('--full');
 const commit = process.argv.includes('--commit');
 
-/**
- * Значение в виде литерала SQL. Строки экранируются удвоением апострофа —
- * так же, как это делает сам SQLite в .dump.
- */
-function literal(value) {
-	if (value === null || value === undefined) {
-		return 'NULL';
-	}
-
-	if (typeof value === 'number') {
-		return Number.isFinite(value) ? String(value) : 'NULL';
-	}
-
-	if (typeof value === 'bigint') {
-		return String(value);
-	}
-
-	if (value instanceof Uint8Array) {
-		return `x'${Buffer.from(value).toString('hex')}'`;
-	}
-
-	return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-/** Отпечаток строки. Шестнадцати знаков хватает: совпадение случайным не бывает. */
-const digest = text => crypto.createHash('sha1').update(text).digest('hex').slice(0, 16);
 
 /** Пишет куски по мере наполнения: держать в памяти весь дамп незачем. */
 class ChunkWriter {
@@ -258,13 +234,12 @@ const ifMissing = sql => sql
 function* rowsWithHash(db, table, key, skip = []) {
 	for (const row of db.prepare(`SELECT * FROM ${table} ORDER BY ${key}`).iterate()) {
 		const columns = Object.keys(row);
-		const meaningful = columns.filter(column => !skip.includes(column));
 
 		yield {
 			id: row[key],
 			columns,
 			row,
-			hash: digest(meaningful.map(column => literal(row[column])).join(' ')),
+			hash: rowHash(row, skip),
 		};
 	}
 }
@@ -457,15 +432,11 @@ function main() {
 
 	// ————— packages и stats —————
 
-	// plagiarism_at из отпечатка выброшен нарочно, и это не мелочь. Проверка
-	// на плагиат — полный пересмотр базы каждую ночь (см. checkPlagiarism
-	// в src/indexer/plagiarism.js), и отметку «проверен» получают все одиннадцать тысяч
-	// паков, даже когда приговор ни у кого не изменился. Входи она в отпечаток,
-	// каждая ночь увозила бы наверх всю библиотеку целиком — одиннадцать тысяч
-	// записанных строк из суточных ста тысяч бесплатного тарифа, ради одного
-	// числа, которого сайт не показывает. Наверх колонка при этом уезжает,
-	// просто не считается изменением — ровно как updated_at у статистики.
-	for (const [table, key, skip] of [['packages', 'id', ['plagiarism_at']], ['stats', 'package_id', ['updated_at']]]) {
+	// Какие колонки в отпечаток не входят — и почему их две, — сказано там же,
+	// где считается сам отпечаток (см. SKIP в scripts/deploy/rowhash.js).
+	for (const [table, key] of [['packages', 'id'], ['stats', 'package_id']]) {
+		const skip = SKIP[table] ?? [];
+
 		if (whole) {
 			writer.write(`${schemas[table].table};\n`);
 		} else {

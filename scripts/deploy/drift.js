@@ -95,9 +95,23 @@ export async function forgetDrifted() {
 		for (const row of upstairs) {
 			// Строки, которой здесь нет вовсе, сверка не касается: её сносит
 			// отдельный кусок выгрузки, и это другой разговор
-			if (here.has(row.id) && here.get(row.id) !== row.status) {
-				drifted.push(row.id);
+			if (!here.has(row.id) || here.get(row.id) === row.status) {
+				continue;
 			}
+
+			// Снятый с публикации пак расходится с домашним всегда, и это
+			// не расхождение, а устройство. Снимает пак хозяин сайта, кнопкой
+			// наверху (см. setPackHidden в cf/src/library/moderation.js); дома
+			// про это не знает никто и знать не должен — список снятых живёт
+			// только в D1. Заливка каждый раз переписывает такую строку домашней,
+			// то есть живой, а следом за ней идёт cf/hidden.sql и возвращает
+			// запрет по списку. Считать это дрейфом значит отправлять семь строк
+			// каждую выкладку и семь раз рассказывать про починенное.
+			if (row.status === 'hidden' && here.get(row.id) === 'ok') {
+				continue;
+			}
+
+			drifted.push(row.id);
 		}
 
 		if (drifted.length === 0) {

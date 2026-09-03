@@ -86,7 +86,7 @@ function wholePack(row, item) {
 function recalcTopics() {
 	const target = targetSql();
 	const rows = db.prepare(`SELECT p.id, p.topic_shares, p.question_count, p.theme_count, p.franchises,
-			p.genre_topic, p.form_topic, p.other_kinds
+			p.repeat_share, p.genre_topic, p.form_topic, p.other_kinds
 		FROM packages p WHERE p.topics_at IS NOT NULL${target.where}`).all(...target.params);
 	const update = db.prepare('UPDATE packages SET primary_topic = ?, primary_share = ?, franchise_top = ?, franchise_top_share = ? WHERE id = ?');
 
@@ -140,8 +140,27 @@ function recalcTopics() {
 		const shrunk = stored.filter(f => !isCategoryName(f.name));
 		const kept = shrunk.map(f => wholePack(row, f));
 
-		if (JSON.stringify(kept) !== JSON.stringify(stored)) {
-			rewriteFranchises.run(JSON.stringify(kept), repeatShare(kept, config.subjectPackShare), row.id);
+		// Доля повторов сверяется со списком всегда, а не только когда список
+		// сам изменился, — и это правка ошибки, а не осторожность.
+		//
+		// Считается она из franchises и хранится готовым числом (см. repeatShare
+		// в src/keys.js), но переписывалась только вместе с самим списком.
+		// Между тем разойтись они могут и без правки списка: правило счёта
+		// менялось — «область» перестала считаться повтором, появился порог
+		// собственного предмета пака, — а число, посчитанное по прежнему правилу,
+		// так и осталось лежать. На 3024 паках из 10 860 оно расходилось
+		// с franchises, у 687 было занижено, — и галочка «мало повторов»
+		// пропускала их как ровные. Пак 12223 («Вопросы SIGAME»): в базе 0,087,
+		// на деле 0,248 при пороге 0,1.
+		//
+		// Сравнение по числу, а не «пересчитать и записать всем подряд»: писать
+		// одиннадцать тысяч строк ради полутора тысяч изменившихся — это лишняя
+		// заливка в D1 при каждой выкладке (см. rowhash в scripts/deploy/).
+		const repeats = repeatShare(kept, config.subjectPackShare);
+		const drifted = Math.abs(repeats - (row.repeat_share ?? 0)) > 0.0005;
+
+		if (JSON.stringify(kept) !== JSON.stringify(stored) || drifted) {
+			rewriteFranchises.run(JSON.stringify(kept), repeats, row.id);
 
 			if (shrunk.length !== stored.length) {
 				cleaned++;

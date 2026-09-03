@@ -2,7 +2,18 @@
 // Позволяет достать content.xml из пака на 100 МБ, скачав пару десятков килобайт.
 
 import zlib from 'node:zlib';
+
 import { config } from './config.js';
+
+/**
+ * Сколько байт вообще разрешено получить из одной записи архива.
+ *
+ * Не «столько бывает», а «дальше это уже не пак»: самый большой настоящий
+ * content.xml в базе меньше на порядки. Потолок нужен затем, что вход сюда —
+ * чужой файл из обсуждения, а deflate сжимает нули с плотностью тысяча к одному
+ * (см. места вызова inflateRawSync ниже).
+ */
+const UNPACK_LIMIT = 64 * 1024 * 1024;
 
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_SIGNATURE = 0x02014b50;
@@ -402,7 +413,14 @@ export async function openRemoteZip(url) {
 			raw = Buffer.concat([raw, rest]);
 		}
 
-		return entry.method === 0 ? raw : zlib.inflateRawSync(raw);
+		// Потолок на развёрнутое — от зип-бомбы. Плотность сжатия у deflate
+		// доходит до тысячи к одному: десять мегабайт content.xml разворачиваются
+		// в десять гигабайт, и Node падает по памяти — а выложить такой пак
+		// в обсуждение может кто угодно (разбор от 02.09.2026). Шестьдесят
+		// четыре мегабайта — с большим запасом больше любого настоящего
+		// content.xml; переполнение возвращается обычной ошибкой и ловится там же,
+		// где ловятся прочие кривые архивы.
+		return entry.method === 0 ? raw : zlib.inflateRawSync(raw, { maxOutputLength: UNPACK_LIMIT });
 	};
 
 	/**
@@ -454,7 +472,8 @@ export async function openRemoteZip(url) {
 
 			if (entry.method !== 0) {
 				try {
-					data = zlib.inflateRawSync(raw, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+					data = zlib.inflateRawSync(raw,
+						{ finishFlush: zlib.constants.Z_SYNC_FLUSH, maxOutputLength: UNPACK_LIMIT });
 				} catch {
 					// Не поток deflate или обрыв в самом неудачном месте: у этой
 					// записи начала просто нет, и спрашивавший о ней не узнает

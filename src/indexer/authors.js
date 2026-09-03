@@ -39,6 +39,27 @@ import { say } from './progress.js';
  * Главным именем становится то написание, которым подписано больше паков:
  * это то имя, под которым человека знают. При равенстве — то, что короче
  * и раньше по алфавиту, чтобы выбор не плясал от запуска к запуску.
+ *
+ * ————— и отдельно: подпись с опечаткой —————
+ *
+ * Правило выше молчит про случай, который на сайте виден лучше всех прочих:
+ * человек однажды промахнулся мимо клавиши. «Magneticalsmit» и
+ * «MagneticalSmith» — это не два человека, а один и опечатка, но правилу
+ * «все паки с одного аккаунта» тут зацепиться не за что: большая подпись
+ * встречается у трёх аккаунтов (страница ВК записана и коротким именем,
+ * и номером, да ещё один пак выложил за компанию соавтор), а значит,
+ * сливаться не имеет права вовсе — и остаётся сама по себе. Маленькая же
+ * подпись живёт на одном аккаунте, сливается с чем придётся и становится
+ * отдельным человеком: в топе авторов один и тот же человек стоял двумя
+ * строками, и вторая вела не на его страницу, а в библиотеку отбором
+ * (/?author=Magneticalsmit при живой /author/magneticalsmith).
+ *
+ * Поэтому есть вторая, узкая мерка — та, что ниже названа nearDuplicate:
+ * подпись отдаётся другой подписи, если совпало всё сразу — обе встречаются
+ * на одном и том же аккаунте, различаются одной-единственной буквой, длиннее
+ * NEAR_MIN_LENGTH, и та, другая, крупнее. Мерка нарочно сделана такой узкой:
+ * похожие имена сами по себе не значат ничего («Anna» и «Anny» — двое разных),
+ * и решает здесь не похожесть, а похожесть ВМЕСТЕ с общей страницей ВК.
  */
 export function mergeAuthors() {
 	// Строка на «подпись под паком, выложенным с этого аккаунта». Мёртвые
@@ -79,7 +100,25 @@ export function mergeAuthors() {
 	/** Аккаунт -> подписи, которые нигде больше не встречаются. */
 	const byAccount = new Map();
 
+	/**
+	 * Аккаунт -> все подписи, встреченные на нём, включая те, что встречаются
+	 * и на других аккаунтах.
+	 *
+	 * Нужен он одной лишь мерке про опечатку: та ищет крупную подпись, с которой
+	 * маленькую роднит и написание, и страница ВК, — а крупная как раз обычно
+	 * и есть многоаккаунтная, то есть в byAccount её нет.
+	 */
+	const seenByAccount = new Map();
+
 	for (const item of signatures.values()) {
+		for (const account of item.accounts) {
+			if (!account.startsWith('?')) {
+				const all = seenByAccount.get(account) ?? [];
+				all.push(item);
+				seenByAccount.set(account, all);
+			}
+		}
+
 		if (item.accounts.size !== 1) {
 			continue;
 		}
@@ -115,6 +154,32 @@ export function mergeAuthors() {
 	let people = 0;
 	let marked = 0;
 
+	// ————— опечатки —————
+	//
+	// Первым проходом, до слияния по аккаунтам, и это важно: подпись, отданную
+	// сюда, второй проход трогать уже не должен, иначе он тут же перепишет
+	// её канон на свой (см. own ниже).
+	const aliased = new Set();
+	let typos = 0;
+
+	for (const [account, group] of byAccount) {
+		for (const item of group) {
+			// Крупнее, на том же аккаунте и всего на букву иначе. Многоаккаунтность
+			// второй подписи здесь не условие, а обычное положение дел: будь она
+			// тоже своя, обе и так уехали бы в один канон проходом ниже
+			const twin = (seenByAccount.get(account) ?? []).find(other => other !== item
+				&& other.packs > item.packs && nearDuplicate(item.key, other.key));
+
+			if (twin) {
+				write.run(twin.key, mainSpelling(twin), item.key);
+				aliased.add(item.key);
+				typos++;
+
+				say('authors', `${mainSpelling(twin)}: ${item.key} — опечатка`);
+			}
+		}
+	}
+
 	for (const [account, group] of byAccount) {
 		// Номер страницы ВК, если он вообще есть. Ставится и одиночной подписи —
 		// сливать у неё нечего, а человек за ней стоит такой же настоящий,
@@ -128,31 +193,96 @@ export function mergeAuthors() {
 			}
 		}
 
-		if (group.length < 2) {
+		// Подписи, уже отданные своей опечаткой другому человеку, из счёта вон:
+		// иначе слияние по аккаунту тут же увело бы их обратно
+		const own = group.filter(item => !aliased.has(item.key));
+
+		if (own.length < 2) {
 			continue;
 		}
 
 		// Главное написание — то, которым подписано больше паков
-		const best = group
+		const best = own
 			.flatMap(item => [...item.spellings.entries()].map(([name, packs]) => ({ name, packs })))
 			.sort((a, b) => b.packs - a.packs || a.name.length - b.name.length || a.name.localeCompare(b.name))[0];
 
-		const canonKey = group
+		const canonKey = own
 			.slice()
 			.sort((a, b) => b.packs - a.packs || a.key.length - b.key.length || a.key.localeCompare(b.key))[0].key;
 
-		for (const item of group) {
+		for (const item of own) {
 			write.run(canonKey, best.name, item.key);
 		}
 
 		people++;
-		merged += group.length - 1;
+		merged += own.length - 1;
 
-		say('authors', `${best.name}: ${group.map(item => item.key).join(', ')}`);
+		say('authors', `${best.name}: ${own.map(item => item.key).join(', ')}`);
 	}
 
 	say('authors', `подписей ${signatures.size}; сведено ${merged} лишних к ${people} авторам `
-		+ `(паки выложены с одной страницы ВК); с номером страницы ${marked}`);
+		+ `(паки выложены с одной страницы ВК); опечаток ${typos}; с номером страницы ${marked}`);
+}
+
+/** Написание, которым подписано больше паков: то имя, под которым человека знают. */
+function mainSpelling(item) {
+	return [...item.spellings.entries()]
+		.sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0]))[0][0];
+}
+
+/**
+ * Короче этого подписи на опечатки не проверяются вовсе.
+ *
+ * В четырёх буквах одна ошибка — это уже другое слово: «Anna» и «Anny» с одной
+ * страницы ВК бывают и двумя разными людьми, а «magneticalsmit»
+ * и «magneticalsmith» — нет. Порог тот же по духу, что и у поиска
+ * (см. allowedErrors в src/fuzzy.js): там короткие слова тоже не прощают ничего.
+ */
+const NEAR_MIN_LENGTH = 6;
+
+/**
+ * Одна ли это подпись с опечаткой: вставленная, потерянная, перепутанная буква
+ * или две соседние, поменянные местами.
+ *
+ * Считается не расстоянием Левенштейна, а разбором четырёх случаев подряд:
+ * их всего четыре, каждый читается строкой, а общая мера прощала бы ещё
+ * и вторую ошибку, если её попросить, — а её здесь просить нельзя.
+ */
+function nearDuplicate(one, two) {
+	if (Math.min(one.length, two.length) < NEAR_MIN_LENGTH || Math.abs(one.length - two.length) > 1) {
+		return false;
+	}
+
+	if (one === two) {
+		return false;
+	}
+
+	// Первое расхождение слева и первое справа. Если между ними не осталось
+	// ничего, кроме одной буквы (или одной пары), — это одна ошибка
+	let head = 0;
+
+	while (head < one.length && head < two.length && one[head] === two[head]) {
+		head++;
+	}
+
+	let tail = 0;
+
+	while (tail < one.length - head && tail < two.length - head
+		&& one[one.length - 1 - tail] === two[two.length - 1 - tail]) {
+		tail++;
+	}
+
+	const left = one.length - head - tail;
+	const right = two.length - head - tail;
+
+	// Лишняя или пропавшая буква — и подмена одной буквы на другую
+	if ((left <= 1 && right <= 1)) {
+		return true;
+	}
+
+	// Две соседние буквы наоборот: «поттре» вместо «поттер»
+	return left === 2 && right === 2
+		&& one[head] === two[head + 1] && one[head + 1] === two[head];
 }
 
 /**

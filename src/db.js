@@ -2,7 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
-import { jsonOrDefault, buildTagsKey, buildAuthorKey, splitAuthors, repeatShareSql, PACK_KEY_INDEX_SQL } from './keys.js';
+import {
+	jsonOrDefault, buildTagsKey, buildAuthorKey, splitAuthors, repeatShareSql,
+	PACK_KEY_INDEX_SQL, NAME_KEY_INDEX_SQL,
+} from './keys.js';
 
 // Ключи пака и чтение его полей лежат в keys.js: тот файл ничего не знает
 // про node:sqlite, и его читает двойник сайта на Cloudflare Workers (см. cf/).
@@ -668,6 +671,42 @@ db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_subject ON packages (status, 
 }
 
 db.exec(`CREATE INDEX IF NOT EXISTS ix_packages_pack_key ON packages (${PACK_KEY_INDEX_SQL})`);
+
+// Ключ названия — половина match_key до перевода строки, то есть тоже выражение,
+// а не колонка (см. NAME_KEY_SQL в src/keys.js). По нему опознаётся список
+// паков, принесённый файлом: «вот двести названий, что из них есть в базе».
+//
+// Указателя по этому выражению не было, и обходился он дорого. Названия
+// в запросе не сужали ничего: на каждую пачку из девяноста имён база брала
+// ix_packages_stolen, то есть обходила все паки со status = 'ok' — одиннадцать
+// тысяч строк — и на каждой считала SUBSTR. Один запрос с девятью тысячами
+// имён стоил около миллиона прочитанных строк D1: пять таких подряд, без входа
+// и без печенья, съедали суточный запас, на котором сайт уже ложился.
+//
+// Потолок на число названий теперь стоит там же, в matchList, а указатель
+// убирает и сам обход: пачка из девяноста имён — это девяносто заглядываний
+// вместо одиннадцати тысяч строк.
+//
+// Колонки в таком порядке — ключ первым, — потому что искать по нему; status
+// стоит второй, чтобы «пак ещё на сайте» решалось прямо в указателе, не поднимая
+// строки. Ровно так же устроен ix_packages_match_ok выше.
+//
+// Назван он в запросах прямо, через INDEXED BY, и по той же причине, что
+// и ix_packages_pack_key: дома по базе проходил ANALYZE и планировщик берёт
+// его сам, а в D1 таблицу никто не мерил, и там он без подсказки выбирает
+// что попало. Отсюда же сверка выражения с записанным в базе: запрос с INDEXED BY
+// на указатель по СТАРОМУ выражению не выполнится вовсе — «no query solution», —
+// и опознание списка просто перестало бы работать.
+{
+	const wanted = `CREATE INDEX ix_packages_name_key ON packages (${NAME_KEY_INDEX_SQL}, status)`;
+	const known = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ix_packages_name_key'`).get()?.sql;
+
+	if (known && known.replace(/\s+/g, ' ').trim() !== wanted.replace(/\s+/g, ' ').trim()) {
+		db.exec('DROP INDEX ix_packages_name_key');
+	}
+}
+
+db.exec(`CREATE INDEX IF NOT EXISTS ix_packages_name_key ON packages (${NAME_KEY_INDEX_SQL}, status)`);
 
 // Журнал WAL растёт, пока его никто не подрезает, а подрезать его мешает любой
 // открытый читатель — то есть сам сайт, который держит базу открытой сутками.

@@ -12,9 +12,6 @@
 import { config, LANGUAGE_KEYS, LANGUAGE_NAMES } from '../config.js';
 import { ask } from './api.js';
 
-/** Теги пака строкой для запроса — одинаково у обоих способов спросить. */
-export const packTags = pack => (pack.tags?.length > 0 ? `\nТеги: ${pack.tags.join(', ')}` : '');
-
 /**
  * Сколько знаков авторского описания уходит модели. Под паком в обсуждении
  * пишут что угодно — от одной строки до простыни с благодарностями, ссылками
@@ -310,7 +307,7 @@ export function cleanAudience(answer) {
  * Заодно тем же запросом спрашивается целевая аудитория пака (см. AUDIENCE_RULES):
  * вопрос задаётся по тому же списку тем, и отдельного запроса он не стоит.
  *
- * @param {{name: string, tags: string[], themes: Array<{name: string, sample: string}>}} pack
+ * @param {{name: string, themes: Array<{name: string, sample: string}>}} pack
  * @returns {Promise<{summary: string, audience: {from: number, to: number, male: number}|null}>}
  *   описание (пустая строка, если сказать нечего) и оценка аудитории
  */
@@ -331,7 +328,7 @@ export async function describePack(pack) {
 	const list = themes.length > 0
 		? `\nТемы:\n${themes.join('\n')}${cut}`
 		: '\n(тем в паке разобрать не удалось: суди по названию и тегам, а не найдёшь смысла — верни пустую строку)';
-	const prompt = `${SUMMARY_INSTRUCTION}\n\nПак: «${pack.name}»${packTags(pack)}${packAbout(pack)}${list}`;
+	const prompt = `${SUMMARY_INSTRUCTION}\n\nПак: «${pack.name}»${packAbout(pack)}${list}`;
 
 	const { value } = await ask(prompt, SUMMARY_SCHEMA);
 

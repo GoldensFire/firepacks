@@ -25,6 +25,21 @@ import { thumbName } from './logo.js';
 /** Сторона квадрата. Вдвое больше, чем на карточке: под экраны с удвоением точек. */
 const SIZE = 144;
 
+/**
+ * Крупная копия — та, что уезжает в чужое окно карточкой ссылки
+ * (см. previewName в src/logo.js). Размеров здесь два, и разойтись им нельзя:
+ * этот считается ради Discord и Telegram, где картинку меньше трёх сотен точек
+ * по стороне показывают значком сбоку от заголовка, если показывают вообще.
+ *
+ * Пятьсот двенадцать, а не тысяча: карточка ссылки шире четырёхсот точек
+ * нигде не бывает, а вес копии растёт квадратом стороны. При 74 выходит
+ * тридцать-сорок килобайт на пак — против сотен у оригинала.
+ */
+export const PREVIEW = { size: 512, quality: 74 };
+
+/** То же про обложку карточки: у AVIF своя шкала, и 50 на ней не «низкое». */
+const THUMB = { size: SIZE, quality: 50 };
+
 /** Сколько картинок уменьшать разом. Больше — только зря греется процессор. */
 const PARALLEL = 4;
 
@@ -83,37 +98,46 @@ const run = (file, args) => new Promise((resolve, reject) => {
 });
 
 /**
- * Команда уменьшения. У обоих одна задача — вписать картинку в квадрат SIZE×SIZE
- * по короткой стороне и обрезать лишнее, как это делает object-fit: cover
- * в стилях карточки.
+ * Команда уменьшения. У обоих одна задача — вписать картинку в квадрат
+ * size×size по короткой стороне и обрезать лишнее, как это делает
+ * object-fit: cover в стилях карточки.
  *
- * Формат записи оба выбирают по расширению target — а оно всегда .avif
- * (см. thumbName в src/logo.js), и обе половины проекта уменьшают одинаково.
+ * Формат записи оба выбирают по расширению target: .avif у обложки карточки,
+ * .jpg у крупной копии для чужих окон (см. thumbName и previewName
+ * в src/logo.js). Правило одно на обе половины проекта.
  *
- * Качество 50 выглядит низким только на слух: у AVIF своя шкала, и на квадрате
- * 144×144 разницы с webp на 82 не видно даже при увеличении вдвое — а весит
- * копия при этом на треть меньше.
+ * Качество приходит снаружи и у двух копий разное — шкалы у AVIF и JPEG
+ * не сходятся (см. PREVIEW и THUMB выше). У ffmpeg своя третья шкала, и на неё
+ * число переводится тут же: у него это -q:v от 1 до 31, где меньше значит
+ * лучше. Обложке карточки оно не назначается вовсе — AVIF ffmpeg пишет
+ * по-своему, и до сих пор это никому не мешало.
  *
  * Первый кадр берётся явно ([0] у ImageMagick): обложки бывают анимированными
  * гифками, и без этого на выходе оказывалась вся анимация целиком.
  */
-function command(source, target) {
+function command(source, target, { size, quality }) {
 	if (tool === 'magick' || tool === 'convert') {
 		return [tool, [
 			`${source}[0]`,
-			'-resize', `${SIZE}x${SIZE}^`,
+			'-resize', `${size}x${size}^`,
 			'-gravity', 'center',
-			'-extent', `${SIZE}x${SIZE}`,
-			'-quality', '50',
+			'-extent', `${size}x${size}`,
+			'-quality', String(quality),
+			// Ни цветового профиля, ни съёмочных полей: у крупной копии они
+			// весят больше, чем сама разница в качестве
+			'-strip',
 			target,
 		]];
 	}
+
+	const jpeg = target.toLowerCase().endsWith('.jpg');
 
 	return ['ffmpeg', [
 		'-v', 'error', '-y',
 		'-i', source,
 		'-frames:v', '1',
-		'-vf', `scale=${SIZE}:${SIZE}:force_original_aspect_ratio=increase,crop=${SIZE}:${SIZE}`,
+		'-vf', `scale=${size}:${size}:force_original_aspect_ratio=increase,crop=${size}:${size}`,
+		...(jpeg ? ['-q:v', String(Math.max(2, Math.round((100 - quality) / 3)))] : []),
 		target,
 	]];
 }
@@ -150,8 +174,11 @@ function schedule(task) {
  * что нашлось. Обе не смертельны, и обоим, кто сюда ходит, есть чем ответить.
  *
  * Одновременных запусков не больше PARALLEL, кто бы ни звал.
+ *
+ * @param shape сторона квадрата и качество: THUMB по умолчанию — обложка
+ *   карточки; PREVIEW — крупная копия для чужих окон.
  */
-export function resizeInto(source, target) {
+export function resizeInto(source, target, shape = THUMB) {
 	if (!findTool()) {
 		return Promise.resolve(false);
 	}
@@ -170,7 +197,7 @@ export function resizeInto(source, target) {
 		const temporary = path.join(directory, `.tmp-${process.pid}-${path.basename(target)}`);
 
 		try {
-			const [file, args] = command(source, temporary);
+			const [file, args] = command(source, temporary, shape);
 			await run(file, args);
 			fs.renameSync(temporary, target);
 			return true;

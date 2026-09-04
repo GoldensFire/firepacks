@@ -16,7 +16,7 @@ import { classifyThemes, collectMarks, marked } from './themes.js';
 import {
 	AUDIENCE_FIELDS, AUDIENCE_RULES, LANGUAGE_RULES, PACK_CONTEXT, SUMMARY_RULES,
 	SUMMARY_TRANSLATIONS, cleanAudience, cleanLanguage, cleanSummary, cleanTranslations,
-	describePack, packAbout, packTags,
+	describePack, packAbout,
 } from './summary.js';
 
 // ————— всё про пак одним запросом —————
@@ -100,12 +100,12 @@ const ANALYZE_SCHEMA = {
  * по-старому, двумя запросами. Это дороже ровно на тех паках, где случилось,
  * и ничего не теряет.
  *
- * @param {{name: string, tags: string[], themes: Array}} pack темы из listThemes
+ * @param {{name: string, themes: Array}} pack темы из listThemes
  * @returns {Promise<{marks: Map, summary: string, audience: object|null, queries: string[], split: boolean}>}
  */
 export async function analyzePack(pack) {
 	const themes = pack.themes ?? [];
-	const prompt = `${ANALYZE_INSTRUCTION}\n\nПак: «${pack.name ?? ''}»${packTags(pack)}${packAbout(pack)}${themeLines(themes)}`;
+	const prompt = `${ANALYZE_INSTRUCTION}\n\nПак: «${pack.name ?? ''}»${packAbout(pack)}${themeLines(themes)}`;
 
 	try {
 		const { value, queries } = await ask(prompt, ANALYZE_SCHEMA, { search: true });
@@ -223,7 +223,7 @@ const PACKS_SCHEMA = {
  * пачки, а в самом низу — по одному, обычным analyzePack. Разобранные в первом
  * же ответе паки при этом остаются разобранными и второй раз не спрашиваются.
  *
- * @param {Array<{name: string, tags: string[], themes: Array}>} packs
+ * @param {Array<{name: string, themes: Array}>} packs
  * @returns {Promise<Array>} по ответу на пак, в том же порядке; поля — как у analyzePack
  */
 export async function analyzePacks(packs) {
@@ -246,7 +246,7 @@ export async function analyzePacks(packs) {
 
 	const list = packs.map((pack, index) => {
 		const themes = pack.themes ?? [];
-		return `Пак ${index}: «${pack.name ?? ''}»${packTags(pack)}${packAbout(pack)}${themeLines(themes)}`;
+		return `Пак ${index}: «${pack.name ?? ''}»${packAbout(pack)}${themeLines(themes)}`;
 	});
 
 	let value = null;

@@ -6,12 +6,12 @@
 // свойство самого устройства обхода: разбор берёт паки, которые обход ВК ещё
 // только находит, статистика и модель — те, что разбор ещё только разбирает.
 
-import { DeadLinkError } from '../zip.js';
+import { DeadLinkError, StaleLinkError } from '../zip.js';
 import { hasVkApi, refreshDocumentUrl } from '../vkapi.js';
 import { limit, outOfTime } from './options.js';
 import { track } from './progress.js';
 import { isRunning, STEPS } from './steps.js';
-import { updateUrl } from './store.js';
+import { updateFailed, updateUrl } from './store.js';
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -113,9 +113,14 @@ export async function drain({ step, jobs, take, work, group = null, stop = () =>
 	}
 }
 
-/** Обрыв соединения — обычное дело на больших файлах, стоит просто попробовать ещё раз. */
+/**
+ * Обрыв соединения — обычное дело на больших файлах, стоит просто попробовать
+ * ещё раз. Сюда же и ответ 5xx от хранилища ВК: файл там на месте, отвечает
+ * сервер (см. StaleLinkError в src/zip.js).
+ */
 function isNetworkGlitch(error) {
-	return /terminated|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message);
+	return error instanceof StaleLinkError
+		|| /terminated|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message);
 }
 
 export async function retryNetwork(action, attempts = 3) {
@@ -141,12 +146,19 @@ export async function retryNetwork(action, attempts = 3) {
 /**
  * Ссылки ВК умирают, а полученные через API ещё и протухают по времени.
  * Если есть ключ — просим у ВК свежую ссылку и повторяем попытку один раз.
+ *
+ * Оба случая идут сюда: и «документ удалён» (тогда свежей ссылки не дадут
+ * и пак действительно мёртв), и «хранилище ответило 502» — а вот тут свежую
+ * ссылку дадут, и по ней всё откроется. Различать их снаружи нельзя: с виду
+ * это одна и та же страница ошибки (см. StaleLinkError в src/zip.js).
  */
 export async function withFreshUrl(row, action) {
 	try {
 		return await action(row.url);
 	} catch (error) {
-		if (!(error instanceof DeadLinkError) || !hasVkApi()) {
+		const refreshable = error instanceof DeadLinkError || error instanceof StaleLinkError;
+
+		if (!refreshable || !hasVkApi()) {
 			throw error;
 		}
 
@@ -159,4 +171,74 @@ export async function withFreshUrl(row, action) {
 		updateUrl.run(fresh, row.id);
 		return action(fresh);
 	}
+}
+
+/**
+ * Пак, до файла которого больше не добраться, — мёртвый пак.
+ *
+ * ————— зачем это понадобилось всем шагам сразу —————
+ *
+ * Мёртвую ссылку хоронил только разбор (см. parsePackages в parse.js), а он
+ * берёт лишь новые и перезалитые паки. Всё остальное — отпечатки вопросов,
+ * длительность медиа, спецвопросы, обложки — ходит в те же архивы по тем же
+ * ссылкам, натыкается на те же похороны и молча считает это своей неудачей:
+ * `failed++`, строка в лог, до свидания. Пак при этом остаётся «ok»
+ * и завтра встаёт в ту же очередь.
+ *
+ * Стоило это ровно того, о чём спрашивают, глядя на страницу обновления:
+ * «почему отпечатки не сняты у трёх паков». Не потому, что шаг их пропускает,
+ * а потому, что качать оттуда нечего с апреля — документы из ВК удалены, —
+ * а сказать об этом было некому. Очередь на три пака, вечная.
+ *
+ * Хоронится только настоящая смерть — DeadLinkError, то есть двухсотый ответ
+ * со страницей ошибки ВК. Ответ сервера (502 и прочие 5xx) сюда не попадает
+ * вовсе: он приходит отдельным видом и означает не смерть, а протухшую подпись
+ * (см. StaleLinkError в src/zip.js). До этого места он и не доходит — его
+ * повторяет retryNetwork, а ссылку обновляет withFreshUrl.
+ *
+ * Ссылка к этому мигу уже обновлялась: withFreshUrl просит у ВК свежую
+ * и повторяет попытку, и только если и по свежей приходит та же страница
+ * ошибки — документа в ВК больше нет. Просьба эта, впрочем, помогает редко:
+ * docs.getById чужие документы не отдаёт вовсе, ни с каким ключом.
+ *
+ * ————— и почему у похорон есть потолок —————
+ *
+ * Потому что «страница вместо файла» — это ещё и то, чем ВК отвечает, когда
+ * ему надоели наши запросы. Отличить «документ удалён» от «уйдите, вы частите»
+ * по ответу нельзя: и там и там двухсотый с HTML. Разница только в числе —
+ * авторы удаляют свои паки поодиночке, а отказ приходит сразу всем.
+ *
+ * Похороны поэтому идут, пока их немного. Перевалило за сотню за один запуск —
+ * значит, дело не в паках, и хоронить дальше нельзя: очередь у длительности
+ * медиа на тысячи строк, и один неудачный час мог бы вымести с сайта половину
+ * библиотеки. Оставшиеся при этом никуда не денутся — попадут в ту же очередь
+ * следующей ночью, когда ВК отойдёт.
+ *
+ * @returns {boolean} похоронен ли пак
+ */
+const BURY_LIMIT = 100;
+
+let buried = 0;
+let buryStopped = false;
+
+export function buryDeadLink(row, error) {
+	if (!(error instanceof DeadLinkError)) {
+		return false;
+	}
+
+	if (buried >= BURY_LIMIT) {
+		if (!buryStopped) {
+			buryStopped = true;
+			console.error(`[обход] мёртвых ссылок за один запуск больше ${BURY_LIMIT} — `
+				+ 'это не удалённые паки, а отказ ВК отдавать файлы. Больше никого не хороню; '
+				+ 'кто и правда удалён, дождётся следующей ночи.');
+		}
+
+		return false;
+	}
+
+	buried++;
+	updateFailed.run('dead', error.message, Date.now(), row.id);
+
+	return true;
 }

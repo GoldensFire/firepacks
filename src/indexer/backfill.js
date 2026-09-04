@@ -13,7 +13,7 @@ import { parseContentXml } from '../siq.js';
 import { PRINTS_VERSION } from '../plagiarism.js';
 import { measureMedia } from '../duration.js';
 import { force, jobs, reprints } from './options.js';
-import { drain, retryNetwork, withFreshUrl } from './pipeline.js';
+import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
 import { say } from './progress.js';
 import { queueNote, targetSql } from './queue.js';
 import { isChosen } from './steps.js';
@@ -111,6 +111,7 @@ export async function fetchPrints() {
 
 	let ok = 0;
 	let failed = 0;
+	let dead = 0;
 	let questions = 0;
 	// Паки, у которых после разбора стало другое число тем: у них сброшена
 	// разметка, и следующий шаг модели разберёт их заново (см. storeRounds в src/indexer/store.js)
@@ -144,7 +145,14 @@ export async function fetchPrints() {
 
 				ok++;
 			} catch (error) {
-				failed++;
+				// Документа в ВК больше нет: пак хоронится, а не переспрашивается
+				// каждую ночь до скончания века (см. buryDeadLink в pipeline.js)
+				if (buryDeadLink(row, error)) {
+					dead++;
+				} else {
+					failed++;
+				}
+
 				say('prints', `${row.name ?? row.file_name}: ${error.message}`);
 			}
 
@@ -154,7 +162,8 @@ export async function fetchPrints() {
 		},
 	});
 
-	say('prints', `сняты у ${ok} паков, вопросов в них ${questions}, ошибок ${failed}.`);
+	say('prints', `сняты у ${ok} паков, вопросов в них ${questions}`
+		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
 
 	if (retopic > 0) {
 		say('prints', `у ${retopic} паков стало другое число тем — обычно это темы без названия, `
@@ -226,6 +235,7 @@ export async function fetchDurations() {
 
 	let ok = 0;
 	let failed = 0;
+	let dead = 0;
 	let withMedia = 0;
 	let files = 0;
 
@@ -248,7 +258,12 @@ export async function fetchDurations() {
 						+ `самый длинный ${Math.round(media.longest)} с`);
 				}
 			} catch (error) {
-				failed++;
+				if (buryDeadLink(row, error)) {
+					dead++;
+				} else {
+					failed++;
+				}
+
 				say('durations', `${row.name ?? row.file_name}: ${error.message}`);
 			}
 
@@ -258,7 +273,8 @@ export async function fetchDurations() {
 		},
 	});
 
-	say('durations', `померено у ${ok} паков, из них с медиа ${withMedia}, файлов в них ${files}, ошибок ${failed}.`);
+	say('durations', `померено у ${ok} паков, из них с медиа ${withMedia}, файлов в них ${files}`
+		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
 }
 
 /**
@@ -285,6 +301,7 @@ export async function fetchSpecials() {
 
 	let ok = 0;
 	let failed = 0;
+	let dead = 0;
 	let found = 0;
 
 	await drain({
@@ -311,7 +328,12 @@ export async function fetchSpecials() {
 					found++;
 				}
 			} catch (error) {
-				failed++;
+				if (buryDeadLink(row, error)) {
+					dead++;
+				} else {
+					failed++;
+				}
+
 				say('specials', `${row.name ?? row.file_name}: ${error.message}`);
 			}
 
@@ -321,5 +343,6 @@ export async function fetchSpecials() {
 		},
 	});
 
-	say('specials', `посчитаны у ${ok} паков, из них со спецвопросами ${found}, ошибок ${failed}.`);
+	say('specials', `посчитаны у ${ok} паков, из них со спецвопросами ${found}`
+		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
 }

@@ -25,6 +25,7 @@ export const dataPath = path.join(root, 'cf', 'data');
  */
 export const thumbsPath = path.join(root, 'data', 'thumbs');
 
+
 export const local = process.argv.includes('--local');
 
 /**

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
 import {
-	jsonOrDefault, buildTagsKey, buildAuthorKey, splitAuthors, repeatShareSql,
+	jsonOrDefault, authorsOrVk, buildAuthorKey, buildMatchKey, splitAuthors, repeatShareSql,
 	PACK_KEY_INDEX_SQL, NAME_KEY_INDEX_SQL,
 } from './keys.js';
 
@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS packages (
 	authors TEXT NOT NULL DEFAULT '[]',
 	authors_key TEXT,
 	match_key TEXT,
+	-- Ярлыки из шапки пака. Больше не читаются и не пишутся: их проставляет
+	-- сам автор, чем попало и как попало, и ни отбор, ни разметка, ни модель
+	-- по ним не судят. Колонки оставлены как есть — со старыми значениями:
+	-- переписать их пустотой значило бы прогнать через D1 одиннадцать тысяч
+	-- строк ради поля, которого никто не спрашивает.
 	tags TEXT NOT NULL DEFAULT '[]',
 	tags_key TEXT,
 	author_difficulty INTEGER,
@@ -586,7 +591,12 @@ db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_topic ON packages (status, pr
 
 	db.exec(`CREATE INDEX IF NOT EXISTS ${langIndex} ON packages (status, language_ai, language)`);
 }
-db.exec('CREATE INDEX IF NOT EXISTS ix_packages_ok_tags ON packages (status, tags)');
+// Ярлыки из шапки пака (<tag> в content.xml) больше не читаются вовсе,
+// и указатель по ним не нужен: по нему не спрашивают ни отбор, ни колонка
+// фильтров, ни счёт (см. tags в CREATE TABLE выше). Снимается он здесь,
+// а не забывается молча: указатель, оставшийся от снятого правила, ездит
+// в D1 вместе со схемой и стоит места на каждой строке.
+db.exec('DROP INDEX IF EXISTS ix_packages_ok_tags');
 
 // Отбор «скрыть плагиат» в выдаче: по этому указателю он и работает. Метка стоит
 // у считаных паков, а спрашивают её у всей библиотеки на каждое нажатие галочки —
@@ -841,15 +851,24 @@ export function saveAuthors(packageId, authors) {
 	}
 }
 
-// Одноразовая дозаливка ключа тегов для уже разобранных паков
+// Дозаливка подписи автора тем, кто разобран до того, как её научились брать
+// из ВК (см. authorsOrVk в keys.js). Разбирать пак заново ради одного поля
+// незачем: имя и фамилия лежат в той же строке, в vk_author.
 {
-	const rows = db.prepare(`SELECT id, tags FROM packages WHERE tags_key IS NULL AND status = 'ok'`).all();
+	const nameless = db.prepare(`
+		SELECT id, name, vk_author FROM packages
+		WHERE (authors = '[]' OR authors IS NULL OR TRIM(COALESCE(authors_key, '')) = '')
+			AND TRIM(COALESCE(vk_author, '')) <> ''
+	`).all();
 
-	if (rows.length > 0) {
-		const update = db.prepare('UPDATE packages SET tags_key = ? WHERE id = ?');
+	if (nameless.length > 0) {
+		const update = db.prepare('UPDATE packages SET authors = ?, authors_key = ?, match_key = ? WHERE id = ?');
 
-		for (const row of rows) {
-			update.run(buildTagsKey(jsonOrDefault(row.tags, [])), row.id);
+		for (const row of nameless) {
+			const authors = authorsOrVk([], row.vk_author);
+
+			update.run(JSON.stringify(authors), authors.join(', '), buildMatchKey(row.name, authors), row.id);
+			saveAuthors(row.id, authors);
 		}
 	}
 }

@@ -9,8 +9,8 @@ import { settings } from './settings.js';
 // тот файл ничего не знает про папки и переменные окружения, и его может прочитать
 // Workers, где node:fs нет вовсе. Здесь они подмешиваются в config целиком,
 // поэтому обращаться к ним как раньше — config.minGamesForDifficulty.
-export * from './settings.js';
-export * from './names.js';
+export * from './settings.js';
+export * from './names.js';
 export * from './logo.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -101,6 +101,21 @@ export const config = {
 	 * обложки теперь одни и те же.
 	 */
 	thumbsPath: path.join(root, 'data', 'thumbs'),
+
+	/**
+	 * Склад крупных копий — тех, что уезжают в чужое окно карточкой ссылки
+	 * (см. previewName в src/logo.js и PREVIEW в src/thumbs.js).
+	 *
+	 * Отдельной папкой, а не рядом с обложками карточек: у них разное имя
+	 * только расширением, и в одной куче «511.avif» и «511.jpg» пришлось бы
+	 * разбирать по концу имени в трёх местах сразу — при сборке, при уборке
+	 * лишнего и при выкладке.
+	 *
+	 * На полку эта папка не ездит и ездить не должна: собирается она при
+	 * выкладке сайта, то есть только дома, и ночному обходу не нужна вовсе —
+	 * он выкладывает базу, а не страницы (см. scripts/build-web.js).
+	 */
+	previewsPath: path.join(root, 'data', 'previews'),
 
 	/**
 	 * Значок сайта. Лежит в корне проекта, а не в web.

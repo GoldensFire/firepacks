@@ -96,6 +96,7 @@
 
 import { db } from './db.js';
 import { hasGemini, activeModel, listModels } from './gemini/api.js';
+import { discoverModels } from './gemini/discover.js';
 import { usageLine, usageReport } from './models.js';
 import { has, serial } from './indexer/options.js';
 import { report, TAGS, Track, track, tracks } from './indexer/progress.js';
@@ -227,6 +228,15 @@ const RUNNERS = {
 	plagiarism: checkPlagiarism,
 	recalc: recalcAll,
 };
+
+// Не вышла ли у ключа модель новее тех, что в списке. Спрашивается раз в сутки
+// и квоты не тратит: ListModels — метаданные, а не запрос к модели
+// (см. discoverModels в src/gemini/discover.js). Стоит до самих шагов, чтобы
+// найденное было видно и в очереди «переспросить размеченное послабее»,
+// и на странице обновления, — а не со следующего запуска.
+for (const found of await discoverModels()) {
+	console.log(`У ключа появилась модель ${found} — вписал её в список разметчиков.`);
+}
 
 const steps = selectedSteps();
 

@@ -647,7 +647,6 @@ export function parseContentXml(buffer, mediaSizes = null) {
 		logo: attributes.logo ? attributes.logo.replace(/^@/, '') : null,
 		authorDifficulty: Number.isFinite(difficulty) ? difficulty : null,
 		authors: collectTexts(header, 'author'),
-		tags: collectTexts(header, 'tag'),
 		rounds,
 		roundCount: rounds.length,
 		themeCount: rounds.reduce((sum, round) => sum + round.themes.length, 0),

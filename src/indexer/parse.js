@@ -12,13 +12,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import { db, buildMatchKey, buildTagsKey, saveAuthors } from '../db.js';
+import { db, authorsOrVk, buildMatchKey, saveAuthors } from '../db.js';
 import { openRemoteZip, DeadLinkError } from '../zip.js';
 import { parseContentXml } from '../siq.js';
 import { ensureThumb } from '../thumbs.js';
 import { thumbName } from '../logo.js';
 import { force, jobs, reparse, retryFailed } from './options.js';
-import { drain, retryNetwork, withFreshUrl } from './pipeline.js';
+import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
 import { say } from './progress.js';
 import { NEWEST_FIRST, queueNote, targetSql } from './queue.js';
 import { clearRecheck, storePrints, updateFailed, updateLogo, updateParsed } from './store.js';
@@ -109,7 +109,7 @@ export async function parsePackages() {
 	// Разбор идёт с самых свежих (см. NEWEST_FIRST в src/indexer/queue.js): очередь длинная, ночь конечная,
 	// и недоделанным должно остаться позавчерашнее, а не сегодняшнее
 	const pending = db.prepare(`
-		SELECT p.id, p.url, p.file_name, p.source_key, p.status FROM packages p
+		SELECT p.id, p.url, p.file_name, p.source_key, p.status, p.vk_author FROM packages p
 		WHERE (p.status IN (${placeholders}) OR p.recheck = 1)${target.where}
 		ORDER BY ${NEWEST_FIRST}
 	`);
@@ -156,13 +156,15 @@ export async function parsePackages() {
 
 				const { parsed, logo, totalSize } = result;
 
+				// Не подписался в файле — подписывается страницей ВК, с которой
+				// пак выложен (см. authorsOrVk выше)
+				const authors = authorsOrVk(parsed.authors, row.vk_author);
+
 				updateParsed.run(
 					parsed.name,
-					JSON.stringify(parsed.authors),
-					parsed.authors.join(', '),
-					buildMatchKey(parsed.name, parsed.authors),
-					JSON.stringify(parsed.tags),
-					buildTagsKey(parsed.tags),
+					JSON.stringify(authors),
+					authors.join(', '),
+					buildMatchKey(parsed.name, authors),
 					parsed.authorDifficulty,
 					parsed.language,
 					parsed.date,
@@ -185,7 +187,7 @@ export async function parsePackages() {
 					row.id,
 				);
 
-				saveAuthors(row.id, parsed.authors);
+				saveAuthors(row.id, authors);
 
 				// Отпечатки вопросов — здесь же, из того же разбора. Отдельный шаг
 				// prints нужен только тем пакам, что разобраны до его появления:
@@ -279,6 +281,7 @@ export async function fetchLogos() {
 	let ok = 0;
 	let none = 0;
 	let failed = 0;
+	let dead = 0;
 
 	await drain({
 		step: 'logos',
@@ -306,8 +309,13 @@ export async function fetchLogos() {
 					none++;
 				}
 			} catch (error) {
-				failed++;
-				updateLogo.run(null, 'error', row.id);
+				if (buryDeadLink(row, error)) {
+					dead++;
+				} else {
+					failed++;
+					updateLogo.run(null, 'error', row.id);
+				}
+
 				say('logos', `${row.name ?? row.file_name}: ${error.message}`);
 			}
 
@@ -317,5 +325,6 @@ export async function fetchLogos() {
 		},
 	});
 
-	say('logos', `скачано ${ok}, в паке нет ${none}, ошибок ${failed}.`);
+	say('logos', `скачано ${ok}, в паке нет ${none}`
+		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
 }

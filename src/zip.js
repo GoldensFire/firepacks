@@ -36,6 +36,48 @@ export class DeadLinkError extends Error {
 	}
 }
 
+/**
+ * Хранилище ВК ответило ошибкой сервера: подписанная ссылка протухла.
+ *
+ * ————— чем это отличается от мёртвой ссылки и почему различать обязательно —————
+ *
+ * Внешне ничем: и там и там вместо файла приезжает страница с HTML, и до сих
+ * пор разбор смотрел ровно на это — «content-type: text/html» значило «документ
+ * удалён». Разница в коде ответа, и она решающая.
+ *
+ * Удалённый документ ВК отдаёт двухсотым с HTML своей страницы ошибки — это
+ * и вправду насовсем. А вот протухшая подпись выглядит иначе: vk.com честно
+ * переправляет на psv4.userapi.com, и уже оттуда приходит 502 с той же самой
+ * страницей ошибки. Файл при этом на месте и прекрасно открывается — по свежей
+ * ссылке, которую ВК выдаёт по первому запросу (см. refreshDocumentUrl).
+ *
+ * Пока эти два случая были одним, второй лечиться не мог вовсе. Свежую ссылку
+ * просит только withFreshUrl и только на мёртвой ссылке — то есть просил и здесь,
+ * — но пак при этом уже был объявлен мёртвым: разбор ставил ему status='dead'
+ * и убирал с сайта живой пак. Так стояло с паком 2291 («39. Офицеры»): отпечатки
+ * вопросов у него не снимались с апреля, версия свёртки осталась первой, а сам
+ * файл всё это время лежал в теме и открывался.
+ *
+ * Поэтому 5xx (и 429 — «слишком часто») теперь свой случай: ссылку обновить,
+ * попытку повторить, а пак не хоронить (см. withFreshUrl и retryNetwork
+ * в src/indexer/pipeline.js).
+ */
+export class StaleLinkError extends Error {
+	constructor(status) {
+		super(`хранилище ВК ответило ${status}: ссылка протухла`);
+		this.name = 'StaleLinkError';
+		this.status = status;
+	}
+}
+
+/**
+ * Ответ, по которому судить о самом файле нельзя: виноват не он, а сервер
+ * или наша частота обращений. Проверяется раньше content-type нарочно —
+ * страница ошибки приезжает с тем же «text/html», что и «документ удалён»
+ * (см. StaleLinkError).
+ */
+const serverHiccup = status => status >= 500 || status === 429;
+
 async function fetchRange(url, from, to) {
 	const response = await fetch(url, {
 		headers: {
@@ -44,6 +86,10 @@ async function fetchRange(url, from, to) {
 		},
 		signal: AbortSignal.timeout(config.rangeTimeout),
 	});
+
+	if (serverHiccup(response.status)) {
+		throw new StaleLinkError(response.status);
+	}
 
 	if (response.status !== 206 && response.status !== 200) {
 		throw new Error(`HTTP ${response.status} при чтении ${from}-${to}`);
@@ -219,6 +265,10 @@ async function fetchTail(url, length) {
 		headers: { 'User-Agent': config.userAgent, Range: `bytes=-${length}` },
 	});
 
+	if (serverHiccup(response.status)) {
+		throw new StaleLinkError(response.status);
+	}
+
 	if ((response.headers.get('content-type') ?? '').startsWith('text/html')) {
 		throw new DeadLinkError();
 	}
@@ -250,6 +300,10 @@ export async function getRemoteSize(url) {
 	const response = await fetch(url, {
 		headers: { 'User-Agent': config.userAgent, Range: 'bytes=0-0' },
 	});
+
+	if (serverHiccup(response.status)) {
+		throw new StaleLinkError(response.status);
+	}
 
 	if ((response.headers.get('content-type') ?? '').startsWith('text/html')) {
 		throw new DeadLinkError();

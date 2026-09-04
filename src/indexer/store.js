@@ -129,7 +129,7 @@ export const markBack = db.prepare(`UPDATE packages SET status = 'new', error = 
 
 export const updateParsed = db.prepare(`
 	UPDATE packages SET
-		name = ?, authors = ?, authors_key = ?, match_key = ?, tags = ?, tags_key = ?, author_difficulty = ?,
+		name = ?, authors = ?, authors_key = ?, match_key = ?, author_difficulty = ?,
 		language = ?, pack_date = ?, pack_id = ?, size = ?, question_count = ?, round_count = ?,
 		theme_count = ?, special_count = ?, special_stat = ?, content_stat = ?, rounds = ?,
 		media_own = ?, media_offsite = ?, logo_file = ?, logo_state = ?,

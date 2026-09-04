@@ -17,6 +17,7 @@ data/sibase.db-shm
 data/sibase.db-wal
 data/logos/
 data/thumbs/
+data/previews/
 data/state.tgz
 data/state-stage/
 
@@ -39,8 +40,9 @@ cf/data/
 .wrangler/
 
 # Папка обложек маленького Worker'а: её собирает scripts/deploy-logos.js
-# из data/thumbs перед самой выкладкой. Сам конфиг рядом (cf/logos/wrangler.jsonc)
-# в репозитории есть и быть обязан — им и живёт ночная отправка обложек.
+# из data/thumbs и data/previews перед самой выкладкой. А вот конфиг рядом
+# (cf/logos/wrangler.jsonc) и его код (cf/logos/src/) в репозитории есть
+# и быть обязаны — ими и живёт ночная отправка обложек.
 cf/logos/public/
 
 # ————— Сайт. Его здесь нет и быть не должно —————

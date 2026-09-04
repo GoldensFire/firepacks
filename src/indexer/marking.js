@@ -13,7 +13,7 @@
 import {
 	config, TOPICS_VERSION, OTHER_KINDS, GENRES, FORMS, ORIGINS, decadeName,
 } from '../config.js';
-import { db, jsonOrDefault, normalizeRounds, repeatShare } from '../db.js';
+import { db, normalizeRounds, repeatShare } from '../db.js';
 import { activeModel, tokensLine } from '../gemini/api.js';
 import { analyzePacks } from '../gemini/analyze.js';
 import { classifyThemes } from '../gemini/themes.js';
@@ -269,7 +269,7 @@ export async function refreshSummaries() {
 	const target = targetSql();
 	const priority = priorityOrderSql('summary');
 	const pending = db.prepare(`
-		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text, p.language FROM packages p
+		SELECT p.id, p.name, p.rounds, p.comment_text, p.language FROM packages p
 		WHERE p.status = 'ok' ${condition}${target.where}
 		ORDER BY ${priority.order}
 	`);
@@ -296,7 +296,6 @@ export async function refreshSummaries() {
 			try {
 				const { summary, translations, audience, language } = await describePack({
 					name: row.name ?? '',
-					tags: jsonOrDefault(row.tags, []),
 					about: row.comment_text ?? '',
 					themes,
 				});
@@ -445,7 +444,7 @@ export async function refreshAnalysis() {
 	// истиной: в описании бывает «чистое аниме» у пака, где треть тем про игры
 	// (см. PACK_CONTEXT в src/gemini/summary.js)
 	const pending = db.prepare(`
-		SELECT p.id, p.name, p.tags, p.rounds, p.comment_text, p.language FROM packages p
+		SELECT p.id, p.name, p.rounds, p.comment_text, p.language FROM packages p
 		WHERE p.status = 'ok' AND (${needTopics} OR ${needSummary})${target.where}
 		ORDER BY ${priority.order}
 	`);
@@ -486,7 +485,6 @@ export async function refreshAnalysis() {
 			try {
 				const answers = await analyzePacks(packs.map(pack => ({
 					name: pack.row.name ?? '',
-					tags: jsonOrDefault(pack.row.tags, []),
 					about: pack.row.comment_text ?? '',
 					themes: pack.themes,
 				})));
